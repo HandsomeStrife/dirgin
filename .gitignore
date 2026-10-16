@@ -1,0 +1,96 @@
+# ============================================================================
+# dirgin — PUBLIC repo. Default-deny whitelist.
+#
+# This repository contains ONLY our own original port source, tooling and
+# research notes. It MUST NOT contain Square Enix game data or anything derived
+# mechanically from the game binary. Policy: ignore everything, re-include only
+# our source/doc file types, then re-exclude generated/derived/build trees and
+# third-party content that the whitelist would otherwise sweep back in.
+#
+# Build this port against your own legally-owned copy of the game disc.
+# ============================================================================
+
+# 1) Ignore everything by default.
+*
+# 2) ...but descend into directories so whitelisted files are reachable.
+!*/
+
+# 3) Re-include our own source + documentation file types only.
+!*.c
+!*.h
+!*.cpp
+!*.hpp
+!*.cc
+!*.py
+!*.md
+!*.java
+!*.cmake
+!*.vert
+!*.frag
+!*.glsl
+!*.comp
+!*.sh
+!Makefile
+!CMakeLists.txt
+!README*
+!LICENSE*
+!.gitignore
+
+# ----------------------------------------------------------------------------
+# 4) Re-exclude DERIVATIVES OF THE COPYRIGHTED GAME BINARY (never public):
+#    the Ghidra decompilation and the static-recompilation OUTPUT.
+#    (dir/** so these win over the file whitelist — last match wins.)
+#    NOTE: our hand-written recompiler/runtime/oracle SOURCE under port/recomp
+#    and port/oracle IS kept; only the generated output dirs are dropped.
+# ----------------------------------------------------------------------------
+analysis/**
+ghidra-proj/**
+elf/**
+**/gen/**
+**/generated/**
+**/generated_all/**
+eetu_*.c
+ee_funcs.c
+ee_funcs.h
+function_table.c
+
+# ----------------------------------------------------------------------------
+# 5) Re-exclude RAW GAME DATA (ISO rips, extracted assets, captures).
+# ----------------------------------------------------------------------------
+extract/**
+downloads-ref/**
+native/assets/models/out/**
+native/assets/models/doc_model/**
+native/movie/out/**
+
+# ----------------------------------------------------------------------------
+# 6) Re-exclude BUILD TREES + generated build files the whitelist re-admits
+#    (CMake emits Makefile / *.cmake / compiler_depend.ts into these).
+# ----------------------------------------------------------------------------
+**/build/**
+**/build_verify/**
+**/cmake-build-*/**
+**/CMakeFiles/**
+**/Testing/**
+**/obj/**
+**/out/**
+**/__pycache__/**
+cmake_install.cmake
+CTestTestfile.cmake
+
+# ----------------------------------------------------------------------------
+# 7) Re-exclude THIRD-PARTY content (not ours to redistribute):
+#    a clone of the community DoC-Research wiki.
+# ----------------------------------------------------------------------------
+notes/doc-research-wiki/**
+
+# ----------------------------------------------------------------------------
+# 8) Loose build artifacts / scratch (defensive).
+# ----------------------------------------------------------------------------
+*.o
+*.d
+*.a
+*.so
+*.pyc
+*.log
+*.err
