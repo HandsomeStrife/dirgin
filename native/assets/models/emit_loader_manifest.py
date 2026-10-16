@@ -39,15 +39,47 @@ resolve to that slot, so the C test is self-checking against this baked ground t
 
   python3 -I emit_loader_manifest.py <chunk.bin> <pf.json> -o <manifest>
 """
-import sys, os, json, argparse
+import sys, os, json, argparse, subprocess
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from export_bmd_textured import find_bmd_payload, decode_packets
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+DEF_DTEX = os.path.normpath(os.path.join(HERE, "..", "textures", "dtex"))
+DEF_TEXDIR = "/srv/games/dirge-port/extract/_KEL/noPath"
+PSM_CT32 = 0  # the game's CLUTs are 32-bit RGBA (dtex_read_clut32) -> CPSM 0
 
 
 def chunk_id_from_path(p):
     b = os.path.basename(p)
     return b[:8] if len(b) >= 8 else os.path.splitext(b)[0]
+
+
+def tex_meta(dtex_bin, texdir, filecode):
+    """Decode a FileCode's TXD container via the dtex CLI --info and return the
+    largest image's sampler metadata, or None if unavailable. Keeps the C
+    loader dependency-free: Python bakes w/h/psm/cpsm/has_clut/has_texels.
+    Line: 'img <stem> <idx> <name> <w> <h> <psm> <clut_colors> <source>'."""
+    cont = os.path.join(texdir, "%s.bin" % filecode)
+    if not (dtex_bin and os.path.exists(dtex_bin) and os.path.exists(cont)):
+        return None
+    try:
+        r = subprocess.run([dtex_bin, "--info", cont],
+                           capture_output=True, text=True, timeout=60)
+    except Exception:
+        return None
+    best = None
+    for ln in r.stdout.splitlines():
+        t = ln.split()
+        if len(t) >= 8 and t[0] == "img":
+            w, h, psm, clut = int(t[4]), int(t[5]), int(t[6]), int(t[7])
+            if best is None or w * h > best[0] * best[1]:
+                best = (w, h, psm, clut)
+    if best is None:
+        return None
+    w, h, psm, clut = best
+    return dict(w=w, h=h, psm=psm, cpsm=PSM_CT32,
+                has_clut=1 if clut > 0 else 0, has_texels=1)
 
 
 def main():
@@ -56,6 +88,9 @@ def main():
     ap.add_argument("pf_json")
     ap.add_argument("--assignments")
     ap.add_argument("--heuristic", action="store_true")
+    ap.add_argument("--dtex", default=DEF_DTEX, help="dtex CLI for texture metadata")
+    ap.add_argument("--texdir", default=DEF_TEXDIR, help="dir holding <FileCode>.bin TXDs")
+    ap.add_argument("--no-meta", action="store_true", help="omit texture metadata")
     ap.add_argument("-o", "--out", required=True)
     a = ap.parse_args()
 
@@ -106,20 +141,36 @@ def main():
         if s >= 0:
             counts[s] += 1
 
+    # per-slot texture metadata (optional; keeps C dependency-free)
+    meta = [None] * len(slot_fc)
+    nmeta = 0
+    if not a.no_meta:
+        for s in range(len(slot_fc)):
+            meta[s] = tex_meta(a.dtex, a.texdir, slot_fc[s])
+            if meta[s]:
+                nmeta += 1
+
     os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
     with open(a.out, "w") as w:
-        w.write("# dirgin-room-binding v1\n")
+        w.write("# dirgin-room-binding v2\n")
         w.write("chunk %s\n" % chunk)
         w.write("slots %d\n" % len(slot_fc))
         for s in range(len(slot_fc)):
-            w.write("slot %d %s %d %s\n" % (s, slot_fc[s], counts[s], slot_src[s]))
+            # v2: slot <i> <fc> <count> <src> [<w> <h> <psm> <cpsm> <has_clut> <has_texels>]
+            line = "slot %d %s %d %s" % (s, slot_fc[s], counts[s], slot_src[s])
+            m = meta[s]
+            if m:
+                line += " %d %d %d %d %d %d" % (m["w"], m["h"], m["psm"],
+                                                m["cpsm"], m["has_clut"], m["has_texels"])
+            w.write(line + "\n")
         w.write("packets %d\n" % len(pkt_slot))
         for s in pkt_slot:
             w.write("%d\n" % s)
 
     matched = sum(counts)
-    print("wrote %s: chunk=%s slots=%d packets=%d matched=%d unbound=%d"
-          % (a.out, chunk, len(slot_fc), len(pkt_slot), matched, len(pkt_slot) - matched))
+    print("wrote %s: chunk=%s slots=%d packets=%d matched=%d unbound=%d meta=%d/%d"
+          % (a.out, chunk, len(slot_fc), len(pkt_slot), matched,
+             len(pkt_slot) - matched, nmeta, len(slot_fc)))
 
 
 if __name__ == "__main__":

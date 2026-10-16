@@ -131,9 +131,33 @@ static void test_real(const char *manifest_path)
     CHECK(matched == baked_matched, "real: matched %d != baked %d", matched, baked_matched);
     CHECK(unbound == b.unbound_count, "real: unbound %d != baked %d", unbound, b.unbound_count);
 
-    printf("real parity [%s]: %d packets, %d matched across %d textures, %d unbound%s\n",
+    /* texture-metadata parity: a representative packet of each slot must
+     * resolve to a descriptor carrying that slot's baked GS sampler fields. */
+    int meta_checked = 0;
+    if (b.have_meta) {
+        for (int s = 0; s < b.nslots; s++) {
+            int rep = -1;
+            for (int i = 0; i < b.npackets; i++) if (b.expect_slot[i] == s) { rep = i; break; }
+            if (rep < 0) continue;
+            DocTextureDesc desc;
+            doc_material_resolve_texture(&b.model, &b.ctx, b.draw_words[rep], &desc);
+            const DocRoomSlotMeta *m = &b.slot_meta[s];
+            CHECK(desc.slot == s, "real: meta slot %d resolved %d", s, (int)desc.slot);
+            CHECK(desc.width == m->width && desc.height == m->height,
+                  "real: slot %d (%s) desc %dx%d != baked %dx%d", s,
+                  doc_room_binding_slot_filecode(&b, s), desc.width, desc.height, m->width, m->height);
+            CHECK(desc.psm == m->psm, "real: slot %d psm %d != baked %d", s, desc.psm, m->psm);
+            CHECK(desc.cpsm == m->cpsm, "real: slot %d cpsm %d != baked %d", s, desc.cpsm, m->cpsm);
+            CHECK(desc.has_clut == (m->has_clut != 0), "real: slot %d has_clut mismatch", s);
+            CHECK(desc.has_texels == (m->has_texels != 0), "real: slot %d has_texels mismatch", s);
+            meta_checked++;
+        }
+    }
+
+    printf("real parity [%s]: %d packets, %d matched across %d textures, %d unbound%s (meta:%d/%d)\n",
            b.chunk, b.npackets, matched, b.nslots, unbound,
-           g_fail ? " (WITH FAILURES)" : " -- histogram matches recovered binding");
+           g_fail ? " (WITH FAILURES)" : " -- histogram matches recovered binding",
+           meta_checked, b.nslots);
 
     free(tally);
     doc_room_binding_free(&b);

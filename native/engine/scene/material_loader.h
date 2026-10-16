@@ -40,6 +40,18 @@
 extern "C" {
 #endif
 
+/* Per-slot GS sampler metadata, baked from the FileCode's TXD (dtex --info).
+ * Raw dimensions + PSM/CPSM, mirroring the DocTextureHandle identity fields a
+ * resolved DocTextureDesc carries. All zero if the manifest had no metadata. */
+typedef struct DocRoomSlotMeta {
+    uint16_t width;
+    uint16_t height;
+    uint8_t  psm;
+    uint8_t  cpsm;
+    uint8_t  has_clut;
+    uint8_t  has_texels;
+} DocRoomSlotMeta;
+
 typedef struct DocRoomBinding {
     DocMaterialModel   model;          /* pass to material.c as-is            */
     DocTextureContext  ctx;
@@ -47,12 +59,14 @@ typedef struct DocRoomBinding {
     int   nslots;                      /* distinct bound FileCodes            */
     int   npackets;                    /* decode-order packet count           */
     int   unbound_count;               /* packets with no binding (slot -1)   */
+    int   have_meta;                   /* 1 if texture metadata was baked     */
     char  chunk[9];
 
     /* public: slot -> FileCode, expected per-slot packet count, per-packet
      * draw word + expected slot (the baked ground truth the test asserts). */
     char      (*slot_filecode)[9];     /* [nslots]  "068fffNN"+NUL            */
     int        *slot_count;            /* [nslots]  expected resolved count   */
+    DocRoomSlotMeta *slot_meta;        /* [nslots]  GS sampler metadata       */
     uint32_t   *draw_words;            /* [npackets] decode order             */
     int32_t    *expect_slot;           /* [npackets] slot, or -1 = unbound    */
 

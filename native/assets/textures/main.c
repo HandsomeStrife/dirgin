@@ -49,14 +49,16 @@ static void stem_of(const char *path, char *out, size_t n) {
 
 int main(int argc, char **argv) {
     const char *outdir = ".";
+    int info_mode = 0;   /* --info: print machine-readable metadata, no PNGs */
     const char **inputs = (const char **)malloc(sizeof(char *) * (argc > 0 ? argc : 1));
     int ninput = 0;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-o") == 0 && i + 1 < argc) outdir = argv[++i];
+        else if (strcmp(argv[i], "--info") == 0) info_mode = 1;
         else inputs[ninput++] = argv[i];
     }
     if (ninput == 0) {
-        fprintf(stderr, "usage: %s <input.txd|.rfd|.bin ...> [-o OUTDIR]\n", argv[0]);
+        fprintf(stderr, "usage: %s [--info] <input.txd|.rfd|.bin ...> [-o OUTDIR]\n", argv[0]);
         return 2;
     }
 
@@ -74,16 +76,24 @@ int main(int argc, char **argv) {
         }
         for (int k = 0; k < set.count; k++) {
             dtex_image *im = &set.items[k];
-            char path[1024];
             char nm[17]; memcpy(nm, im->name, 16); nm[16] = 0;
             if (nm[0] == 0) snprintf(nm, sizeof(nm), "%d", k);
-            snprintf(path, sizeof(path), "%s/%s_%s.png", outdir, stem, nm);
-            int rc = dtex_write_png(path, im->rgba, im->width, im->height);
-            printf("%-10s %-9s %4dx%-4d %-8s %s%s -> %s\n",
-                   stem, im->source, im->width, im->height, psm_name(im->psm),
-                   im->clut_colors ? "clut" : "direct",
-                   im->deswizzled ? "/deswz" : "",
-                   rc == 0 ? path : "(write failed)");
+            if (info_mode) {
+                /* one stable, parseable line per image (bake step consumes it):
+                 *   img <stem> <idx> <name> <w> <h> <psm_dec> <clut_colors> <source> */
+                printf("img %s %d %s %d %d %d %d %s\n",
+                       stem, k, nm, im->width, im->height, im->psm,
+                       im->clut_colors, im->source);
+            } else {
+                char path[1024];
+                snprintf(path, sizeof(path), "%s/%s_%s.png", outdir, stem, nm);
+                int rc = dtex_write_png(path, im->rgba, im->width, im->height);
+                printf("%-10s %-9s %4dx%-4d %-8s %s%s -> %s\n",
+                       stem, im->source, im->width, im->height, psm_name(im->psm),
+                       im->clut_colors ? "clut" : "direct",
+                       im->deswizzled ? "/deswz" : "",
+                       rc == 0 ? path : "(write failed)");
+            }
             total++;
         }
         dtex_free_set(&set);

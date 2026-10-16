@@ -26,6 +26,14 @@
 static char              g_submesh_sentinel_byte;
 #define SUBMESH_SENTINEL ((DocSubmesh *)&g_submesh_sentinel_byte)
 
+/* Non-null, never-dereferenced source-pointer sentinels. The GS texel/CLUT EE
+ * source pointers are a below-seam VRAM-upload detail (material.h); the loader
+ * only records PRESENCE (has_texels/has_clut via these non-null markers), which
+ * is what doc_texture_describe surfaces. The real decoded buffers are supplied
+ * at GPU-upload time, below this seam. */
+static char              g_texels_sentinel_byte;
+static char              g_clut_sentinel_byte;
+
 #define DOC_MAX_GROUPS   128   /* draw word group field is 7 bits   */
 #define DOC_MAX_SUBMESH  512   /* draw word sub field is 9 bits     */
 
@@ -72,15 +80,28 @@ int doc_room_binding_load(const char *manifest_path, DocRoomBinding *out,
             out->nslots = nslots;
             out->slot_filecode = calloc((size_t)(nslots ? nslots : 1), sizeof *out->slot_filecode);
             out->slot_count    = calloc((size_t)(nslots ? nslots : 1), sizeof *out->slot_count);
-            if (!out->slot_filecode || !out->slot_count) { seterr(err, errlen, "oom slots"); goto done; }
+            out->slot_meta     = calloc((size_t)(nslots ? nslots : 1), sizeof *out->slot_meta);
+            if (!out->slot_filecode || !out->slot_count || !out->slot_meta) { seterr(err, errlen, "oom slots"); goto done; }
             continue;
         }
         if (nslots >= 0 && slots_read < nslots && strncmp(p, "slot ", 5) == 0) {
             int idx = -1, cnt = -1; char fc[16] = {0}, src[16] = {0};
-            if (sscanf(p, "slot %d %15s %d %15s", &idx, fc, &cnt, src) < 3) { seterr(err, errlen, "bad slot line"); goto done; }
+            int w = 0, h = 0, psm = 0, cpsm = 0, hc = 0, ht = 0;
+            int n = sscanf(p, "slot %d %15s %d %15s %d %d %d %d %d %d",
+                           &idx, fc, &cnt, src, &w, &h, &psm, &cpsm, &hc, &ht);
+            if (n < 3) { seterr(err, errlen, "bad slot line"); goto done; }
             if (idx != slots_read || idx < 0 || idx >= nslots || cnt < 0) { seterr(err, errlen, "slot index/count out of order at %d", idx); goto done; }
             strncpy(out->slot_filecode[idx], fc, 8); out->slot_filecode[idx][8] = '\0';
             out->slot_count[idx] = cnt;
+            if (n >= 10) {            /* v2 line carries texture metadata */
+                out->slot_meta[idx].width      = (uint16_t)w;
+                out->slot_meta[idx].height     = (uint16_t)h;
+                out->slot_meta[idx].psm        = (uint8_t)psm;
+                out->slot_meta[idx].cpsm       = (uint8_t)cpsm;
+                out->slot_meta[idx].has_clut   = (uint8_t)(hc != 0);
+                out->slot_meta[idx].has_texels = (uint8_t)(ht != 0);
+                out->have_meta = 1;
+            }
             slots_read++;
             continue;
         }
@@ -162,9 +183,21 @@ int doc_room_binding_load(const char *manifest_path, DocRoomBinding *out,
             seterr(err, errlen, "oom model"); goto done;
         }
 
-        /* texture context: one non-null handle per slot */
-        for (int s = 0; s < S; s++)
-            out->handle_ptrs[s] = &out->handles_store[s];
+        /* texture context: one non-null handle per slot, carrying the baked
+         * GS sampler identity (raw w/h, PSM/CPSM, texel/CLUT presence). */
+        for (int s = 0; s < S; s++) {
+            DocTextureHandle *hd = &out->handles_store[s];
+            const DocRoomSlotMeta *m = &out->slot_meta[s];
+            hd->width  = m->width;
+            hd->height = m->height;
+            hd->psm    = m->psm;
+            hd->cpsm   = m->cpsm;
+            hd->tbw    = (uint8_t)(m->width > 64 ? m->width / 64 : 1); /* VRAM detail, below seam */
+            hd->texels = m->has_texels ? (const void *)&g_texels_sentinel_byte : NULL;
+            hd->clut   = m->has_clut   ? (const void *)&g_clut_sentinel_byte   : NULL;
+            hd->override = NULL;
+            out->handle_ptrs[s] = hd;
+        }
         out->ctx.handles      = out->handle_ptrs;
         out->ctx.handle_count = S;
 
@@ -235,6 +268,7 @@ void doc_room_binding_free(DocRoomBinding *b)
     if (!b) return;
     free(b->slot_filecode);
     free(b->slot_count);
+    free(b->slot_meta);
     free(b->draw_words);
     free(b->expect_slot);
     free(b->groups_store);

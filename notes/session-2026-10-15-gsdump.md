@@ -530,3 +530,29 @@ multiple groups that share one material (draw-word sub field is 9 bits). Buckets
 - **NEXT (milestone 3):** wire libdtex so handles carry real w/h/psm/cpsm (not
   just slot identity) + a render diff vs out/bound_renders/; then the
   --heuristic confident-fill mode (assignments.json) for the free-camera.
+
+## cont. 9 — loader milestone 3: real texture metadata + heuristic fill (2026-10-16)
+
+Handles now carry REAL GS sampler identity (not just slot), and the free-camera
+back-face fill flows through the same loader.
+
+- Added `--info` to the dtex CLI (native/assets/textures/main.c): machine-readable
+  per-image metadata, no PNG writes. emit_loader_manifest.py (manifest v2) shells
+  out to it per slot, picks the largest image, and bakes w/h/psm/cpsm/has_clut/
+  has_texels into each slot line (keeps the C loader dependency-free). All 13
+  chunks: meta=N/N.
+- material_loader.c fills DocTextureHandle from the baked metadata (raw w/h,
+  PSM/CPSM, texel/CLUT presence via non-null sentinels — the real EE source ptrs
+  are below-seam VRAM-upload detail). New public DocRoomSlotMeta[] on the binding.
+- test_material_loader.c now also asserts a representative packet of each slot
+  resolves to a DocTextureDesc whose w/h/psm/cpsm/has_clut/has_texels == the baked
+  metadata. PASS across all 13 (e.g. 068fff26 = 256x512 PSMT4 clut). Mutation-
+  tested (corrupt handle width → desc-parity failures; revert → green).
+- Heuristic confident-fill validated: `emit_loader_manifest.py --assignments
+  out/z143_backface/assignments.json --heuristic` fills oracle-null packets with
+  the back-face heuristic FileCode (confident only). 068f0712 (a dark chunk):
+  48 matched/1318 unbound (oracle) -> 1366 matched/0 unbound (heuristic), all
+  resolving through material.c with metadata. This is the free-camera fill path.
+- **NEXT:** render diff vs out/bound_renders/ belongs with the GPU integration
+  (convergence capstone) — the loader's binding is now proven numerically for the
+  whole room (oracle) and fillable to 100% (heuristic). Loader subsystem COMPLETE.
