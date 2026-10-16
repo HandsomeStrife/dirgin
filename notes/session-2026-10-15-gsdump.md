@@ -606,3 +606,23 @@ assembled from raw decoded positions:
   are null), reading node+0x18 model + node+0x28 transform per room chunk. Analogous
   to the binding: needs a well-timed EE-RAM capture (Dan-dependent), OR reverse the
   scene-setup code that writes these nodes. Blocker #3 is NOT statically solvable.
+
+## cont. 12 — native env-geometry decoder in C (doc_env) (2026-10-16)
+
+Room geometry decode is now native, not Python-only — the geometry complement to
+the material loader (together: native room loading).
+
+- `native/assets/models/doc_env.{c,h}`: faithful C port of
+  export_bmd_textured.py:{find_bmd_payload, decode_packets, packet_tris}. Walks the
+  BMD VIF draw chain → per-packet {pos, uv, col, sel, prim, abe, is_list} with the
+  exact delta/ROW position accumulate, V3-16/V4-8/V2-16 unpacks, /16 & /4096 scales,
+  and the quad-group vs triangle-list connectivity. Dependency-free C99.
+- `env_decode.c` CLI + `env_fnv.py` oracle: both compute an FNV-1a 64 over the
+  canonical INTEGER representation (pre-scale pos_i/uv_i + col + counts, so no
+  float-width mismatch). **Vertex-exact parity: C == Python across all 13 chunks**
+  (068f0812 is empty, both agree npk=0). Mutation-tested (perturb the position
+  accumulate → hashes diverge; revert → match). `make env_decode` builds it.
+- Why it matters: with doc_env (geometry) + material_loader (binding) the engine
+  can load a room natively end-to-end; the Python exporter is no longer on the
+  critical path for room geometry. Next: a C room assembler that feeds doc_env
+  packets + the loader's binding to renderer_gl (the engine-driven room render).
