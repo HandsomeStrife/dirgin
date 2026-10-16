@@ -480,3 +480,34 @@ never-drawn ~48% is now built and numerically validated. Tool:
 
 Binding track now TRULY complete: 52.3% authoritative (all camera-visible) +
 validated cosmetic fill for the rest. Nothing further recoverable statically.
+
+## cont. 7 — room-binding LOADER milestone 1 (real textures into the engine) (2026-10-16)
+
+Closed the "material.c is fed only synthetic fixtures" gap for one chunk. The
+runtime material model isn't in the BMD (FORMAT.md §6), so the loader SYNTHESIZES
+a faithful DocMaterialModel from the recovered per-packet FileCode binding.
+
+- **Bake step** `native/assets/models/emit_loader_manifest.py`: reuses
+  export_bmd_textured.decode_packets (the one owner of packet order) + pf_*.json
+  → a line-based decode-order manifest (slots: FileCode+count; packets: slot/-1).
+  Keeps the fragile VIF enumeration in Python; C just reads the manifest (so the
+  dependency-free engine core stays dependency-free). Optional --heuristic fill
+  from assignments.json (confident only). Writes to out/z143_loader/ (gitignored).
+- **Loader** `native/engine/scene/material_loader.{c,h}` (added to doc_engine):
+  one DocMaterialGroup per bound FileCode (group g, selector g, single mode-0
+  layer tag==slot g → desc.slot==g); a trailing default group (mode-8 tag) for
+  unbound packets → DOC_TEX_SLOT_DEFAULT (honest untextured). Dense
+  ctx.handles[slot]. Per-packet draw_word (group<<10|sub) in decode order.
+  Asserts group<128 / submesh<512 (068f0112 needs no sharding).
+- **Validation** `native/engine/tests/test_material_loader.c`: feeds the
+  synthesized model through the UNMODIFIED material.c resolve chain
+  (doc_material_resolve_texture) for all 1803 packets; asserts resolved per-slot
+  histogram == baked counts (== z143_room_uvtriple_binding.json by_filecode),
+  per-packet resolved slot == baked slot, unbound == 196. **PASS: 1803 packets,
+  1607 matched across 12 textures, 196 unbound.** Plus an always-on synthetic
+  fixture (no game data) so CI stays green without the disc. Mutation-tested:
+  corrupting the tag → 1628 CHECK failures; revert → green. Full engine suite
+  11/11, zero warnings.
+- **NEXT (milestone 2):** generalize to all 13 chunks; add >511-packet sharding
+  (068f0212's 068fff26=576); wire libdtex so handles carry real w/h/psm (and a
+  render diff vs out/bound_renders/); then the --heuristic confident-fill mode.

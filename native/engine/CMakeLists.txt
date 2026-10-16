@@ -35,6 +35,7 @@ add_library(doc_engine STATIC
     scene/scene_graph.c
     scene/object_list.c
     scene/material.c
+    scene/material_loader.c
     scene/camera.c
     scene/light.c
     scene/actor.c
@@ -75,6 +76,13 @@ add_test(NAME test_engine_state COMMAND test_engine_state)
 add_executable(test_material tests/test_material.c)
 target_link_libraries(test_material PRIVATE doc_engine)
 add_test(NAME test_material COMMAND test_material)
+
+add_executable(test_material_loader tests/test_material_loader.c)
+target_link_libraries(test_material_loader PRIVATE doc_engine)
+# pass the baked 068f0112 manifest if it exists; the test skips the real-data
+# parity cleanly when it does not (no disc / bake not run).
+add_test(NAME test_material_loader COMMAND test_material_loader
+         ${CMAKE_CURRENT_SOURCE_DIR}/../assets/models/out/z143_loader/068f0112.manifest)
 
 add_executable(test_frame_loop tests/test_frame_loop.c)
 target_link_libraries(test_frame_loop PRIVATE doc_engine)
