@@ -111,10 +111,13 @@ int main(int argc, char **argv) {
     const char *mdir = "../assets/models/out/z143_loader";
     const char *xdir = "/srv/games/dirge-port/extract/_KEL/noPath";
     const char *outdir = "out";
+    float dist_override = -1.f, el_override = 10.f;   /* -dist N => interior turntable */
     for (int i=1;i<argc;i++){
         if (!strcmp(argv[i],"-m")&&i+1<argc) mdir=argv[++i];
         else if (!strcmp(argv[i],"-x")&&i+1<argc) xdir=argv[++i];
         else if (!strcmp(argv[i],"-o")&&i+1<argc) outdir=argv[++i];
+        else if (!strcmp(argv[i],"-dist")&&i+1<argc) dist_override=(float)atof(argv[++i]);
+        else if (!strcmp(argv[i],"-el")&&i+1<argc) el_override=(float)atof(argv[++i]);
     }
 
     Bucket bk[MAXFC]; int nb=0;
@@ -203,16 +206,23 @@ int main(int argc, char **argv) {
         ndraws++;
     }
 
-    struct { const char *name; float az,el,zoom; } views[]={
-        {"hero",40.f,18.f,1.25f},{"wide",62.f,26.f,1.55f},{"low",18.f,9.f,1.30f} };
+    struct View { char name[16]; float az,el,zoom; };
+    struct View ext[]={ {"hero",40.f,18.f,1.25f},{"wide",62.f,26.f,1.55f},{"low",18.f,9.f,1.30f} };
+    struct View pano[6];
+    struct View *views; int nviews;
+    if (dist_override>0){                        /* interior turntable: 6 azimuths */
+        for (int i=0;i<6;i++){ snprintf(pano[i].name,sizeof pano[i].name,"pano_%03d",i*60);
+            pano[i].az=(float)(i*60); pano[i].el=el_override; pano[i].zoom=dist_override; }
+        views=pano; nviews=6;
+    } else { views=ext; nviews=3; }
     int fail=0;
-    for (size_t i=0;i<sizeof views/sizeof views[0];i++){
+    for (int i=0;i<nviews;i++){
         p.angle_deg=views[i].az; p.elev_deg=views[i].el;
         unsigned char *img=NULL; char rerr[256]={0};
         int rc=rgl_render_scene(draws,ndraws,rmin,rmax,views[i].zoom,&p,&img,rerr,sizeof rerr);
         if (rc!=0||!img){ fprintf(stderr,"render %s failed: %s\n",views[i].name,rerr); fail=1; continue; }
         char path[1024]; snprintf(path,sizeof path,"%s/room_native_%s.png",outdir,views[i].name);
-        if (dtex_write_png(path,img,W,H)==0) printf("wrote %s (az=%.0f el=%.0f)\n",path,views[i].az,views[i].el);
+        if (dtex_write_png(path,img,W,H)==0) printf("wrote %s (az=%.0f el=%.0f dist=%.2f)\n",path,views[i].az,views[i].el,views[i].zoom);
         free(img);
     }
     free(draws);
