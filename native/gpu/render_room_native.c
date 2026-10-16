@@ -112,18 +112,21 @@ int main(int argc, char **argv) {
     const char *xdir = "/srv/games/dirge-port/extract/_KEL/noPath";
     const char *outdir = "out";
     float dist_override = -1.f, el_override = 10.f;   /* -dist N => interior turntable */
+    const char *only = NULL;                          /* -only CID => render one chunk */
     for (int i=1;i<argc;i++){
         if (!strcmp(argv[i],"-m")&&i+1<argc) mdir=argv[++i];
         else if (!strcmp(argv[i],"-x")&&i+1<argc) xdir=argv[++i];
         else if (!strcmp(argv[i],"-o")&&i+1<argc) outdir=argv[++i];
         else if (!strcmp(argv[i],"-dist")&&i+1<argc) dist_override=(float)atof(argv[++i]);
         else if (!strcmp(argv[i],"-el")&&i+1<argc) el_override=(float)atof(argv[++i]);
+        else if (!strcmp(argv[i],"-only")&&i+1<argc) only=argv[++i];
     }
 
     Bucket bk[MAXFC]; int nb=0;
     int tot_pk=0, tot_bound=0;
 
     for (int ci=0; ci<NCHUNK; ci++) {
+        if (only && strcmp(only,CHUNKS[ci])!=0) continue;
         char cpath[1024]; snprintf(cpath,sizeof cpath,"%s/%s.bin",xdir,CHUNKS[ci]);
         size_t sz; unsigned char *buf=read_file(cpath,&sz);
         if (!buf){ fprintf(stderr,"skip %s: no file\n",CHUNKS[ci]); continue; }
@@ -221,7 +224,7 @@ int main(int argc, char **argv) {
         unsigned char *img=NULL; char rerr[256]={0};
         int rc=rgl_render_scene(draws,ndraws,rmin,rmax,views[i].zoom,&p,&img,rerr,sizeof rerr);
         if (rc!=0||!img){ fprintf(stderr,"render %s failed: %s\n",views[i].name,rerr); fail=1; continue; }
-        char path[1024]; snprintf(path,sizeof path,"%s/room_native_%s.png",outdir,views[i].name);
+        char path[1024]; snprintf(path,sizeof path,"%s/%s_%s.png",outdir,only?only:"room_native",views[i].name);
         if (dtex_write_png(path,img,W,H)==0) printf("wrote %s (az=%.0f el=%.0f dist=%.2f)\n",path,views[i].az,views[i].el,views[i].zoom);
         free(img);
     }
