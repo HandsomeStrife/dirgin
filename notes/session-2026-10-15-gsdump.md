@@ -690,3 +690,11 @@ with many correspondences. Needs: GS per-vertex XYZ extraction (tools/gsdump has
 parser) + the existing UV-triple packet↔dump correspondence. If it works it places
 the room correctly from data in hand. UNVERIFIED — flagged as the next placement
 attempt before asking Dan for a scene-loaded EE capture.
+
+## cont. 14b — recompiler fix verified END-TO-END (2026-10-16)
+
+`make build-all` with the folded recompile.py: emitted 13083 functions into 44 TUs,
+**0 unimpl sites across 0 classes**, all 45 objects compiled -Wall -Wextra clean (3
+min). Before the fix the .kel_draw_section funcs (incl. MOD skin/skeleton) were empty
+stubs; now every function translates and compiles. (delay-slot/label overlaps: 52 —
+pre-existing, same as the oracle, not a regression.) Blocker #5 is fully closed.
