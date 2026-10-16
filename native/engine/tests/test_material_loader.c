@@ -143,11 +143,14 @@ int main(int argc, char **argv)
 {
     test_synthetic();
 
-    /* argv[1] overrides; otherwise try the default baked location. */
-    const char *manifest = (argc > 1)
-        ? argv[1]
-        : "../assets/models/out/z143_loader/068f0112.manifest";
-    test_real(manifest);
+    /* argv[1..] are manifests to parity-check; otherwise try the default baked
+     * location. Each runs or skips cleanly on its own. */
+    if (argc > 1) {
+        for (int i = 1; i < argc; i++)
+            test_real(argv[i]);
+    } else {
+        test_real("../assets/models/out/z143_loader/068f0112.manifest");
+    }
 
     if (g_fail) { printf("\n%d CHECK(s) FAILED\n", g_fail); return 1; }
     printf("\nall material_loader checks passed\n");

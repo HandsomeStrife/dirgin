@@ -79,10 +79,14 @@ add_test(NAME test_material COMMAND test_material)
 
 add_executable(test_material_loader tests/test_material_loader.c)
 target_link_libraries(test_material_loader PRIVATE doc_engine)
-# pass the baked 068f0112 manifest if it exists; the test skips the real-data
-# parity cleanly when it does not (no disc / bake not run).
-add_test(NAME test_material_loader COMMAND test_material_loader
-         ${CMAKE_CURRENT_SOURCE_DIR}/../assets/models/out/z143_loader/068f0112.manifest)
+# pass every z143 chunk manifest if baked (emit_loader_manifest.py); each runs
+# or skips cleanly on its own, so the test is green with or without the disc.
+set(_z143_loader_dir ${CMAKE_CURRENT_SOURCE_DIR}/../assets/models/out/z143_loader)
+set(_z143_manifests "")
+foreach(_cid 0012 0112 0212 0312 0412 0512 0612 0712 0912 0a12 0b12 0c12 0d12)
+    list(APPEND _z143_manifests ${_z143_loader_dir}/068f${_cid}.manifest)
+endforeach()
+add_test(NAME test_material_loader COMMAND test_material_loader ${_z143_manifests})
 
 add_executable(test_frame_loop tests/test_frame_loop.c)
 target_link_libraries(test_frame_loop PRIVATE doc_engine)

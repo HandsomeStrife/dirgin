@@ -109,33 +109,57 @@ int doc_room_binding_load(const char *manifest_path, DocRoomBinding *out,
         goto done;
     }
 
-    /* ---- synthesize the model ------------------------------------------ */
+    /* ---- synthesize the model ------------------------------------------ *
+     * Buckets: 0..S-1 = bound FileCodes (one material/texture slot each),
+     * bucket S = the default/unbound packets. A bucket with more than
+     * DOC_MAX_SUBMESH packets is SHARDED into several groups that all share
+     * the bucket's one material (the draw-word sub field is only 9 bits).  */
     {
-        const int S = nslots;
-        const int G = S + 1;                 /* + default group */
-        if (G > DOC_MAX_GROUPS) {
-            seterr(err, errlen, "group_count %d exceeds %d (draw-word limit)", G, DOC_MAX_GROUPS);
-            goto done;
-        }
+        const int S  = nslots;
+        const int NB = S + 1;                /* buckets (slots + default)    */
 
         out->unbound_count = 0;
         for (int i = 0; i < npackets; i++)
             if (out->expect_slot[i] < 0) out->unbound_count++;
 
-        out->groups_store  = calloc((size_t)G, sizeof *out->groups_store);
-        out->group_ptrs    = calloc((size_t)G, sizeof *out->group_ptrs);
-        out->mats_store    = calloc((size_t)G, sizeof *out->mats_store);
-        out->mat_ptrs      = calloc((size_t)G, sizeof *out->mat_ptrs);
+        int *bk_count  = calloc((size_t)NB, sizeof *bk_count);   /* packets per bucket */
+        int *bk_gstart = calloc((size_t)NB, sizeof *bk_gstart);  /* first group of bucket */
+        int *bk_nshard = calloc((size_t)NB, sizeof *bk_nshard);  /* groups in bucket */
+        if (!bk_count || !bk_gstart || !bk_nshard) {
+            free(bk_count); free(bk_gstart); free(bk_nshard);
+            seterr(err, errlen, "oom buckets"); goto done;
+        }
+        for (int b = 0; b < S; b++) bk_count[b] = out->slot_count[b];
+        bk_count[S] = out->unbound_count;
+
+        int G = 0;                           /* total groups across buckets  */
+        for (int b = 0; b < NB; b++) {
+            int c = bk_count[b];
+            int nsh = (c > 0) ? (c + DOC_MAX_SUBMESH - 1) / DOC_MAX_SUBMESH : 0;
+            bk_gstart[b] = G;
+            bk_nshard[b] = nsh;
+            G += nsh;
+        }
+        if (G > DOC_MAX_GROUPS) {
+            free(bk_count); free(bk_gstart); free(bk_nshard);
+            seterr(err, errlen, "group_count %d exceeds %d (draw-word limit)", G, DOC_MAX_GROUPS);
+            goto done;
+        }
+
+        out->groups_store  = calloc((size_t)(G ? G : 1), sizeof *out->groups_store);
+        out->group_ptrs    = calloc((size_t)(G ? G : 1), sizeof *out->group_ptrs);
+        out->mats_store    = calloc((size_t)NB, sizeof *out->mats_store);
+        out->mat_ptrs      = calloc((size_t)NB, sizeof *out->mat_ptrs);
         out->handles_store = calloc((size_t)(S ? S : 1), sizeof *out->handles_store);
         out->handle_ptrs   = calloc((size_t)(S ? S : 1), sizeof *out->handle_ptrs);
         out->submesh_pool  = calloc((size_t)(npackets ? npackets : 1), sizeof *out->submesh_pool);
-        out->lists_backing = calloc((size_t)(2 * G), sizeof *out->lists_backing);
-        out->list_ptr_store= calloc((size_t)(DOC_MATERIAL_MAX_LAYER_LISTS * G), sizeof *out->list_ptr_store);
+        out->lists_backing = calloc((size_t)(2 * NB), sizeof *out->lists_backing);
+        out->list_ptr_store= calloc((size_t)(DOC_MATERIAL_MAX_LAYER_LISTS * NB), sizeof *out->list_ptr_store);
         if (!out->groups_store || !out->group_ptrs || !out->mats_store || !out->mat_ptrs ||
             !out->handles_store || !out->handle_ptrs || !out->submesh_pool ||
             !out->lists_backing || !out->list_ptr_store) {
-            seterr(err, errlen, "oom model");
-            goto done;
+            free(bk_count); free(bk_gstart); free(bk_nshard);
+            seterr(err, errlen, "oom model"); goto done;
         }
 
         /* texture context: one non-null handle per slot */
@@ -148,48 +172,53 @@ int doc_room_binding_load(const char *manifest_path, DocRoomBinding *out,
         for (int i = 0; i < npackets; i++)
             out->submesh_pool[i] = SUBMESH_SENTINEL;
 
-        /* materials: bound slot g (<S) -> single mode-0 layer, tag == slot g;
-         * default group (g == S) -> single mode-8 layer -> default texture. */
-        for (int g = 0; g < G; g++) {
-            uint16_t tag = (g < S) ? (uint16_t)g : (uint16_t)0x8000u;
-            out->lists_backing[g * 2 + 0] = 1;      /* layer count */
-            out->lists_backing[g * 2 + 1] = tag;    /* the one tag  */
-            out->list_ptr_store[g * DOC_MATERIAL_MAX_LAYER_LISTS + 0] = &out->lists_backing[g * 2];
-            out->mats_store[g].stage0 = 3;
-            out->mats_store[g].layer_lists =
-                (const uint16_t *const *)&out->list_ptr_store[g * DOC_MATERIAL_MAX_LAYER_LISTS];
-            out->mat_ptrs[g] = &out->mats_store[g];
+        /* one material per bucket: bound bucket b (<S) -> single mode-0 layer,
+         * tag == slot b; default bucket (b == S) -> single mode-8 layer ->
+         * default texture (honest untextured). */
+        for (int b = 0; b < NB; b++) {
+            uint16_t tag = (b < S) ? (uint16_t)b : (uint16_t)0x8000u;
+            out->lists_backing[b * 2 + 0] = 1;      /* layer count */
+            out->lists_backing[b * 2 + 1] = tag;    /* the one tag  */
+            out->list_ptr_store[b * DOC_MATERIAL_MAX_LAYER_LISTS + 0] = &out->lists_backing[b * 2];
+            out->mats_store[b].stage0 = 3;
+            out->mats_store[b].layer_lists =
+                (const uint16_t *const *)&out->list_ptr_store[b * DOC_MATERIAL_MAX_LAYER_LISTS];
+            out->mat_ptrs[b] = &out->mats_store[b];
         }
 
-        /* groups: selector g -> material g; submesh_count = resolved count. */
-        for (int g = 0; g < G; g++) {
-            int cnt = (g < S) ? out->slot_count[g] : out->unbound_count;
-            if (cnt > DOC_MAX_SUBMESH) {
-                seterr(err, errlen, "group %d has %d packets > %d (needs sharding)", g, cnt, DOC_MAX_SUBMESH);
-                goto done;
+        /* groups: each shard of a bucket is a group selecting the bucket's
+         * material; submesh_count = packets in that shard (<= DOC_MAX_SUBMESH). */
+        for (int b = 0; b < NB; b++) {
+            for (int k = 0; k < bk_nshard[b]; k++) {
+                int g   = bk_gstart[b] + k;
+                int rem = bk_count[b] - k * DOC_MAX_SUBMESH;
+                int cnt = (rem < DOC_MAX_SUBMESH) ? rem : DOC_MAX_SUBMESH;
+                out->groups_store[g].submesh_count     = (uint16_t)cnt;
+                out->groups_store[g].material_selector = (uint16_t)b;   /* -> material b */
+                out->groups_store[g].submeshes         = out->submesh_pool;
+                out->group_ptrs[g] = &out->groups_store[g];
             }
-            out->groups_store[g].submesh_count     = (uint16_t)cnt;
-            out->groups_store[g].material_selector = (uint16_t)g;
-            out->groups_store[g].submeshes         = out->submesh_pool; /* all sentinel */
-            out->group_ptrs[g] = &out->groups_store[g];
         }
 
         out->model.group_count = (uint16_t)G;
         out->model.groups       = out->group_ptrs;
         out->model.materials    = out->mat_ptrs;
 
-        /* per-packet draw word: group = slot (or default S), sub = running
-         * index within that group (decode order preserved). */
-        int *run = calloc((size_t)G, sizeof *run);
-        if (!run) { seterr(err, errlen, "oom run"); goto done; }
+        /* per-packet draw word: bucket = slot (or default S); a running index
+         * within the bucket picks the shard group (r / 512) and the submesh
+         * (r % 512), preserving decode order. */
+        int *run = calloc((size_t)NB, sizeof *run);
+        if (!run) { free(bk_count); free(bk_gstart); free(bk_nshard); seterr(err, errlen, "oom run"); goto done; }
         for (int i = 0; i < npackets; i++) {
             int s = out->expect_slot[i];
-            int g = (s >= 0) ? s : S;
-            int sub = run[g]++;
-            if (sub >= DOC_MAX_SUBMESH) { free(run); seterr(err, errlen, "sub overflow in group %d", g); goto done; }
+            int b = (s >= 0) ? s : S;
+            int r = run[b]++;
+            int g = bk_gstart[b] + r / DOC_MAX_SUBMESH;
+            int sub = r % DOC_MAX_SUBMESH;
             out->draw_words[i] = ((uint32_t)g << DOC_DRAW_GROUP_SHIFT) | (uint32_t)sub;
         }
         free(run);
+        free(bk_count); free(bk_gstart); free(bk_nshard);
     }
 
     rc = 0;   /* success */

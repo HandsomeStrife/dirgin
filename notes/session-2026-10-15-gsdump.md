@@ -511,3 +511,22 @@ a faithful DocMaterialModel from the recovered per-packet FileCode binding.
 - **NEXT (milestone 2):** generalize to all 13 chunks; add >511-packet sharding
   (068f0212's 068fff26=576); wire libdtex so handles carry real w/h/psm (and a
   render diff vs out/bound_renders/); then the --heuristic confident-fill mode.
+
+## cont. 8 — room-binding loader milestone 2: ALL 13 chunks + sharding (2026-10-16)
+
+Generalized the loader to the whole room. Sharding is a pure loader concern (the
+manifest stays slot/FileCode based): a bucket with >512 packets is split across
+multiple groups that share one material (draw-word sub field is 9 bits). Buckets
+= bound FileCodes + one default/unbound bucket, each sharded independently.
+
+- All 13 z143 chunks baked (emit_loader_manifest.py) and parity-checked through
+  the UNMODIFIED material.c resolve chain. **Every chunk's resolved per-slot
+  histogram == recovered binding; whole room = 15332 packets, 8018 matched, the
+  authoritative total.** 068f0212 (2497 pkts, 068fff26=576) exercises sharding.
+- ctest `test_material_loader` now passes all 13 manifest paths (skips cleanly if
+  unbaked), so CI covers sharding + whole-room when the disc is present. Full
+  engine suite 11/11, zero warnings.
+- Milestone 1's mutation test (corrupt tag → 1628 failures) still guards it.
+- **NEXT (milestone 3):** wire libdtex so handles carry real w/h/psm/cpsm (not
+  just slot identity) + a render diff vs out/bound_renders/; then the
+  --heuristic confident-fill mode (assignments.json) for the free-camera.

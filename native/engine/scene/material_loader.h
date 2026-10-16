@@ -12,10 +12,12 @@
  * emit_loader_manifest.py bakes a stable decode-order manifest this C reads.
  *
  * The built model is exactly what material.c walks:
- *   - one DocMaterialGroup per bound FileCode (group g, selector g); its
- *     DocMaterial has a single mode-0 layer whose tag == the texture slot g,
- *     so doc_material_resolve_texture(..) yields desc.slot == g.
- *   - one trailing "default" group (index = nslots) for the unbound packets;
+ *   - one or more DocMaterialGroups per bound FileCode (selector == slot); its
+ *     DocMaterial has a single mode-0 layer whose tag == the texture slot, so
+ *     doc_material_resolve_texture(..) yields desc.slot == slot. A FileCode
+ *     with >512 packets in a chunk is SHARDED across several groups that share
+ *     the one material (the draw-word submesh field is only 9 bits).
+ *   - one or more trailing "default" groups for the unbound packets;
  *     its material has a single mode-8 layer, so resolve yields the default
  *     descriptor (slot DOC_TEX_SLOT_DEFAULT) -- an honest untextured surface.
  *   - a dense DocTextureContext.handles[slot], one non-null handle per slot.
