@@ -19,4 +19,15 @@ env_decode: env_decode.c doc_env.c doc_env.h
 clean:
 	rm -f $(OBJS) $(BIN) env_decode doc_env.o env_decode.o
 
-.PHONY: all clean
+.PHONY: all clean env-test
+
+# Vertex-exact parity: native doc_env decoder vs the Python oracle. Zone-agnostic.
+EXTD ?= /srv/games/dirge-port/extract/_KEL/noPath
+env-test: env_decode
+	@ok=1; for z in 068f0112 068f0212 06960212 06800212; do \
+	  f=$(EXTD)/$$z.bin; [ -f $$f ] || continue; \
+	  ./env_decode $$f 2>/dev/null > /tmp/envc.$$z; python3 -I env_fnv.py $$f 2>/dev/null > /tmp/envp.$$z; \
+	  if cmp -s /tmp/envc.$$z /tmp/envp.$$z; \
+	  then echo "  $$z: C == Python (vertex-exact)"; else echo "  $$z: MISMATCH"; ok=0; fi; \
+	  rm -f /tmp/envc.$$z /tmp/envp.$$z; done; \
+	  if [ $$ok = 1 ]; then echo "env-test PASS"; else echo "env-test FAIL"; exit 1; fi
