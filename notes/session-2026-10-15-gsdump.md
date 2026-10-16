@@ -626,3 +626,25 @@ the material loader (together: native room loading).
   can load a room natively end-to-end; the Python exporter is no longer on the
   critical path for room geometry. Next: a C room assembler that feeds doc_env
   packets + the loader's binding to renderer_gl (the engine-driven room render).
+
+## cont. 13 — ENGINE-NATIVE whole-room render (doc_env + loader + GL) (2026-10-16)
+
+The whole-room textured render now runs entirely on the native C stack — no Python
+on the critical path. `native/gpu/render_room_native.c` (`make room`):
+  geometry = doc_env  |  binding = doc_room_binding (material_loader)  |
+  textures = libdtex  |  render = renderer_gl (PRELIT+MODULATE, EGL)
+Unions all 13 chunks, maps each decoded packet to its FileCode via the loader,
+merges by FileCode, decodes each TXD, renders in one GL world.
+
+- Output matches the Python export_room_bound.py EXACTLY: **13 chunks, 19 FileCodes,
+  8018/15332 packets bound, 178898 tris, identical bbox** — the native decoders +
+  loader reproduce the validated pipeline. Coherent textured Shinra interior (tank,
+  stone walls, consoles); unbound packets render honest untextured grey (oracle-only;
+  the loader/render handle --heuristic manifests transparently for ~100% fill).
+- Renders synced to /srv/shared/dirge-port/binding-renders/whole-room/
+  (room_native_*.png). Still has the per-chunk camera-framing + scene-placement
+  caveats (cont. 10/11) — those are orthogonal (camera + runtime placement data).
+- Build fix: material_loader.c slot-FileCode parse sized exactly (char[9]/%8s) so
+  both the engine (CMake) and gpu (make) builds are warning-clean.
+- MILESTONE: native room loading is complete end-to-end (geometry + binding +
+  textures + render). The Python exporter is now only a convenience/oracle.

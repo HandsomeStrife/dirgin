@@ -85,13 +85,13 @@ int doc_room_binding_load(const char *manifest_path, DocRoomBinding *out,
             continue;
         }
         if (nslots >= 0 && slots_read < nslots && strncmp(p, "slot ", 5) == 0) {
-            int idx = -1, cnt = -1; char fc[16] = {0}, src[16] = {0};
+            int idx = -1, cnt = -1; char fc[9] = {0}, src[16] = {0};
             int w = 0, h = 0, psm = 0, cpsm = 0, hc = 0, ht = 0;
-            int n = sscanf(p, "slot %d %15s %d %15s %d %d %d %d %d %d",
+            int n = sscanf(p, "slot %d %8s %d %15s %d %d %d %d %d %d",
                            &idx, fc, &cnt, src, &w, &h, &psm, &cpsm, &hc, &ht);
             if (n < 3) { seterr(err, errlen, "bad slot line"); goto done; }
             if (idx != slots_read || idx < 0 || idx >= nslots || cnt < 0) { seterr(err, errlen, "slot index/count out of order at %d", idx); goto done; }
-            strncpy(out->slot_filecode[idx], fc, 8); out->slot_filecode[idx][8] = '\0';
+            snprintf(out->slot_filecode[idx], sizeof out->slot_filecode[idx], "%s", fc);
             out->slot_count[idx] = cnt;
             if (n >= 10) {            /* v2 line carries texture metadata */
                 out->slot_meta[idx].width      = (uint16_t)w;

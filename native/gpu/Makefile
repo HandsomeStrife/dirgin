@@ -114,7 +114,26 @@ $(RSTBIN): $(RSTOBJS) $(LIBDTEX)
 
 scene_textured: $(RSTBIN)
 
-clean:
-	rm -f $(OBJS) $(VOBJS) $(RCOBJS) $(RSOBJS) $(REOBJS) $(RSTOBJS) $(BIN) $(VBIN) $(RCBIN) $(RSBIN) $(REBIN) $(RSTBIN)
+# Engine-native whole-room render: geometry via ../assets/models/doc_env, binding
+# via ../engine/scene/material_loader, textures via libdtex, drawn through the GL
+# render core. The native equivalent of ../assets/models/export_room_bound.py.
+ENGINE_DIR := ../engine/scene
+RRNBIN  := render_room_native
+RRNOBJS := render_room_native.o renderer_gl.o gl_api.o gfx_context_egl.o doc_env_gpu.o material_loader_gpu.o
 
-.PHONY: all clean validate char scene env scene_textured
+render_room_native.o: render_room_native.c renderer_gl.h gfx_context.h
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(ENGINE_DIR) -Wno-format-truncation -c -o $@ $<
+doc_env_gpu.o: $(MODEL_DIR)/doc_env.c $(MODEL_DIR)/doc_env.h
+	$(CC) $(CFLAGS) $(INCLUDES) -c -o $@ $<
+material_loader_gpu.o: $(ENGINE_DIR)/material_loader.c $(ENGINE_DIR)/material_loader.h
+	$(CC) $(CFLAGS) $(INCLUDES) -I$(ENGINE_DIR) -c -o $@ $<
+
+$(RRNBIN): $(RRNOBJS) $(LIBDTEX)
+	$(CC) $(CFLAGS) -o $@ $(RRNOBJS) $(LIBDTEX) $(LDFLAGS)
+
+room: $(RRNBIN)
+
+clean:
+	rm -f $(OBJS) $(VOBJS) $(RCOBJS) $(RSOBJS) $(REOBJS) $(RSTOBJS) $(RRNOBJS) $(BIN) $(VBIN) $(RCBIN) $(RSBIN) $(REBIN) $(RSTBIN) $(RRNBIN)
+
+.PHONY: all clean validate char scene env scene_textured room
