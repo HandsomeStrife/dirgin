@@ -20,11 +20,32 @@ import sys, struct, csv, os, argparse
 from collections import Counter
 
 TEXT_VA, TEXT_OFF = 0x00100000, 0x100   # .text: VA 0x100000 at file off 0x100
-TEXT_END_VA = 0x00460720                # start of .vutext
+TEXT_END_VA = 0x005c0000                # cover .kel_draw_section (folded from the
+                                        # oracle recompiler: without it ~3322 funcs,
+                                        # incl. the MOD skin/skeleton subsystem, were
+                                        # empty stubs -- they live past .vutext).
 
+import struct as _st
+_SEGS = []
 def load_elf(path):
-    with open(path, 'rb') as f: return f.read()
-def va2off(va): return va - TEXT_VA + TEXT_OFF
+    with open(path, 'rb') as f: data = f.read()
+    # Build a segment map from the ELF program headers so va2off resolves every
+    # loadable segment (not just the first .text run); the single-segment linear
+    # formula mis-maps anything past .text and yields garbage -> stub functions.
+    _SEGS.clear()
+    e_phoff = _st.unpack_from('<I', data, 28)[0]
+    e_phentsize = _st.unpack_from('<H', data, 42)[0]
+    e_phnum = _st.unpack_from('<H', data, 44)[0]
+    for i in range(e_phnum):
+        ph = e_phoff + i * e_phentsize
+        p_type, p_off, p_va, _pa, p_fsz, p_msz = _st.unpack_from('<IIIIII', data, ph)
+        if p_type == 1 and p_fsz > 0:
+            _SEGS.append((p_va, p_va + p_fsz, p_off))
+    return data
+def va2off(va):
+    for vlo, vhi, off in _SEGS:
+        if vlo <= va < vhi: return off + (va - vlo)
+    return va - TEXT_VA + TEXT_OFF  # fallback (first-seg linear)
 def word(data, va): return struct.unpack_from('<I', data, va2off(va))[0]
 def sx16(x):
     x &= 0xffff

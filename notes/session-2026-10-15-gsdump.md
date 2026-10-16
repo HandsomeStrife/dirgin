@@ -648,3 +648,25 @@ merges by FileCode, decodes each TXD, renders in one GL world.
   both the engine (CMake) and gpu (make) builds are warning-clean.
 - MILESTONE: native room loading is complete end-to-end (geometry + binding +
   textures + render). The Python exporter is now only a convenience/oracle.
+
+## cont. 14 — folded the segment-aware fix into the MAIN recompiler (blocker #5) (2026-10-16)
+
+The main static recompiler (port/recomp/tools/recompile.py) used a single-segment
+linear va2off (va - TEXT_VA + TEXT_OFF) with TEXT_END_VA=0x460720, so every function
+past .text (the `.kel_draw_section`, VA 0x460720..0x5c0000 — incl. the whole MOD
+skin/skeleton subsystem) mis-mapped to garbage bytes and emitted as an empty stub.
+The fix (ELF-program-header segment map + segment-aware va2off + TEXT_END_VA=0x5c0000)
+lived ONLY as an out-of-band patch in the oracle recompiler (port/oracle/tools/
+recompile_keldraw.py) — the thing EVERYTHING is validated against. That divergence is
+now closed: the fix is folded into recompile.py.
+
+Verified:
+- The two scripts now differ only in comments/whitespace (logic identical).
+- A .kel_draw_section func (FUN_005183c8) decodes to 70 lines of real code, 0 unimpl
+  traps, output byte-identical to the validated oracle (was a stub before).
+- Base func 0x00100100 decodes identically (segment-aware va2off reduces to the exact
+  linear formula for the first segment) — zero regression on .text.
+- 2110 functions in the .kel_draw_section range now translate instead of stubbing.
+Script-only change (the generated port/recomp/generated/ output is gitignored; it
+regenerates correctly now). The oracle's trustworthiness no longer depends on an
+out-of-band patch.
