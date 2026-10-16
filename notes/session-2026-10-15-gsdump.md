@@ -579,3 +579,30 @@ whole-room textured render driven by the complete recovered binding.
   is convergence-capstone work, not a binding issue. Textures/UVs/colours are all
   correct (the binding + loader are proven numerically; this is the visual
   confirmation).
+
+## cont. 11 — SCENE PLACEMENT (blocker #3) investigated: runtime-set, mechanism found (2026-10-16)
+
+Probing whether the 13 z143 chunks tile correctly revealed they do NOT when
+assembled from raw decoded positions:
+- Per-chunk centroids: 0012/0112/0612/0912/0a12/0b12 are all ORIGIN-centered with
+  overlapping bboxes; 0212/0312/0412/0512/0712/0c12/0d12 carry non-origin offsets.
+  So the origin-centered chunks OVERLAP when naively unioned. The whole-room render
+  (cont. 10) is therefore APPROXIMATE — the big structural shells (0112/0012)
+  dominate and frame it, but several sub-object chunks are mis-placed/overlapping.
+- The hypothesized static transform at BMD `payload+0x1990` is ALL ZEROS in every
+  chunk file (stub) — per-chunk placement is NOT static, same shape as the binding:
+  it is runtime-set (by scene setup / KEL-VM), not in the _KEL extracts.
+- MECHANISM FOUND in the savestate (scratchpad/savestate/eeMemory.bin): the scene-
+  list globals (0x4EE2E0/0x4EE3C0) are null, but 69 scene-node structs reference a
+  live model pointer at node+0x18, each followed by a per-instance TRANSFORM (floats
+  at ~node+0x28, e.g. 0x42bb87e0=93.77, 0xc44e82dc=-826.04). Node layout seen:
+  +0x0c/+0x14 links, +0x18 model M, +0x1c/+0x20 ptrs, +0x24 u32, +0x28.. float matrix.
+  These 69 all point to one FED (0xe90130) = EFFECT instances (lamp/light), proving
+  the placement mechanism + that it lives in these nodes.
+- GAP: room geometry (068f0N12) uses NO FED (walls have no material model), so room-
+  CHUNK placement nodes reference the room model, not a FED — not yet located; may be
+  transient like the wall binding. RECOVERY PATH (future): walk the scene-node graph
+  in a savestate captured WITH the room fully loaded (the current state's scene lists
+  are null), reading node+0x18 model + node+0x28 transform per room chunk. Analogous
+  to the binding: needs a well-timed EE-RAM capture (Dan-dependent), OR reverse the
+  scene-setup code that writes these nodes. Blocker #3 is NOT statically solvable.
