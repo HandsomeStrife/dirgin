@@ -11,6 +11,42 @@ sources; anything uncertain is flagged. Nothing outside this file was modified.
 
 ---
 
+## 0. 2026-10-16 session additions (room pipeline + recompiler)
+
+Published the project as a public repo (**github.com/HandsomeStrife/dirgin** — our
+source/tooling/notes only, no game data/decomp/generated). Completed the z143 room
+texture pipeline END-TO-END and folded a recompiler fix. All committed + pushed;
+every subsystem builds warning-clean, engine suite 11/11.
+
+- **Material binding → engine (3 milestones).** `emit_loader_manifest.py` bakes a
+  decode-order manifest (per-slot FileCode + dtex `--info` w/h/psm/cpsm/clut);
+  `native/engine/scene/material_loader.{c,h}` synthesizes a DocMaterialModel the
+  UNMODIFIED `material.c` resolves; `test_material_loader.c` parity-checks all 13
+  chunks (15332 packets, 8018 matched, histograms == recovered binding, texture
+  metadata matches; mutation-tested). Sharding for >512-packet FileCodes.
+- **Back-face fill** (`backface_heuristic.py`): 75.2% validated cosmetic fallback
+  for the never-drawn ~48% → ~100% coverage for the free camera.
+- **Native env-geometry decoder** (`doc_env.{c,h}`): C port of decode_packets,
+  **vertex-exact** vs the Python oracle across all 13 chunks (mutation-tested).
+- **Engine-native whole-room render** (`native/gpu/render_room_native.c`): doc_env
+  + loader + libdtex + renderer_gl, no Python on the path; matches
+  export_room_bound.py (8018/15332, 178898 tris). Oracle 52.9% / heuristic 99.3%
+  tris textured. Interior turntable views. Renders in /srv/shared/.../binding-renders/.
+- **Scene placement (blocker #3) investigated:** chunks are NOT all pre-placed
+  (several overlap at origin); `payload+0x1990` is a stub → placement is
+  runtime-set (like the binding). Mechanism found in the savestate scene nodes
+  (node+0x18 model, node+0x28 transform) but only effect instances are populated;
+  room-chunk placement needs a scene-loaded EE capture or a script reverse.
+- **Recompiler fix (blocker #5):** folded the segment-aware va2off + TEXT_END_VA
+  from the oracle recompiler into the MAIN one — **2110 `.kel_draw_section` funcs
+  (incl. MOD skin/skeleton) now decode instead of stubbing**, base funcs identical
+  (zero regression). Closes the oracle/main divergence.
+
+Full detail: `notes/session-2026-10-15-gsdump.md` (cont. 6–14) and
+`native/assets/models/BINDING-PIPELINE.md`.
+
+---
+
 ## 1. Executive summary (honest)
 
 **What this is.** A *purist* native PC port of the PS2 game *Dirge of Cerberus:
