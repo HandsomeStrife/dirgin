@@ -670,3 +670,23 @@ Verified:
 Script-only change (the generated port/recomp/generated/ output is gitignored; it
 regenerates correctly now). The oracle's trustworthiness no longer depends on an
 out-of-band patch.
+
+## cont. 15 — scene-placement recovery LEAD from existing GS dumps (unverified)
+
+A concrete path to recover per-chunk world placement (blocker #3) WITHOUT new Dan
+data, using the GS dumps we already have:
+
+For every UV-triple-MATCHED packet we know BOTH its world position (decode_packets)
+AND the GS screen position the dump drew it at. The camera view×proj (VP) is shared
+across one dump. Chunks with non-origin centroids (0212/0312/0412/0512/0712/0c12/
+0d12) appear already world-placed (model ≈ identity) — so:
+  1. Solve VP from the already-placed chunks' (world → screen) correspondences
+     (model = I): screen = perspective_divide(VP · world).
+  2. Then for each ORIGIN-authored chunk (0012/0112/0612/0912/0a12/0b12), solve its
+     per-chunk model transform M from screen = PD(VP · M · world_local) over its
+     matched packets (VP now known).
+This is a small bundle-adjustment; nonlinear (perspective divide) but well-posed
+with many correspondences. Needs: GS per-vertex XYZ extraction (tools/gsdump has the
+parser) + the existing UV-triple packet↔dump correspondence. If it works it places
+the room correctly from data in hand. UNVERIFIED — flagged as the next placement
+attempt before asking Dan for a scene-loaded EE capture.
