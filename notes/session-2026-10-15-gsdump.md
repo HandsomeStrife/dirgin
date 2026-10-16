@@ -441,3 +441,42 @@ So the ROOM WALLS (068f0N12 geometry, textured with the 18 z143k_*/z143h_* atlas
 - **For the enhanced free-camera port**, the only way to texture culled back-faces is a heuristic (e.g. inherit the front-face neighbour's material) — a cosmetic future enhancement, not a correctness gap.
 
 Binding track = effectively COMPLETE. Artifacts: scratchpad/savestate/ (eeMemory.bin + scripts), scratchpad/z143_live_binding_result.json (full reversed chain + 3 active models' handle tables).
+
+## cont. 6 — back-face texturing heuristic VALIDATED + shipped as tool (2026-10-16)
+
+The predicted "inherit the front-face neighbour's material" heuristic for the
+never-drawn ~48% is now built and numerically validated. Tool:
+`native/assets/models/backface_heuristic.py` (+ `normal_variants.py`,
+`probe_space.py` diagnostics). Reproducible from the project; writes
+`out/z143_backface/{result.json,assignments.json}`.
+
+- **Method that wins: plain centroid 1-NN over the BOUND set, global, k=1, NO
+  normal gating.** k>1 (3-NN 68.5%, 5-NN 63.2%) and same-hemisphere normal
+  gating (70.7%) both make it WORSE — they reach across material boundaries.
+  Within-chunk ≈ global (75.1 vs 75.2) because the nearest bound packet is
+  in-chunk anyway (chunks share one world frame — probe_space.py).
+- **Accuracy (Dan's rule: numeric, 5-seed 20% hold-out of oracle-bound packets,
+  predict from the rest, compare to oracle truth): 75.2% ± 0.5% exact-match**
+  vs 26.3% majority-class baseline. Accuracy is FLAT with distance (78.7% @≤10u →
+  75.2% @∞): the ~75% ceiling is how finely materials interleave on adjacent
+  panels, NOT distance — so a cutoff buys COVERAGE, not accuracy.
+- **Coverage of the 7314 unbound packets:** nearest-bound median 21u, 95th 74u;
+  ≤50u=90.1%, ≤100u=96.5%, ≤200u=98.4%, ≤500u=100%. The two dark chunks are
+  fully coverable (0712 n=1318 med 29u; 0d12 n=928 med 29u — flush against bound
+  front-faces). 068f0012 is the only isolated set (274 unbound, 59% within 200u)
+  → flag low-confidence for manual override.
+- **67.5% of unbound packets have a bound packet within 60u with an ANTI-PARALLEL
+  normal** — i.e. two-thirds are literally the back side of a textured wall whose
+  correct texture is the co-located front face 1-NN already grabs. (Diagnostic;
+  true back-face accuracy is unverifiable — no oracle for back-faces.)
+- **Recommended cutoff 200u used as a confidence FLAG, not a filter** (`confident`
+  field in assignments.json; `source='heuristic'` vs `'oracle'`).
+- **VERDICT: SHIP as a labelled cosmetic fallback for the free camera ONLY.**
+  75% vs 26%, ~98% coverage, trivial, errors land between visually-similar
+  Mako-reactor atlases on surfaces retail NEVER rendered — any plausible texture
+  beats black. **Never fold into the oracle-bound 52.3%; never call it recovered
+  binding.** The engine consumes assignments.json: oracle fc where source=oracle,
+  heuristic fill (optionally gated on `confident`) otherwise.
+
+Binding track now TRULY complete: 52.3% authoritative (all camera-visible) +
+validated cosmetic fill for the rest. Nothing further recoverable statically.

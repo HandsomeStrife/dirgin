@@ -199,6 +199,13 @@ that the purist pivot made central (**AUDIO / SCRIPTS / CONTENT**).
     far-LOD): chunks `068f0712` (96% dark) and `068f0d12` (97% dark) stay unreachable
     across all 18 angles. More GS angles cannot recover it. This method needs a dump
     per room AND tops out at camera-visible surfaces.
+    **BACK-FACE FILL VALIDATED + SHIPPED (2026-10-16):** the never-drawn ~48% is
+    textured for the enhanced free-camera by centroid 1-NN inheriting the nearest
+    bound packet's material — **75.2% ± 0.5% exact-match (5-seed 20% hold-out) vs
+    26.3% baseline, ~98% coverage** (`native/assets/models/backface_heuristic.py`
+    → `out/z143_backface/assignments.json`, per-packet fc tagged `source=oracle|
+    heuristic` + `confident` @200u). Labelled cosmetic fallback ONLY — NEVER folded
+    into the authoritative 52.3%. k>1 and normal-gating both hurt; simplest wins.
     REMAINING GAP (scalable, all-rooms, visibility-independent fix): recover the full
     runtime material model `M`. **STATIC RECOVERY DISPROVEN 2026-10-16** (two deep
     decomp+data investigations): the binding is genuinely runtime-constructed and NOT
