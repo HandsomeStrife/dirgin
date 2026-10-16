@@ -556,3 +556,26 @@ back-face fill flows through the same loader.
 - **NEXT:** render diff vs out/bound_renders/ belongs with the GPU integration
   (convergence capstone) — the loader's binding is now proven numerically for the
   whole room (oracle) and fillable to 100% (heuristic). Loader subsystem COMPLETE.
+
+## cont. 10 — whole-room textured render from the recovered binding (2026-10-16)
+
+Assembled all 13 z143 chunks (one shared world frame) into textured meshes and
+rendered them end-to-end through the existing native GPU path — the first
+whole-room textured render driven by the complete recovered binding.
+
+- `native/assets/models/export_room_bound.py` (NEW): unions all 13 chunks, merges
+  packets GLOBALLY by FileCode (18 room textures + 1 unbound group << renderer's
+  MAXG 64), emits DMSH + a combined .list. --heuristic fills oracle-null packets
+  from out/z143_backface/assignments.json (confident only).
+- Rendered headless via native/gpu/render_env_textured (EGL surfaceless +
+  llvmpipe software GL works on this box). Two versions × 3 views:
+    oracle-only:  94657/178898 tris textured (52.9%)
+    heuristic:   177617/178898 tris textured (99.3%)
+  Visually coherent, correctly-textured Shinra interior (mako tank, stone walls,
+  console banks, pipes). Synced to /srv/shared/dirge-port/binding-renders/whole-room/
+  for Dan (room_oracle_*.png, room_heur_*.png).
+- CAVEAT: render_env_textured's camera presets (az/el/zoom) are tuned for single
+  chunks, so the assembled room sits small in frame — a proper free-camera orbit
+  is convergence-capstone work, not a binding issue. Textures/UVs/colours are all
+  correct (the binding + loader are proven numerically; this is the visual
+  confirmation).
