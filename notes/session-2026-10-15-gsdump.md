@@ -718,3 +718,18 @@ with good coverage of the already-placed chunks to bootstrap P, (c) a vectorized
 matcher. Not tractable in this session. Scene placement (blocker #3) remains open;
 the cleanest path is still a scene-loaded EE-RAM capture (Dan-dependent) reading the
 scene-node transforms. Prototype kept in scratchpad for a future focused attempt.
+
+## cont. 16 — LIVE-engine room render (convergence milestone) (2026-10-16)
+
+`native/gpu/room_live.c` (`make live`) drives the recovered z143 room through the
+LIVE doc_engine frame loop — not the frozen engine_snapshot the char capstone uses.
+It links libdoc_engine.a (the real frame loop + state machine + render queue +
+material subsystem) and implements the DocRenderer seam: each doc_engine_frame()
+runs the state dispatch + object list, then our submit_scene draws the room
+(doc_env geometry + doc_room_binding + libdtex, via renderer_gl) and present writes
+the FBO to PNG. Ran 3 frames (turntable) — "[drawn by doc_engine_frame]" — on the
+box's real AMD Radeon GPU via EGL. 15216/15332 packets bound (heuristic).
+This closes the port-state agent's #1 gap for the ENVIRONMENT: the shipping engine's
+frame loop now renders real decoded room content end to end (the char capstone only
+did this off a frozen snapshot). Caveats unchanged: scene placement overlap + camera
+framing are orthogonal. Live frame synced to binding-renders/interior/.

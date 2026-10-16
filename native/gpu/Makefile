@@ -133,7 +133,22 @@ $(RRNBIN): $(RRNOBJS) $(LIBDTEX)
 
 room: $(RRNBIN)
 
-clean:
-	rm -f $(OBJS) $(VOBJS) $(RCOBJS) $(RSOBJS) $(REOBJS) $(RSTOBJS) $(RRNOBJS) $(BIN) $(VBIN) $(RCBIN) $(RSBIN) $(REBIN) $(RSTBIN) $(RRNBIN)
+# Live-engine room render: drives the recovered room through the LIVE doc_engine
+# frame loop (libdoc_engine.a) -- the real frame loop, not the frozen snapshot.
+ENGINE_INC := -I../engine/scene -I../engine/core -I../engine/math
+LIBDOCENG  := ../engine/build/libdoc_engine.a
+RLBIN  := room_live
+RLOBJS := room_live.o renderer_gl.o gl_api.o gfx_context_egl.o doc_env_gpu.o
 
-.PHONY: all clean validate char scene env scene_textured room
+room_live.o: room_live.c renderer_gl.h gfx_context.h
+	$(CC) $(CFLAGS) $(INCLUDES) $(ENGINE_INC) -Wno-format-truncation -c -o $@ $<
+
+$(RLBIN): $(RLOBJS) $(LIBDOCENG) $(LIBDTEX)
+	$(CC) $(CFLAGS) -o $@ $(RLOBJS) $(LIBDOCENG) $(LIBDTEX) $(LDFLAGS)
+
+live: $(RLBIN)
+
+clean:
+	rm -f $(OBJS) $(VOBJS) $(RCOBJS) $(RSOBJS) $(REOBJS) $(RSTOBJS) $(RRNOBJS) $(RLOBJS) $(BIN) $(VBIN) $(RCBIN) $(RSBIN) $(REBIN) $(RSTBIN) $(RRNBIN) $(RLBIN)
+
+.PHONY: all clean validate char scene env scene_textured room live
