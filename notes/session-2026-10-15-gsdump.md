@@ -698,3 +698,23 @@ attempt before asking Dan for a scene-loaded EE capture.
 min). Before the fix the .kel_draw_section funcs (incl. MOD skin/skeleton) were empty
 stubs; now every function translates and compiles. (delay-slot/label overlaps: 52 —
 pre-existing, same as the oracle, not a regression.) Blocker #5 is fully closed.
+
+## cont. 15b — placement-via-GS-dump: PROTOTYPED, does not work as-is (2026-10-16)
+
+Built the correspondence extractor + DLT camera solve (scratchpad/placement_solve.py):
+match each GS-dump textured triangle to a decoded packet by UV-triple, pair dump
+vertices (screen x/y) to packet vertices (world xyz) by per-vertex UV, solve the 3x4
+projection via DLT. OUTCOME: does NOT recover a valid camera.
+- On seed_115733: 899 uniquely-matched tris, but ALL matched chunks were ORIGIN
+  chunks (0012/0112/0612/0512) — no already-placed (M=I) chunk visible to bootstrap P.
+- Worse, the DLT fit its OWN training correspondences at ~1890px median error (on a
+  ~640px screen) — i.e. the (world↔screen) pairs are NOT consistent with any single
+  projection. Root cause: the per-vertex UV→world pairing is too noisy (UV-triples
+  are not unique enough to pin the exact packet+vertex; wrong pairings dominate).
+- Also pure-Python matching over ~55k dump tris is slow (needs vectorizing).
+VERDICT: the idea is sound in principle but needs (a) RANSAC + a far stricter
+correspondence vetting (geometric consistency, not just UV-set equality), (b) dumps
+with good coverage of the already-placed chunks to bootstrap P, (c) a vectorized
+matcher. Not tractable in this session. Scene placement (blocker #3) remains open;
+the cleanest path is still a scene-loaded EE-RAM capture (Dan-dependent) reading the
+scene-node transforms. Prototype kept in scratchpad for a future focused attempt.
