@@ -217,6 +217,7 @@ int main(int argc, char **argv) {
     int neutralcol = 0, flipy = 0, notex = 0;
     float cam_eye[3], cam_at[3], cam_up[3] = {0,1,0}, cam_fov = 50.f;  /* -eye/-at free camera */
     int have_eye = 0, have_at = 0;
+    int opt_W = 1280, opt_H = 960;   /* -W/-H override output size (anamorphic match) */
 
     for (int i = 1; i < argc; i++) {
         if      (!strcmp(argv[i], "-l")  && i+1<argc) listpath = argv[++i];
@@ -237,6 +238,8 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"-at") &&i+1<argc) have_at =(sscanf(argv[++i],"%f,%f,%f",&cam_at[0],&cam_at[1],&cam_at[2])==3);
         else if (!strcmp(argv[i],"-up") &&i+1<argc) sscanf(argv[++i],"%f,%f,%f",&cam_up[0],&cam_up[1],&cam_up[2]);
         else if (!strcmp(argv[i],"-fov")&&i+1<argc) cam_fov=(float)atof(argv[++i]);
+        else if (!strcmp(argv[i],"-W")&&i+1<argc) opt_W=atoi(argv[++i]);
+        else if (!strcmp(argv[i],"-H")&&i+1<argc) opt_H=atoi(argv[++i]);
     }
 
     /* ---- load the textured environment groups ---- */
@@ -319,7 +322,7 @@ int main(int argc, char **argv) {
            scale, yaw, TX, FY, TZ, cmin[0],cmax[0],cmin[1],cmax[1],cmin[2],cmax[2], cmax[1]-cmin[1]);
 
     /* ---- GL ---- */
-    const int W = 1280, H = 960;
+    const int W = (opt_W > 0 ? opt_W : 1280), H = (opt_H > 0 ? opt_H : 960);
     char cerr[256] = {0};
     gfx_context *ctx = gfx_context_create(W, H, cerr, sizeof cerr);
     if (!ctx) { fprintf(stderr, "GL init failed: %s\n", cerr);
