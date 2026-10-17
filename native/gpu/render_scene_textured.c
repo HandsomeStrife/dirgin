@@ -182,6 +182,8 @@ int main(int argc, char **argv) {
      * room exactly as-baked; -neutralcol shows the decoded textures at full bright. */
     float colscale = 1.8f;
     int neutralcol = 0, flipy = 0, notex = 0;
+    float cam_eye[3], cam_at[3], cam_up[3] = {0,1,0}, cam_fov = 50.f;  /* -eye/-at free camera */
+    int have_eye = 0, have_at = 0;
 
     for (int i = 1; i < argc; i++) {
         if      (!strcmp(argv[i], "-l")  && i+1<argc) listpath = argv[++i];
@@ -198,6 +200,10 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "-neutralcol")) neutralcol = 1;
         else if (!strcmp(argv[i], "-flipy")) flipy = 1;
         else if (!strcmp(argv[i], "-notex")) notex = 1;
+        else if (!strcmp(argv[i],"-eye")&&i+1<argc) have_eye=(sscanf(argv[++i],"%f,%f,%f",&cam_eye[0],&cam_eye[1],&cam_eye[2])==3);
+        else if (!strcmp(argv[i],"-at") &&i+1<argc) have_at =(sscanf(argv[++i],"%f,%f,%f",&cam_at[0],&cam_at[1],&cam_at[2])==3);
+        else if (!strcmp(argv[i],"-up") &&i+1<argc) sscanf(argv[++i],"%f,%f,%f",&cam_up[0],&cam_up[1],&cam_up[2]);
+        else if (!strcmp(argv[i],"-fov")&&i+1<argc) cam_fov=(float)atof(argv[++i]);
     }
 
     /* ---- load the textured environment groups ---- */
@@ -340,6 +346,25 @@ int main(int argc, char **argv) {
     };
 
     char path[1024]; int fail = 0;
+    if (have_eye && have_at) {
+        /* FREE CAMERA: eye/target placed explicitly (room-angle money shot).
+         * Focus box = the room bbox (rmin/rmax) so near/far cover the scene. */
+        p.use_explicit_cam = 1;
+        memcpy(p.eye, cam_eye, sizeof cam_eye);
+        memcpy(p.target, cam_at, sizeof cam_at);
+        memcpy(p.up, cam_up, sizeof cam_up);
+        p.fovy_deg = cam_fov;
+        unsigned char *img = NULL; char rerr[256] = {0};
+        int rc = rgl_render_scene(draws, ndraws, rmin, rmax, 1.0f, &p, &img, rerr, sizeof rerr);
+        if (rc != 0 || !img) { fprintf(stderr, "free-cam render failed: %s\n", rerr); fail = 1; }
+        else {
+            snprintf(path, sizeof path, "%s/%s_freecam.png", outdir, tag);
+            if (dtex_write_png(path, img, W, H) == 0)
+                printf("wrote %s (free cam eye=%.0f,%.0f,%.0f at=%.0f,%.0f,%.0f fov=%.0f)\n",
+                       path, cam_eye[0],cam_eye[1],cam_eye[2], cam_at[0],cam_at[1],cam_at[2], cam_fov);
+            free(img);
+        }
+    } else
     for (size_t i = 0; i < sizeof views/sizeof views[0]; i++) {
         p.angle_deg = views[i].az; p.elev_deg = views[i].el;
         unsigned char *img = NULL; char rerr[256] = {0};
