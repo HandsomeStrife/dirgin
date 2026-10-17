@@ -772,3 +772,30 @@ IN PROGRESS (parallel agent): closing the room texture-binding gap — the oracl
 18 textures but the room draws more (why the tanks are grey); agent extends the oracle +
 re-matches to raise coverage past 52%. Integration script ready
 (scratchpad/integrate_binding.sh).
+
+## cont. 19 — binding gap closed (agent) + recomp #5 runtime-validated (2026-10-17)
+
+BINDING GAP (agent result, integrated): my hypothesis ("room uses many more than 18
+textures") was WRONG. Only ONE room atlas was genuinely missing: 068fff12 (z143k_co,
+the column/concrete texture, on reused streaming page TBP0 0x2c04). Adding it:
+52.3%->54.5% packets (8018->8359, +341), strictly additive (0 conflicts, 0 changed
+bindings). Textures the central column 068f0012 (56%->67%). Flagged PROVISIONAL
+(0.33 pixel corr on a reused page, but semantically-right + clean diff); kept in a
+separate out/z143_extended_oracle.json provisional_room_bindings list, NOT folded
+into the pristine 52.3% strong set. Updated pf_*.json installed; manifests re-baked.
+- THE KEY INSIGHT: the remaining grey is NOT oracle-limited — 95% of unbound packets
+  (by area) are TRULY NEVER RASTERISED in the 18 dump angles (back-faces + surfaces
+  the game's capture cameras never showed). So the grey in my EXTERNAL-ORBIT render is
+  largely BACK-FACES my render camera sees but the game's 18 angles didn't. The visual
+  fix for the tanks is a GAME-MATCHING CAMERA (back-faces behind the eye), NOT a bigger
+  oracle. More coverage needs new GS angles (Dan) or the shipped back-face heuristic.
+- Agent's actionable ask IF certainty wanted on 068fff12 vs 068fff13: one GS dump with
+  the camera close on a column face. Not a blocker.
+- NEXT (biggest visual lever): add a free/game-matching camera to renderer_gl (the
+  Vincent agent confirmed only fixed orbit presets exist) so renders show bound
+  front-faces from a game-like angle instead of back-faces.
+
+RECOMP #5 runtime-validated: `make scale` links all 13083 funcs into test_scale and
+runs the differential harness (memset vs libc x4000, leb128/chaincount regression,
+function table, EE FPU /0+overflow+20000 add/mul pairs vs host) -> ALL PASS, 0
+failures. The recovered funcs EXECUTE correctly, not just compile. #5 fully hardened.
