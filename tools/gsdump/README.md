@@ -54,11 +54,25 @@ Context set via A+D (desc 0xE: data64 + addr8). TEX0 fields: TBP0 0-13, TBW 14-1
 PSM 20-25, TW 26-29, TH 30-33, CBP 37-50, CPSM 51-54.
 
 ## Key findings (honest)
-- **The 4 captured dumps are the PROLOGUE area, NOT the decoded zone-0696 BMD
-  rooms.** Texture matching vs on-disk `tex_0696*` was negative (false positives
-  only). So these dumps **cannot** validate the 0696 room geometry/binding
-  directly — that still needs a dump captured *in* a 0696 room (a PCSX2 savestate
-  parked there, loaded headless with `-statefile`; see pcsx2-headless-setup.md).
+- **CORRECTION (2026-10-17): the 4 dumps are zone z143 "Mako Reactor 0"
+  (FileCode 068f), confirmed by Dan AND by texture correlation 1.0 vs on-disk
+  `068f*` extracts (`out/z143_mako_dump_binding_oracle.json`) AND by the dumps'
+  own embedded framebuffers (= the game-reference frames: red-cloak Vincent in
+  the reactor).** The earlier "these are the PROLOGUE area, not a decoded room"
+  conclusion below was WRONG: it compared the dumps against the wrong zone
+  (z150/0696 — which correctly did NOT match) and leapt to "prologue". That stale
+  note caused a multi-session cycle of binding z143 with heuristic GUESSES and
+  asking Dan for dumps he'd already given. Do not trust it. The dumps ARE this
+  room; the real gap is that we under-extract their bindings (see next bullet).
+  ~~The 4 captured dumps are the PROLOGUE area, NOT the decoded zone-0696 BMD
+  rooms. Texture matching vs on-disk tex_0696* was negative. These dumps cannot
+  validate the 0696 room directly.~~ (struck through — wrong, see correction.)
+- **dump 03 is the room binding goldmine:** `gsparse.py d03.bin` = 17,468 draws,
+  ~16k triangle primitives (11002 tristrip + 5623 tri + 259 trifan), and **56
+  distinct (TBP0,PSM) textures** bound to that geometry in ONE frame. The BMD
+  reconstruction only ever applied ~18 textures / 52% coverage — most of the real
+  binding is still unextracted in the dumps. dump 04 = 46 textures; dumps 01/02
+  are point/sprite-heavy (effects/UI) with only 2 textures, not room geometry.
 - **GS XYZ is screen-space** (post-VU projection, 12.4 fixed). World-space BMD
   comparison needs camera recovery; transform-invariant checks (UVs, texture
   binding, topology) are the usable path.
