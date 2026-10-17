@@ -756,3 +756,19 @@ REMAINING issues are COSMETIC, not placement:
   polish.
 The savestate Dan gave IS valid and in-room; I do NOT need a new one for placement.
 Net: room texture binding + placement are both essentially WORKING for z143.
+
+## cont. 18 — Vincent placement params + status (2026-10-17)
+
+Agent worked out the money-shot placement (render_scene_textured, existing binary):
+- scale=11 (char raw ~19.68 -> world ~216u), yaw=130 (3/4 back-turned), feet
+  (TX,FY,TZ)=(-180,0,630) on the walkway slab (floor Y=0), env=z143_room/room_heur.list.
+- Camera is a FIXED orbit preset (hero: az44 el11 zoom1.85); no free camera. Good enough
+  to match the game's low 3/4 shot. Retarget formula recorded in the agent transcript.
+- ISSUE: Vincent renders as a near-white OVER-EXPOSED silhouette — a LIT light-rig
+  blowout (shading bug), NOT placement/texture-missing. To fix for the final shot.
+- Renders: scratchpad/vincent/vincent_final_hero.png; shared binding-renders/vincent/.
+
+IN PROGRESS (parallel agent): closing the room texture-binding gap — the oracle had only
+18 textures but the room draws more (why the tanks are grey); agent extends the oracle +
+re-matches to raise coverage past 52%. Integration script ready
+(scratchpad/integrate_binding.sh).
