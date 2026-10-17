@@ -32,11 +32,14 @@ every subsystem builds warning-clean, engine suite 11/11.
   + loader + libdtex + renderer_gl, no Python on the path; matches
   export_room_bound.py (8018/15332, 178898 tris). Oracle 52.9% / heuristic 99.3%
   tris textured. Interior turntable views. Renders in /srv/shared/.../binding-renders/.
-- **Scene placement (blocker #3) investigated:** chunks are NOT all pre-placed
-  (several overlap at origin); `payload+0x1990` is a stub → placement is
-  runtime-set (like the binding). Mechanism found in the savestate scene nodes
-  (node+0x18 model, node+0x28 transform) but only effect instances are populated;
-  room-chunk placement needs a scene-loaded EE capture or a script reverse.
+- **Scene placement (blocker #3) — actually WORKS (corrected 2026-10-16).** An
+  earlier claim that placement was "broken/jumbled" was WRONG: top-down + 45° renders
+  show the 13 chunks assemble into a coherent Mako Reactor (central core + radial
+  console platforms + walkway). Offset chunks carry world positions in their vertices;
+  concentric core chunks are correctly at the origin. Validated against the game's own
+  framebuffer (GS-dump screenshots, binding-renders/game-reference/). Remaining issues
+  are COSMETIC, not placement: ~58% of surface AREA is still untextured (the oracle
+  had only 18 textures; the room uses more — binding-coverage closure in progress).
 - **Recompiler fix (blocker #5):** folded the segment-aware va2off + TEXT_END_VA
   from the oracle recompiler into the MAIN one — **2110 `.kel_draw_section` funcs
   (incl. MOD skin/skeleton) now decode instead of stubbing**, base funcs identical
