@@ -113,6 +113,39 @@ static int tex_load_largest(const char *path, unsigned char **rgba, int *w, int 
     return 0;
 }
 
+/* Load a raw RGBA sidecar: 8-byte little-endian header (u32 width, u32 height)
+ * then width*height*4 bytes of RGBA8. This lets -t accept a pre-decoded atlas
+ * (e.g. the MULTI-atlas Vincent texture: his red cloak lives in a different
+ * dtex image than his body, so no single "largest image" container holds the
+ * whole character -- the atlases are combined into one PNG, converted to .rgba). */
+static int tex_load_raw(const char *path, unsigned char **rgba, int *w, int *h,
+                        char *name, size_t namelen) {
+    *rgba = NULL; *w = *h = 0;
+    FILE *f = fopen(path, "rb");
+    if (!f) return 1;
+    uint32_t hdr[2];
+    if (fread(hdr, 4, 2, f) != 2) { fclose(f); return 1; }
+    long ww = (long)hdr[0], hh = (long)hdr[1];
+    if (ww <= 0 || hh <= 0 || ww > 8192 || hh > 8192) { fclose(f); return 1; }
+    size_t nbytes = (size_t)ww * (size_t)hh * 4;
+    unsigned char *buf = (unsigned char *)malloc(nbytes);
+    if (!buf) { fclose(f); return 1; }
+    if (fread(buf, 1, nbytes, f) != nbytes) { free(buf); fclose(f); return 1; }
+    fclose(f);
+    *rgba = buf; *w = (int)ww; *h = (int)hh;
+    if (name && namelen) snprintf(name, namelen, "raw %ldx%ld", ww, hh);
+    return 0;
+}
+
+/* dispatch on extension: .rgba -> raw sidecar; else dtex container (largest image). */
+static int tex_load_any(const char *path, unsigned char **rgba, int *w, int *h,
+                        char *name, size_t namelen) {
+    size_t L = strlen(path);
+    if (L > 5 && strcmp(path + L - 5, ".rgba") == 0)
+        return tex_load_raw(path, rgba, w, h, name, namelen);
+    return tex_load_largest(path, rgba, w, h, name, namelen);
+}
+
 /* dir(list) so relative mesh basenames resolve next to the .list file. */
 static void dirof(const char *path, char *dir, size_t n) {
     snprintf(dir, n, "%s", path);
@@ -294,7 +327,7 @@ int main(int argc, char **argv) {
     printf("gl    : %s\n", gfx_context_describe(ctx));
 
     unsigned char *ctex = NULL; int ctw = 0, cth = 0; char ctname[64] = {0};
-    if (!notex && tex_load_largest(chartex, &ctex, &ctw, &cth, ctname, sizeof ctname))
+    if (!notex && tex_load_any(chartex, &ctex, &ctw, &cth, ctname, sizeof ctname))
         fprintf(stderr, "warning: char texture decode failed (%s); char untextured\n", chartex);
     else if (!notex)
         printf("ctex  : %s  (%s)\n", chartex, ctname);
