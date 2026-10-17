@@ -160,12 +160,15 @@ static void dirof(const char *path, char *dir, size_t n) {
 static RVertex *place_character(const RVertex *src, size_t n,
                                 const float smin[3], const float smax[3],
                                 float s, float yaw_deg, float TX, float FY, float TZ,
-                                float out_min[3], float out_max[3]) {
+                                float up_y, float out_min[3], float out_max[3]) {
     RVertex *d = (RVertex *)malloc(n * sizeof(RVertex));
     if (!d) return NULL;
     float pivx = (smin[0] + smax[0]) * 0.5f;
     float pivz = (smin[2] + smax[2]) * 0.5f;
-    float pivy = smin[1];                         /* feet */
+    /* Feet = the lowest point along the room's up-axis. In a +Y-up room that is
+     * min-Y; in a -Y-up room (cam up_y<0, e.g. sea-of-flames z128) it is max-Y, and
+     * the body then extends toward -Y (up) instead of +Y. FY is always the feet. */
+    float pivy = (up_y < 0.0f) ? smax[1] : smin[1];
     float cy = cosf((float)(yaw_deg * M_PI / 180.0));
     float sy = sinf((float)(yaw_deg * M_PI / 180.0));
     for (int k = 0; k < 3; k++) { out_min[k] = 1e30f; out_max[k] = -1e30f; }
@@ -314,7 +317,7 @@ int main(int argc, char **argv) {
     printf("char  : %s  (%zu tris)  raw height %.2f\n", charpath, cn/3, cbmx[1]-cbmn[1]);
 
     float cmin[3], cmax[3];
-    RVertex *placed = place_character(cv, cn, cbmn, cbmx, scale, yaw, TX, FY, TZ, cmin, cmax);
+    RVertex *placed = place_character(cv, cn, cbmn, cbmx, scale, yaw, TX, FY, TZ, cam_up[1], cmin, cmax);
     free(cv);
     if (!placed) { fprintf(stderr, "placement alloc failed\n");
         for (int i = 0; i < ng; i++) { free(g[i].v); free(g[i].tex); } return 3; }
