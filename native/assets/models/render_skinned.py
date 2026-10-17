@@ -190,9 +190,30 @@ def enum_descs(buf, NB, P, G):
     return out
 
 
+def _giftag_prim(qwords):
+    """Extract the GS primitive type from a draw sub-packet's V4-32 num=2
+    GIFtag template. Each sub-packet opens with a V4-32 num=2 unpack (cmd 0x6c)
+    whose first quadword is a GIFtag; when its PRE bit is set, bits 47..57 are
+    the PRIM register and bits 0..2 of that are the primitive type:
+      3 = GS_PRIM_TRIANGLE (triangle LIST, 3 verts per tri, no shared edge)
+      4 = GS_PRIM_TRIANGLESTRIP (sliding 3-window, parity flip)
+    Returns the 3-bit prim type, or None if PRE is clear / tag malformed.
+    This is authoritative: ~1/3 of Vincent's draw sub-packets are LISTs, not
+    strips, and treating them as strips fabricates UV-bridging triangles that
+    smear atlas content across UV islands (the torso "scramble")."""
+    if qwords is None or len(qwords) < 2:
+        return None
+    low64 = int(qwords[0]) | (int(qwords[1]) << 32)
+    if not ((low64 >> 46) & 1):                # PRE (PRIM-enable) bit
+        return None
+    return (low64 >> 47) & 0x7                  # PRIM.PRIM (primitive type)
+
+
 def parse_drawpackets(buf, NB, start, end):
-    """Collect the draw sub-packets (each = colour/UV/S-8 index + MSCNT)."""
-    p = start; subs = []; cur = None
+    """Collect the draw sub-packets (each = GIFtag/colour/UV/S-8 index + MSCNT).
+    Each sub carries 'prim' = the GS primitive type from its GIFtag (see
+    _giftag_prim): 3=triangle LIST, 4=triangle STRIP (None -> assume strip)."""
+    p = start; subs = []; cur = None; pending_prim = None
     while p < end and p + 4 <= NB:
         code = _u32(buf, p); num = (code >> 16) & 0xff; cmd = (code >> 24) & 0xff
         if cmd in (0x01, 0x00, 0x04, 0x05, 0x10, 0x11, 0x13, 0x14, 0x15):
@@ -200,6 +221,7 @@ def parse_drawpackets(buf, NB, start, end):
         elif cmd == 0x17:                      # MSCNT = end of a sub-packet
             if cur:
                 subs.append(cur); cur = None
+            pending_prim = None
             p += 4
         elif 0x60 <= cmd <= 0x7f:
             vn = (cmd >> 2) & 3; vl = cmd & 3; bits = {0: 32, 1: 16, 2: 8, 3: 16}[vl]
@@ -207,14 +229,17 @@ def parse_drawpackets(buf, NB, start, end):
             if p + 4 + nb > NB:
                 break
             d = buf[p + 4:p + 4 + nb]
-            if cur is None:
-                cur = {}
-            if nc == 2 and bits == 16:
-                cur['uv'] = np.frombuffer(d, dtype='<i2').reshape(-1, 2).astype(float)
-            elif nc == 4 and bits == 8:                # V4-8 per-vertex RGBA colour
-                cur['col'] = np.frombuffer(d, dtype=np.uint8).reshape(-1, 4)
-            elif nc == 1 and bits == 8:
-                cur['idx'] = list(d)
+            if nc == 4 and bits == 32:                 # V4-32 GIFtag template
+                pending_prim = _giftag_prim(np.frombuffer(d, dtype='<u4'))
+            else:
+                if cur is None:
+                    cur = {'prim': pending_prim}
+                if nc == 2 and bits == 16:
+                    cur['uv'] = np.frombuffer(d, dtype='<i2').reshape(-1, 2).astype(float)
+                elif nc == 4 and bits == 8:            # V4-8 per-vertex RGBA colour
+                    cur['col'] = np.frombuffer(d, dtype=np.uint8).reshape(-1, 4)
+                elif nc == 1 and bits == 8:
+                    cur['idx'] = list(d)
             p += 4 + nb
             if p & 3:
                 p = (p + 3) & ~3
@@ -223,6 +248,25 @@ def parse_drawpackets(buf, NB, start, end):
     if cur and cur.get('idx'):
         subs.append(cur)
     return subs
+
+
+def sub_tris(idx, prim):
+    """Yield (ja, jb, jc) index-POSITION triples for one draw sub-packet's S-8
+    index run, honouring the GIFtag primitive type:
+      prim == 3 (triangle LIST):  non-overlapping triples (0,1,2)(3,4,5)...
+      otherwise  (triangle STRIP): sliding 3-window with odd-step parity flip.
+    Positions index into the sub-packet's parallel idx/uv/col streams; the
+    caller maps them to pool slots and UVs."""
+    n = len(idx)
+    if prim == 3:
+        for b in range(0, n - 2, 3):
+            yield (b, b + 1, b + 2)
+    else:
+        for j in range(n - 2):
+            if j & 1:
+                yield (j + 1, j, j + 2)
+            else:
+                yield (j, j + 1, j + 2)
 
 
 def assemble(buf, NB, Wm, bc):
@@ -284,18 +328,14 @@ def assemble(buf, NB, Wm, bc):
                     idx = sub.get('idx')
                     if not idx:
                         continue
-                    uv = sub.get('uv'); col = sub.get('col')
-                    for j in range(len(idx) - 2):          # GS triangle strip
-                        a, b, c = idx[j], idx[j + 1], idx[j + 2]
+                    uv = sub.get('uv'); col = sub.get('col'); prim = sub.get('prim')
+                    for ja, jb, jc in sub_tris(idx, prim):  # LIST or STRIP per GIFtag
+                        a, b, c = idx[ja], idx[jb], idx[jc]
                         if a == b or b == c or a == c:      # restart / degenerate
                             continue
                         if max(a, b, c) >= psize or not (seen[a] and seen[b] and seen[c]):
                             continue
-                        if j & 1:                           # odd-step parity flip
-                            a, b = b, a; ja, jb, jc = j + 1, j, j + 2
-                        else:
-                            ja, jb, jc = j, j + 1, j + 2
-                        if uv is not None and len(uv) > jc:
+                        if uv is not None and len(uv) > max(ja, jb, jc):
                             uv0, uv1, uv2 = tuple(uv[ja]), tuple(uv[jb]), tuple(uv[jc])
                         else:
                             uv0 = uv1 = uv2 = (0.0, 0.0)

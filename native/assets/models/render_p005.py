@@ -120,18 +120,14 @@ def decode_groups(buf, NB, Wm, bc):
                     idx = sub.get('idx')
                     if not idx:
                         continue
-                    uv = sub.get('uv')
-                    for j in range(len(idx) - 2):
-                        a, b, c = idx[j], idx[j + 1], idx[j + 2]
+                    uv = sub.get('uv'); prim = sub.get('prim')
+                    for ja, jb, jc in R.sub_tris(idx, prim):  # LIST or STRIP per GIFtag
+                        a, b, c = idx[ja], idx[jb], idx[jc]
                         if a == b or b == c or a == c:
                             continue
                         if max(a, b, c) >= psize or not (seen[a] and seen[b] and seen[c]):
                             continue
-                        if j & 1:
-                            a, b = b, a; ja, jb, jc = j + 1, j, j + 2
-                        else:
-                            ja, jb, jc = j, j + 1, j + 2
-                        if uv is not None and len(uv) > jc:
+                        if uv is not None and len(uv) > max(ja, jb, jc):
                             uv0, uv1, uv2 = tuple(uv[ja]), tuple(uv[jb]), tuple(uv[jc])
                         else:
                             uv0 = uv1 = uv2 = (0.0, 0.0)
