@@ -81,6 +81,21 @@ typedef struct {
     float fog_color[3];      /* GS FOG colour blended toward as F->0   */
     float alpha_ref;         /* alpha-test threshold (0..1); <0 disables */
     int   wire;              /* 1 -> wireframe overlay                 */
+
+    /* ---- FREE (explicit) CAMERA ----
+     * When use_explicit_cam != 0, rgl_render_scene() (and rgl_render_mesh())
+     * IGNORE the auto-framed orbit (angle_deg/elev_deg/dist_scale) and instead
+     * place the camera at `eye`, looking at `target`, with `up` (a zero vector
+     * -> world up {0,1,0}) and a vertical FOV of `fovy_deg` (<=0 -> 45). The
+     * near/far planes are derived from the scene's focus box so an eye placed
+     * INSIDE the room (near floor level, looking across it) frames the textured
+     * front-faces the game's own cameras saw. Leave use_explicit_cam = 0 to keep
+     * the legacy orbit path (render_char/render_scene/render_env_textured). */
+    int   use_explicit_cam;  /* 0 -> orbit (default); 1 -> eye/target/up/fovy  */
+    float eye[3];            /* camera position, world units                   */
+    float target[3];         /* look-at point, world units                     */
+    float up[3];             /* up hint; {0,0,0} -> {0,1,0}                     */
+    float fovy_deg;          /* vertical field of view, degrees; <=0 -> 45     */
 } rgl_params;
 
 /* Render `m` with `p`. On success writes a freshly malloc'd width*height*4 RGBA

@@ -497,6 +497,44 @@ static mat4 frame_camera(const float bbmin[3], const float bbmax[3],
     return frame_camera_ex(bbmin, bbmax, angle_deg, elev_deg, W, H, 1.0f, 0.0f);
 }
 
+/* FREE camera: place the eye explicitly, look at `target`, with `up` (zero ->
+ * world up) and vertical FOV `fovy_deg` (<=0 -> 45). The near/far planes are
+ * derived from the focus box [bbmin,bbmax] so geometry around an interior eye
+ * stays in the frustum regardless of where the eye sits. Reuses the same
+ * mat_lookat / mat_persp as the orbit path -- only the eye/target differ. */
+static mat4 explicit_camera(const float eye[3], const float target[3],
+                            const float up[3], float fovy_deg,
+                            const float bbmin[3], const float bbmax[3],
+                            int W, int H){
+    v3 e = { eye[0], eye[1], eye[2] };
+    v3 c = { target[0], target[1], target[2] };
+    v3 u = { 0.0f, 1.0f, 0.0f };
+    if (up && (up[0]!=0.0f || up[1]!=0.0f || up[2]!=0.0f))
+        u = (v3){ up[0], up[1], up[2] };
+
+    v3 center = { (bbmin[0]+bbmax[0])*0.5f,
+                  (bbmin[1]+bbmax[1])*0.5f,
+                  (bbmin[2]+bbmax[2])*0.5f };
+    v3 ext = { (bbmax[0]-bbmin[0])*0.5f,
+               (bbmax[1]-bbmin[1])*0.5f,
+               (bbmax[2]-bbmin[2])*0.5f };
+    float diag = 2.0f * sqrtf(ext.x*ext.x + ext.y*ext.y + ext.z*ext.z);
+    v3 d = v3sub(center, e);
+    float dist_ec = sqrtf(d.x*d.x + d.y*d.y + d.z*d.z);
+    /* far: enough to reach the box's far side from the eye, plus a full diag of
+     * slack; near: small relative to the far so interior detail isn't clipped. */
+    float zfar  = dist_ec + diag + 1.0f;
+    if (zfar < 1.0f) zfar = 1.0f;
+    float znear = zfar * 0.0005f;
+    if (znear < 0.5f) znear = 0.5f;
+
+    float fovy = DEG2RAD(fovy_deg > 0.0f ? fovy_deg : 45.0f);
+    float aspect = (float)W / (float)H;
+    mat4 view = mat_lookat(e, c, u);
+    mat4 proj = mat_persp(fovy, aspect, znear, zfar);
+    return mat_mul(proj, view);
+}
+
 int rgl_render_mesh(const RVertex *verts, size_t vcount,
                     const float bbmin[3], const float bbmax[3],
                     const rgl_params *p,
@@ -565,7 +603,9 @@ int rgl_render_mesh(const RVertex *verts, size_t vcount,
         goto fail;
     }
 
-    mat4 mvp = frame_camera(bbmin, bbmax, p->angle_deg, p->elev_deg, W, H);
+    mat4 mvp = p->use_explicit_cam
+        ? explicit_camera(p->eye, p->target, p->up, p->fovy_deg, bbmin, bbmax, W, H)
+        : frame_camera(bbmin, bbmax, p->angle_deg, p->elev_deg, W, H);
 
     /* ---- draw ---- */
     glViewport(0, 0, W, H);
@@ -692,8 +732,11 @@ int rgl_render_scene(const rgl_scene_draw *draws, int ndraws,
         return 1;
     }
 
-    mat4 mvp = frame_camera_ex(focus_min, focus_max, p->angle_deg, p->elev_deg,
-                               W, H, dist_scale, far_pad);
+    mat4 mvp = p->use_explicit_cam
+        ? explicit_camera(p->eye, p->target, p->up, p->fovy_deg,
+                          focus_min, focus_max, W, H)
+        : frame_camera_ex(focus_min, focus_max, p->angle_deg, p->elev_deg,
+                          W, H, dist_scale, far_pad);
 
     /* ---- common GL state + clear (ONCE: one shared depth buffer) ---- */
     glViewport(0, 0, W, H);

@@ -98,6 +98,11 @@ static int tex_load_largest(const char *path, unsigned char **rgba, int *w, int 
     return rc;
 }
 
+/* parse "x,y,z" into out[3]; returns 1 on success */
+static int parse_vec3(const char *s, float out[3]) {
+    return s && sscanf(s, "%f,%f,%f", &out[0], &out[1], &out[2]) == 3;
+}
+
 static unsigned char *read_file(const char *path, size_t *sz){
     FILE *f=fopen(path,"rb"); if(!f) return NULL;
     fseek(f,0,SEEK_END); long n=ftell(f); fseek(f,0,SEEK_SET);
@@ -114,6 +119,9 @@ int main(int argc, char **argv) {
     float dist_override = -1.f, el_override = 10.f;   /* -dist N => interior turntable */
     const char *only = NULL;                          /* -only CID => render one chunk */
     const char *skip = NULL;                          /* -skip "cid,cid" => exclude chunks */
+    float cam_eye[3], cam_at[3], cam_up[3]={0,1,0};    /* -eye / -at / -up free camera */
+    float cam_fov = 50.f;                              /* -fov deg */
+    int have_eye=0, have_at=0;
     for (int i=1;i<argc;i++){
         if (!strcmp(argv[i],"-m")&&i+1<argc) mdir=argv[++i];
         else if (!strcmp(argv[i],"-x")&&i+1<argc) xdir=argv[++i];
@@ -122,7 +130,12 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"-el")&&i+1<argc) el_override=(float)atof(argv[++i]);
         else if (!strcmp(argv[i],"-only")&&i+1<argc) only=argv[++i];
         else if (!strcmp(argv[i],"-skip")&&i+1<argc) skip=argv[++i];
+        else if (!strcmp(argv[i],"-eye")&&i+1<argc) have_eye=parse_vec3(argv[++i],cam_eye);
+        else if (!strcmp(argv[i],"-at") &&i+1<argc) have_at =parse_vec3(argv[++i],cam_at);
+        else if (!strcmp(argv[i],"-up") &&i+1<argc) parse_vec3(argv[++i],cam_up);
+        else if (!strcmp(argv[i],"-fov")&&i+1<argc) cam_fov=(float)atof(argv[++i]);
     }
+    int free_cam = (have_eye && have_at);
 
     Bucket bk[MAXFC]; int nb=0;
     int tot_pk=0, tot_bound=0;
@@ -210,6 +223,29 @@ int main(int argc, char **argv) {
         draws[ndraws].shade_mode=RGL_SHADE_PRELIT; draws[ndraws].tfx=RGL_TFX_MODULATE;
         draws[ndraws].tex_rgba=bk[i].tex; draws[ndraws].tex_w=bk[i].tw; draws[ndraws].tex_h=bk[i].th;
         ndraws++;
+    }
+
+    /* ---- FREE CAMERA: eye/target placed explicitly, single render ---- */
+    if (free_cam){
+        p.use_explicit_cam = 1;
+        p.eye[0]=cam_eye[0]; p.eye[1]=cam_eye[1]; p.eye[2]=cam_eye[2];
+        p.target[0]=cam_at[0]; p.target[1]=cam_at[1]; p.target[2]=cam_at[2];
+        p.up[0]=cam_up[0]; p.up[1]=cam_up[1]; p.up[2]=cam_up[2];
+        p.fovy_deg = cam_fov;
+        unsigned char *img=NULL; char rerr[256]={0};
+        /* focus box = whole room; explicit_camera derives near/far from it */
+        int rc=rgl_render_scene(draws,ndraws,rmin,rmax,1.0f,&p,&img,rerr,sizeof rerr);
+        if (rc!=0||!img){ fprintf(stderr,"free-cam render failed: %s\n",rerr); free(draws);
+            for (int i=0;i<nb;i++){ free(bk[i].v); free(bk[i].tex); } gfx_context_destroy(ctx); return 5; }
+        char path[1024]; snprintf(path,sizeof path,"%s/%s_freecam.png",outdir,only?only:"room_native");
+        if (dtex_write_png(path,img,W,H)==0)
+            printf("wrote %s (eye=%.0f,%.0f,%.0f at=%.0f,%.0f,%.0f fov=%.0f)\n",
+                   path,cam_eye[0],cam_eye[1],cam_eye[2],cam_at[0],cam_at[1],cam_at[2],cam_fov);
+        free(img);
+        free(draws);
+        for (int i=0;i<nb;i++){ free(bk[i].v); free(bk[i].tex); }
+        gfx_context_destroy(ctx);
+        return 0;
     }
 
     struct View { char name[16]; float az,el,zoom; };
