@@ -326,11 +326,24 @@ def rasterize(gif, tc, W=640, Hh=480, notex=False, only_tex=False, flat=False):
         drawn += 1
     return img, drawn, offscreen, textured
 
+def drawable_size(tris, default=(432, 512)):
+    """The GS draws the 3D scene into a native drawable that the video hardware then
+    stretches to the 4:3 display. In this game that drawable is 432x512 (verified:
+    rasterizing the raw screen-space XY straight into a 640x480 buffer puts Vincent
+    ~70px left of and far thinner than the game; at 432x512 resized to 640x480 his
+    silhouette lands on the game's). SCISSOR would give it exactly, but like XYOFFSET
+    it's inherited from the frozen state and not re-written by the packets, so it
+    reads 0 here -- seeding it from the freeze block is future work. FRAME FBW is 448
+    (64-aligned) for the main pass, consistent with a 432-wide drawable. Returns
+    (W, H); for now the verified 432x512 default, overridable by callers."""
+    return default
+
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith('--')]
     notex = '--notex' in sys.argv
     only_tex = '--only-tex' in sys.argv
     flat = '--flat' in sys.argv
+    native = '--native' in sys.argv     # render at the GS drawable size, resize to 4:3
     global _PAINTER, _NO_SENTINEL_Z
     _PAINTER = '--painter' in sys.argv
     _NO_SENTINEL_Z = '--no-sentinel-z' in sys.argv
@@ -342,8 +355,15 @@ def main():
     tc = TexCache(args[0])
     print(f"tris={len(gif.tris)} verts={gif.nverts}")
     from PIL import Image
-    img, drawn, off, textured = rasterize(gif, tc, notex=notex, only_tex=only_tex, flat=flat)
-    Image.fromarray(np.clip(img, 0, 255).astype(np.uint8), 'RGB').save(args[1])
+    if native:
+        dw, dh = drawable_size(gif.tris)
+        print(f"native drawable {dw}x{dh} -> resize to 640x480 (4:3 display)")
+        img, drawn, off, textured = rasterize(gif, tc, W=dw, Hh=dh, notex=notex, only_tex=only_tex, flat=flat)
+        out = Image.fromarray(np.clip(img, 0, 255).astype(np.uint8), 'RGB').resize((640, 480))
+    else:
+        img, drawn, off, textured = rasterize(gif, tc, notex=notex, only_tex=only_tex, flat=flat)
+        out = Image.fromarray(np.clip(img, 0, 255).astype(np.uint8), 'RGB')
+    out.save(args[1])
     print(f"rasterized {drawn} tris ({textured} textured, {off} offscreen) -> {args[1]}")
     print(f"tex decode: {tc.stats}  distinct tex0 decoded={len(tc.cache)}")
 
