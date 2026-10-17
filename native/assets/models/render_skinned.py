@@ -290,23 +290,35 @@ def assemble(buf, NB, Wm, bc):
                     hdrs.append((p, cnt, fl))
             elif nc == 1 and bits == 8 and num > 2 and p + 4 + num <= NB:
                 idata = list(buf[p + 4:p + 4 + num])
-                uv = col = None; q = p + 4 + ((num + 3) & ~3); gg = 0
-                while q + 4 <= NB and gg < 48:
-                    gg += 1; uq = _unpack(q)
-                    if uq is None:
-                        q += 4; continue
-                    n2, nc2, b2, nb2 = uq
-                    if nc2 == 1 and b2 == 8 and n2 > 2:      # next idx -> stop
-                        break
-                    if nc2 == 4 and b2 == 32 and n2 == 2:    # next header -> stop
-                        break
-                    if nc2 == 2 and b2 == 16 and uv is None:
-                        uv = np.frombuffer(buf[q + 4:q + 4 + nb2], dtype='<i2').reshape(-1, 2).astype(float)
-                    elif nc2 == 4 and b2 == 8 and col is None:
-                        col = np.frombuffer(buf[q + 4:q + 4 + nb2], dtype=np.uint8).reshape(-1, 4)
-                    q += 4 + ((nb2 + 3) & ~3)
-                    if uv is not None and col is not None:
-                        break
+                # UV + colour PRECEDE the S-8 index in every draw sub-packet.
+                # Per FORMAT.md 8.4 the sub-packet is laid out
+                #   V4-32 num=2 @0 (GIFtag)  V4-8 @3 (RGBA)  V2-16 @2 (UV)
+                #   V1-8 @2 (S-8 index)  MSCNT
+                # so the V2-16 UV block ends EXACTLY at this index opcode: its
+                # UNPACK sits at  p - 4 - num*4  with the SAME num (V2-16 = 4 B/
+                # vertex). The old code scanned FORWARD past the index, but the
+                # very next word is the next sub-packet's V4-32 header, which it
+                # treated as a stop -- so UV came back None and defaulted to
+                # (0,0) for ~99% of strips. Reading BACKWARD recovers it. Verified
+                # against char e000: 411/411 real @2 index streams have this exact
+                # adjacent V2-16 (and a V4-8 colour just before it).
+                uv = col = None
+                uvo = p - 4 - num * 4
+                uu = _unpack(uvo) if uvo >= 0 else None
+                if uu and uu[1] == 2 and uu[2] == 16 and uu[0] == num:
+                    uv = np.frombuffer(buf[uvo + 4:uvo + 4 + num * 4],
+                                       dtype='<i2').reshape(-1, 2).astype(float)
+                    # colour = the V4-8 (same num) immediately before the UV;
+                    # tolerate a STCYCL/STMOD word or two between the two blocks.
+                    for back in range(4, 44, 4):
+                        co = uvo - back - num * 4
+                        if co < 0:
+                            break
+                        cu = _unpack(co)
+                        if cu and cu[1] == 4 and cu[2] == 8 and cu[0] == num:
+                            col = np.frombuffer(buf[co + 4:co + 4 + num * 4],
+                                                dtype=np.uint8).reshape(-1, 4)
+                            break
                 idxs.append((p, num, idata, uv, col))
         p += 4
     # 3) associate header -> idx (in-region first, then greedy-nearest by count),
