@@ -226,29 +226,39 @@ def parse_drawpackets(buf, NB, start, end):
 
 
 def assemble(buf, NB, Wm, bc):
-    """Return (verts[N,3], tris). Decoder validated 2026-10-15 against the
-    community model rips (Vincent p005, Weiss e000, Azul e001, Rosso e003) --
-    exact vertex+triangle counts and near pixel-identical renders:
+    """Return (verts[N,3], normals[N,3], tris). Decoder validated 2026-10-15/-17
+    against the community model rips and the game's own smd draw structure:
 
       * POSITIONS: each vertex is skinned into a 256-slot scatter pool per group
         (build_group_pool). The position-offset dequant is **/2048** -- i.e.
         ITOF12 (/4096) x2. The x2 was confirmed by matching the rips' body
         thickness exactly (without it the mesh collapses onto the skeleton).
-      * ENUMERATION: submeshes are found by a FLAT scan of every STCYCL(0x0404)
-        packet (906 for Vincent). The previous group-descriptor walk missed ~18%
-        of them (742/906), which is why models came out with holes.
-      * CONNECTIVITY: each submesh begins with a V4-32 num=2 control header;
-        qw.x & 0x7fff = vertex count, qw1.y & 0x8000 = connectivity flag
-        (set => TRIANGLE LIST, clear => TRIANGLE STRIP). Same per-submesh flag
-        the BMD rooms use (VU program_A idx 43). The idx (S-8) stream indexes the
-        submesh's GROUP pool; the group is located by file position (its skinning
-        batch data precedes its draw packets)."""
-    import bisect
+      * ENUMERATION + CONNECTIVITY: taken from the game's OWN draw structure, not
+        a heuristic scan. Each group's  group+0x08  points at a self-terminating
+        array of draw-DESCRIPTOR offsets (enum_descs); each descriptor's VIF run
+        is a sequence of sub-packets (parse_drawpackets), every sub-packet being
+          V4-32 num=2 @0 (GIFtag)  V4-8 @3 (RGBA)  V2-16 @2 (UV)
+          V1-8 @2 (S-8 POOL INDEX)  MSCNT
+        and its S-8 indices form a GS triangle STRIP into THIS group's pool
+        (FORMAT.md 8.4). The descriptor array lives on the group object, so every
+        sub-packet is associated to its pool DIRECTLY -- no file-position bisect,
+        no count-matching, no dropped streams.
+
+      * HISTORY / why this changed: the previous build enumerated draws by a FLAT
+        word-scan for  V4-32 num=2  "headers" and  V1-8  index streams, then
+        paired them by  header.vtxCount == idx.length  and located the group by
+        file position. On char e000 that scan found 475 candidate index streams
+        but only 411 had a count-matching header, so **64 real strips (8649
+        indices) were silently dropped** -- the cape/arms/legs came out missing,
+        3127 tris instead of ~5.5k. The descriptor walk recovers all 405 real
+        sub-packets -> 5536 triangles. The UV read is UNCHANGED in value: the V2-16
+        parse_drawpackets collects (forward, within the sub-packet) is byte-for-
+        byte identical to the earlier backward-read UV fix on all 405 streams
+        (verified), so UV degeneracy stays ~0% (0 all-zero-UV tris)."""
     n = _u16(buf, 0x10); offs = [_u32(buf, 0x14 + 4 * i) for i in range(n)]
     smdblk = [(buf[o:o + 8].rstrip(b'\0').decode('latin1'), o + 0x10)
               for o in offs if buf[o + 8:o + 11] == b'smd']
-    # 1) build scatter pools per group; record file anchor + base + size.
-    verts = []; norms = []; groups = []
+    verts = []; norms = []; tris = []
     for name, P in smdblk:
         if _u32(buf, P) != SM2_MAGIC:
             continue
@@ -260,116 +270,41 @@ def assemble(buf, NB, Wm, bc):
             if r is None:
                 continue
             pool, nrmp, seen = r
-            base = len(verts); verts.extend([tuple(v) for v in pool])
+            base = len(verts); psize = len(pool)
+            verts.extend([tuple(v) for v in pool])
             norms.extend([tuple(v) for v in nrmp])
-            groups.append((P + _u32(buf, G + 0x0c), base, len(pool), seen))
-    if not groups:
+            # This group's draw descriptors (group+0x08) -> sub-packet strips.
+            descs = enum_descs(buf, NB, P, G)
+            for di, (doff, vifptr) in enumerate(descs):
+                start = P + vifptr
+                # The VIF run ends at the next descriptor's run (self-terminating
+                # on an unknown opcode for the last one).
+                end = (P + descs[di + 1][1]) if di + 1 < len(descs) else NB
+                for sub in parse_drawpackets(buf, NB, start, end):
+                    idx = sub.get('idx')
+                    if not idx:
+                        continue
+                    uv = sub.get('uv'); col = sub.get('col')
+                    for j in range(len(idx) - 2):          # GS triangle strip
+                        a, b, c = idx[j], idx[j + 1], idx[j + 2]
+                        if a == b or b == c or a == c:      # restart / degenerate
+                            continue
+                        if max(a, b, c) >= psize or not (seen[a] and seen[b] and seen[c]):
+                            continue
+                        if j & 1:                           # odd-step parity flip
+                            a, b = b, a; ja, jb, jc = j + 1, j, j + 2
+                        else:
+                            ja, jb, jc = j, j + 1, j + 2
+                        if uv is not None and len(uv) > jc:
+                            uv0, uv1, uv2 = tuple(uv[ja]), tuple(uv[jb]), tuple(uv[jc])
+                        else:
+                            uv0 = uv1 = uv2 = (0.0, 0.0)
+                        c0 = _corner_col(col, ja); c1 = _corner_col(col, jb)
+                        c2 = _corner_col(col, jc)
+                        tris.append((base + a, base + b, base + c,
+                                     uv0, uv1, uv2, c0, c1, c2))
+    if not verts:
         return np.zeros((0, 3)), np.zeros((0, 3)), []
-    groups.sort(); ganch = [g[0] for g in groups]
-    # 2) collect submesh HEADERS and INDEX streams by a word-aligned scan.
-    #    Models use two layouts: INTERLEAVED (header..idx..uv together, Vincent) and
-    #    SEPARATED (all headers in one region, idx streams in another). A greedy
-    #    association by the idx-length==vertex-count invariant handles both. Each
-    #    idx stream also grabs the UV (V2-16) + colour (V4-8) that follow it.
-    def _unpack(o):
-        w = _u32(buf, o); cmd = (w >> 24) & 0x7f; num = (w >> 16) & 0xff
-        if not (0x60 <= cmd <= 0x7f):
-            return None
-        vl = cmd & 3; vn = (cmd >> 2) & 3; nc = vn + 1
-        bits = {0: 32, 1: 16, 2: 8, 3: 16}[vl]
-        return num, nc, bits, nc * bits // 8 * num
-    hdrs = []; idxs = []; p = 0
-    while p + 4 <= NB:
-        u = _unpack(p)
-        if u:
-            num, nc, bits, nb = u
-            if nc == 4 and bits == 32 and num == 2 and p + 36 <= NB:
-                cnt = _u32(buf, p + 4 + 16) & 0x7fff
-                fl = bool(_u32(buf, p + 4 + 20) & 0x8000)
-                if 2 < cnt < 4096:
-                    hdrs.append((p, cnt, fl))
-            elif nc == 1 and bits == 8 and num > 2 and p + 4 + num <= NB:
-                idata = list(buf[p + 4:p + 4 + num])
-                # UV + colour PRECEDE the S-8 index in every draw sub-packet.
-                # Per FORMAT.md 8.4 the sub-packet is laid out
-                #   V4-32 num=2 @0 (GIFtag)  V4-8 @3 (RGBA)  V2-16 @2 (UV)
-                #   V1-8 @2 (S-8 index)  MSCNT
-                # so the V2-16 UV block ends EXACTLY at this index opcode: its
-                # UNPACK sits at  p - 4 - num*4  with the SAME num (V2-16 = 4 B/
-                # vertex). The old code scanned FORWARD past the index, but the
-                # very next word is the next sub-packet's V4-32 header, which it
-                # treated as a stop -- so UV came back None and defaulted to
-                # (0,0) for ~99% of strips. Reading BACKWARD recovers it. Verified
-                # against char e000: 411/411 real @2 index streams have this exact
-                # adjacent V2-16 (and a V4-8 colour just before it).
-                uv = col = None
-                uvo = p - 4 - num * 4
-                uu = _unpack(uvo) if uvo >= 0 else None
-                if uu and uu[1] == 2 and uu[2] == 16 and uu[0] == num:
-                    uv = np.frombuffer(buf[uvo + 4:uvo + 4 + num * 4],
-                                       dtype='<i2').reshape(-1, 2).astype(float)
-                    # colour = the V4-8 (same num) immediately before the UV;
-                    # tolerate a STCYCL/STMOD word or two between the two blocks.
-                    for back in range(4, 44, 4):
-                        co = uvo - back - num * 4
-                        if co < 0:
-                            break
-                        cu = _unpack(co)
-                        if cu and cu[1] == 4 and cu[2] == 8 and cu[0] == num:
-                            col = np.frombuffer(buf[co + 4:co + 4 + num * 4],
-                                                dtype=np.uint8).reshape(-1, 4)
-                            break
-                idxs.append((p, num, idata, uv, col))
-        p += 4
-    # 3) associate header -> idx (in-region first, then greedy-nearest by count),
-    #    and build triangles against the group pool located by file position.
-    hoff = [h[0] for h in hdrs]; ioff = [i[0] for i in idxs]
-    byc = {}
-    for k, it in enumerate(idxs):
-        byc.setdefault(it[1], []).append(k)
-    used = set(); tris = []
-    for hi, (ho, cnt, is_list) in enumerate(hdrs):
-        end = hoff[hi + 1] if hi + 1 < len(hdrs) else NB
-        chosen = None
-        lo = bisect.bisect_left(ioff, ho); hq = bisect.bisect_left(ioff, end)
-        for k in range(lo, hq):
-            if k not in used and idxs[k][1] == cnt:
-                chosen = k; break
-        if chosen is None:
-            best = None
-            for k in byc.get(cnt, []):
-                if k in used:
-                    continue
-                d = abs(ioff[k] - ho)
-                if best is None or d < best[1]:
-                    best = (k, d)
-            if best:
-                chosen = best[0]
-        if chosen is None:
-            continue
-        used.add(chosen)
-        _o, _num, idx, uv, col = idxs[chosen]
-        gi = max(0, bisect.bisect_right(ganch, ho) - 1)
-        _anchor, base, psize, seen = groups[gi]
-        rng = range(0, len(idx) - 2, 3) if is_list else range(len(idx) - 2)
-        for j in rng:
-            a, b, c = idx[j], idx[j + 1], idx[j + 2]
-            if a == b or b == c or a == c:
-                continue
-            if max(a, b, c) >= psize or not (seen[a] and seen[b] and seen[c]):
-                continue
-            if (not is_list) and (j & 1):
-                a, b = b, a; ja, jb, jc = j + 1, j, j + 2
-            else:
-                ja, jb, jc = j, j + 1, j + 2
-            if uv is not None and len(uv) > jc:
-                uv0, uv1, uv2 = tuple(uv[ja]), tuple(uv[jb]), tuple(uv[jc])
-            else:
-                uv0 = uv1 = uv2 = (0.0, 0.0)
-            c0 = _corner_col(col, ja); c1 = _corner_col(col, jb)
-            c2 = _corner_col(col, jc)
-            tris.append((base + a, base + b, base + c,
-                         uv0, uv1, uv2, c0, c1, c2))
     return np.array(verts), np.array(norms), tris
 
 
