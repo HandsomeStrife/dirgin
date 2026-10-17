@@ -188,7 +188,7 @@ static const char *SHADE_FS =
     "    }\n"
     "    if (uAlphaRef >= 0.0 && c.a < uAlphaRef) discard;\n"
     "    if (uFogEnable == 1) c.rgb = mix(uFogColor, c.rgb, vFog);\n"
-    "    fragColor = c;\n"
+    "    fragColor = vec4(c.rgb, 1.0);\n"
     "}\n";
 
 /* 3-light rig for VU1 program D (RENDER-MATH §6).

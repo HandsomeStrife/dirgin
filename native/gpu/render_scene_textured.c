@@ -305,9 +305,31 @@ int main(int argc, char **argv) {
         draws[i].shade_mode = RGL_SHADE_PRELIT; draws[i].tfx = RGL_TFX_MODULATE;
         draws[i].tex_rgba = g[i].tex; draws[i].tex_w = g[i].tw; draws[i].tex_h = g[i].th;
     }
+    /* The character body atlas can only be MODULATE-combined onto the mesh if
+     * the mesh carries real per-vertex UVs. char_e000.mesh (the render_skinned.py
+     * export) currently collapses almost all of its UVs onto (0,0) -- which is
+     * the atlas's TRANSPARENT padding corner (texel 0,0,0,0). MODULATE there
+     * yields rgb=0, alpha=0 over the whole body, so the texture erases both the
+     * body colour AND the lit shading, and the alpha=0 makes the actor read as a
+     * transparent (page-white) silhouette. Until the mesh exporter emits proper
+     * UVs, detect that degeneracy and draw the actor LIT + UNtextured, so its
+     * authentic directional shading (cape / hair / arms) is what shows. A mesh
+     * with real UVs is textured normally. */
+    size_t uv_zero = 0;
+    for (size_t k = 0; k < cn; k++)
+        if (fabsf(placed[k].u) < 1e-4f && fabsf(placed[k].v) < 1e-4f) uv_zero++;
+    int char_uv_degenerate = (cn > 0 && uv_zero * 10 >= cn * 9);  /* >=90% at (0,0) */
+    if (char_uv_degenerate)
+        printf("char  : UVs degenerate (%zu/%zu at origin) -> LIT untextured (atlas unmappable)\n",
+               uv_zero, cn);
+
     draws[ng].verts = placed; draws[ng].vcount = cn;
     draws[ng].shade_mode = RGL_SHADE_LIT; draws[ng].tfx = RGL_TFX_MODULATE;
-    draws[ng].tex_rgba = ctex; draws[ng].tex_w = ctw; draws[ng].tex_h = cth;
+    if (char_uv_degenerate) {
+        draws[ng].tex_rgba = NULL; draws[ng].tex_w = 0; draws[ng].tex_h = 0;
+    } else {
+        draws[ng].tex_rgba = ctex; draws[ng].tex_w = ctw; draws[ng].tex_h = cth;
+    }
     int ndraws = ng + 1;
 
     /* frame on the CHARACTER box, pull the eye back to show the room around it */
