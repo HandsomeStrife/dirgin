@@ -733,3 +733,26 @@ This closes the port-state agent's #1 gap for the ENVIRONMENT: the shipping engi
 frame loop now renders real decoded room content end to end (the char capstone only
 did this off a frozen snapshot). Caveats unchanged: scene placement overlap + camera
 framing are orthogonal. Live frame synced to binding-renders/interior/.
+
+## cont. 17 — PLACEMENT RE-ASSESSED: the room is largely CORRECT (2026-10-16, corrected)
+
+I was WRONG in cont. 10/11/15 to call the whole-room placement "broken/jumbled."
+Dan (correctly) pushed back. Rendering top-down (-el 88) and at 45deg shows the 13
+chunks assemble into a COHERENT Mako Reactor: a central cylindrical core with a
+textured band of console panels around its upper section, console platforms arranged
+RADIALLY around it, and a stone walkway. The offset chunks (0212/0312/0412/0512/0c12/
+0712/0d12) carry their world positions in the vertices (correctly placed); the
+concentric core chunks (0012/0112/0612) sit at the origin because they ARE concentric
+(correct). My "overlap" alarm came from reading the near-identical BBOXES of
+0912/0a12/0b12 without looking at the actual render — removing those 3 barely changes
+the image (they're small, tucked at the core), so they are not a gross problem.
+Views: /srv/shared/dirge-port/binding-renders/assembled/{room_topdown,room_angled_45}.png.
+
+REMAINING issues are COSMETIC, not placement:
+- Some core surfaces are untextured (grey) = unbound packets the GS-dump oracle never
+  saw AND the heuristic left low-confidence (068f0012 is the isolated chunk, 59% within
+  200u). A real atlas for the core would need either more GS angles or a manual bind.
+- Camera framing is an external orbit tuned per-chunk; a proper interior free-camera is
+  polish.
+The savestate Dan gave IS valid and in-room; I do NOT need a new one for placement.
+Net: room texture binding + placement are both essentially WORKING for z143.

@@ -113,6 +113,7 @@ int main(int argc, char **argv) {
     const char *outdir = "out";
     float dist_override = -1.f, el_override = 10.f;   /* -dist N => interior turntable */
     const char *only = NULL;                          /* -only CID => render one chunk */
+    const char *skip = NULL;                          /* -skip "cid,cid" => exclude chunks */
     for (int i=1;i<argc;i++){
         if (!strcmp(argv[i],"-m")&&i+1<argc) mdir=argv[++i];
         else if (!strcmp(argv[i],"-x")&&i+1<argc) xdir=argv[++i];
@@ -120,6 +121,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"-dist")&&i+1<argc) dist_override=(float)atof(argv[++i]);
         else if (!strcmp(argv[i],"-el")&&i+1<argc) el_override=(float)atof(argv[++i]);
         else if (!strcmp(argv[i],"-only")&&i+1<argc) only=argv[++i];
+        else if (!strcmp(argv[i],"-skip")&&i+1<argc) skip=argv[++i];
     }
 
     Bucket bk[MAXFC]; int nb=0;
@@ -127,6 +129,7 @@ int main(int argc, char **argv) {
 
     for (int ci=0; ci<NCHUNK; ci++) {
         if (only && strcmp(only,CHUNKS[ci])!=0) continue;
+        if (skip && strstr(skip,CHUNKS[ci])) continue;
         char cpath[1024]; snprintf(cpath,sizeof cpath,"%s/%s.bin",xdir,CHUNKS[ci]);
         size_t sz; unsigned char *buf=read_file(cpath,&sz);
         if (!buf){ fprintf(stderr,"skip %s: no file\n",CHUNKS[ci]); continue; }
