@@ -76,10 +76,11 @@ class GIFInterp:
 
     def _new_draw(self):
         c=self.prim_ctx()
+        # PRIM bits: 0-2 type, 3 IIP, 4 TME, 5 FGE, 6 ABE, 7 AA1, 8 FST, 9 CTXT.
         self._cur=dict(prim=self.prim, ptype=self.prim&7, verts=[],
                        tex0=self.tex0[c], frame=self.frame[c],
                        scissor=self.scissor[c], xyoffset=self.xyoffset[c],
-                       fst=(self.prim>>4)&1, tme=(self.prim>>1)&1,
+                       fst=(self.prim>>8)&1, tme=(self.prim>>4)&1,
                        abe=(self.prim>>6)&1)
         self.draws.append(self._cur)
 
