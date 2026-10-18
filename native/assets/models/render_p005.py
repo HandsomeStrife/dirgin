@@ -120,7 +120,7 @@ def decode_groups(buf, NB, Wm, bc):
                     idx = sub.get('idx')
                     if not idx:
                         continue
-                    uv = sub.get('uv'); prim = sub.get('prim')
+                    uv = sub.get('uv'); prim = sub.get('prim'); col = sub.get('col')
                     for ja, jb, jc in R.sub_tris(idx, prim):  # LIST or STRIP per GIFtag
                         a, b, c = idx[ja], idx[jb], idx[jc]
                         if a == b or b == c or a == c:
@@ -131,7 +131,9 @@ def decode_groups(buf, NB, Wm, bc):
                             uv0, uv1, uv2 = tuple(uv[ja]), tuple(uv[jb]), tuple(uv[jc])
                         else:
                             uv0 = uv1 = uv2 = (0.0, 0.0)
-                        tris.append([base + a, base + b, base + c, uv0, uv1, uv2, gid])
+                        # per-corner RGBA (game vertex colour) at idx 7,8,9 (gid stays 6)
+                        c0 = R._corner_col(col, ja); c1 = R._corner_col(col, jb); c2 = R._corner_col(col, jc)
+                        tris.append([base + a, base + b, base + c, uv0, uv1, uv2, gid, c0, c1, c2])
             gmeta.append((f"{name}@{P:x}.g{gi}", base, psize, seen, pool))
             gid += 1
     return (np.array(verts) if verts else np.zeros((0, 3)),
