@@ -217,7 +217,7 @@ int main(int argc, char **argv) {
      * touches ONLY the environment, never the LIT character. -colscale 1.0 shows the
      * room exactly as-baked; -neutralcol shows the decoded textures at full bright. */
     float colscale = 1.8f;
-    int neutralcol = 0, flipy = 0, notex = 0;
+    int neutralcol = 0, flipy = 0, notex = 0, charprelit = 0;
     float cam_eye[3], cam_at[3], cam_up[3] = {0,1,0}, cam_fov = 50.f;  /* -eye/-at free camera */
     int have_eye = 0, have_at = 0;
     int opt_W = 1280, opt_H = 960;   /* -W/-H override output size (anamorphic match) */
@@ -235,6 +235,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "-z")  && i+1<argc) TZ    = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "-colscale") && i+1<argc) colscale = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "-neutralcol")) neutralcol = 1;
+        else if (!strcmp(argv[i], "-charprelit")) charprelit = 1;
         else if (!strcmp(argv[i], "-flipy")) flipy = 1;
         else if (!strcmp(argv[i], "-notex")) notex = 1;
         else if (!strcmp(argv[i],"-eye")&&i+1<argc) have_eye=(sscanf(argv[++i],"%f,%f,%f",&cam_eye[0],&cam_eye[1],&cam_eye[2])==3);
@@ -369,7 +370,11 @@ int main(int argc, char **argv) {
                uv_zero, cn);
 
     draws[ng].verts = placed; draws[ng].vcount = cn;
-    draws[ng].shade_mode = RGL_SHADE_LIT; draws[ng].tfx = RGL_TFX_MODULATE;
+    /* -charprelit: shade the actor by its baked GS vertex colour (texel*vcol, like
+     * the game's GIF modulate) instead of a synthetic light rig, which over-brightens
+     * near-vertical surfaces (e.g. hair) into a washed/blonde look. */
+    draws[ng].shade_mode = charprelit ? RGL_SHADE_PRELIT : RGL_SHADE_LIT;
+    draws[ng].tfx = RGL_TFX_MODULATE;
     if (char_uv_degenerate) {
         draws[ng].tex_rgba = NULL; draws[ng].tex_w = 0; draws[ng].tex_h = 0;
     } else {

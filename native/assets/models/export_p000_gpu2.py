@@ -28,9 +28,13 @@ def main():
     bc = sk['bone_count']; Wm = [np.array(m, float) for m in sk['world_bind']]
     V, N, tris, gmeta = P.decode_groups(buf, NB, Wm, bc)
 
-    # L01 LOD family only
+    # LOD family selection: FAM env ('L01' default, 'ALL' = every family)
+    want = os.environ.get('FAM', 'ALL')   # ALL families = complete body (GPU z-buffer handles overlap)
     def fam(g): return gmeta[g][0].split('@')[0]
-    keep = {g for g in range(len(gmeta)) if 'L01' in fam(g)}
+    if want == 'ALL':
+        keep = set(range(len(gmeta)))
+    else:
+        keep = {g for g in range(len(gmeta)) if want in fam(g)}
     tris = [t for t in tris if t[6] in keep]
 
     # per-triangle runtime TEX0 (dump UV-triple match), per-group majority fallback
