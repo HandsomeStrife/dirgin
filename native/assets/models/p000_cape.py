@@ -26,8 +26,14 @@ QMIN = 1e-6
 
 # The hero camera, exactly as passed to render_scene_textured (see notes/HANDOFF.md):
 # GS drawable 432x512 -> crop 2592x2048+36+0 of a 2628x2048 render.
-HERO_CAM = dict(eye=(-1419, -116, -1130), at=(-631, -77, -515), up=(0.030, -0.999, 0.023),
-                fov=59.28, W=2628, H=2048, crop_w=2592, crop_x=36, dw=432, dh=512)
+# Fitted (2026-10-24) to 5164 dump room vertices matched to our z128 mesh: median
+# reprojection error 0.025 px (0.025 px at depth < 60). The old hand-rounded camera
+# (eye -1419,-116,-1130 / at -631,-77,-515 / up 0.030,-0.999,0.023 / fov 59.28) was
+# fine far away but 4.7 px off at depth ~25, so the dump-posed cape landed ~3 px
+# off the railing posts and poked through them.
+HERO_CAM = dict(eye=(-1419.227, -115.571, -1129.797), at=(-631.348, -77.227, -515.163),
+                up=(0.03023, -0.99926, 0.02358),
+                fov=59.2749, W=2628, H=2048, crop_w=2592, crop_x=36, dw=432, dh=512)
 
 
 def _basis(cam=HERO_CAM):

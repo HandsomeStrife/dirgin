@@ -219,6 +219,7 @@ int main(int argc, char **argv) {
      * room exactly as-baked; -neutralcol shows the decoded textures at full bright. */
     float colscale = 1.8f;
     int neutralcol = 0, flipy = 0, notex = 0, charprelit = 0;
+    float char_aref = -1.0f;   /* -charatest: GS ATE pass for the character (cape) */
     float cam_eye[3], cam_at[3], cam_up[3] = {0,1,0}, cam_fov = 50.f;  /* -eye/-at free camera */
     int have_eye = 0, have_at = 0;
     int opt_W = 1280, opt_H = 960;   /* -W/-H override output size (anamorphic match) */
@@ -237,6 +238,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "-colscale") && i+1<argc) colscale = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "-neutralcol")) neutralcol = 1;
         else if (!strcmp(argv[i], "-charprelit")) charprelit = 1;
+        else if (!strcmp(argv[i], "-charatest") && i+1<argc) char_aref = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "-flipy")) flipy = 1;
         else if (!strcmp(argv[i], "-notex")) notex = 1;
         else if (!strcmp(argv[i],"-eye")&&i+1<argc) have_eye=(sscanf(argv[++i],"%f,%f,%f",&cam_eye[0],&cam_eye[1],&cam_eye[2])==3);
@@ -477,6 +479,10 @@ int main(int argc, char **argv) {
         draws[ng].tex_rgba = NULL; draws[ng].tex_w = 0; draws[ng].tex_h = 0;
     } else {
         draws[ng].tex_rgba = ctex; draws[ng].tex_w = ctw; draws[ng].tex_h = cth;
+    }
+    if (char_aref >= 0.0f && draws[ng].tex_rgba) {
+        draws[ng].gs_atest = 1; draws[ng].alpha_ref = char_aref;
+        printf("atest : character ref %.4f (blend, depth only where As >= ref)\n", char_aref);
     }
     int ndraws = ng + 1;
 

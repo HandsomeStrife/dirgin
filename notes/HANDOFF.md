@@ -66,10 +66,25 @@ Read this first instead of re-deriving. Review images: notes/review/ (README exp
     -l native/assets/models/out/z128_room_v2/room.list \
     -m native/assets/models/out/p000_gpu3/vincent_p000.mesh \
     -t native/assets/models/out/p000_gpu3/vincent_p000_tex.rgba \
-    -s 0.9642 -yaw 163.63 -x -1395.37 -y -99.17 -z -1110.77 -colscale 1.0 -charprelit \
-    -W 2628 -H 2048 -fov 59.28 -eye -1419,-116,-1130 -at -631,-77,-515 \
-    -up 0.030,-0.999,0.023 -o OUT -tag T      (OUT must exist)
+    -s 0.9641 -yaw 163.63 -x -1395.59 -y -98.76 -z -1110.57 -colscale 1.0 -charprelit \
+    -charatest 0.77734 \
+    -W 2628 -H 2048 $(camera_args from out/p000_gpu3/placement.json) -o OUT -tag T
+  (OUT must exist). Hero camera fitted 2026-10-24 to 5164 dump room vertices (near error
+  4.5 px -> 0.05 px): -fov 59.2749 -eye -1419.227,-115.571,-1129.797
+  -at -631.348,-77.227,-515.163 -up 0.03023,-0.99926,0.02358. Placement for that camera:
+  -s 0.9641 -yaw 163.63 -x -1395.59 -y -98.76 -z -1110.57 (always take both from
+  placement.json). The old rounded camera put near geometry ~4.5 px off. export_z128_sky.py
+  still has its own copy of the old camera (0.07 px at sky depth; should import HERO_CAM).
   convert OUT/T_freecam.png -crop 2592x2048+36+0 +repage -resize 640x480! final.png
+- Cape alpha (fixed 2026-10-24, review 38; not committed): the game alpha-tests the cape
+  (0x2e68: ATE GEQUAL AREF 100, AFAIL RGB_ONLY, blended by As; 20% of its texels are 0 =
+  the torn hem/fold gaps). We drew it opaque -> pale pink fringe, and the opaque hem covered
+  the near post's foot (the hem IS 0.15 units in front of it in the dump too: 603 px dump,
+  537 ours; the game hides it because those texels are transparent). The atlas keeps the
+  cape's alpha as A*255/128 (body 255; body draws aren't alpha-tested); vertex alpha =
+  128/255. Render with -charatest <char_alpha_ref from placement.json> (= 0.77734), which
+  runs the room's two-pass GS ATE draw for the character. Crop pink px 239 -> 5 (game 62),
+  SSIM 0.508 -> 0.532. Cape is drawn once per frame: the 224 dump tris = 4 frames x 56.
 - UNVERIFIED: "decoder UVs are correct" for the ~60% of body tris with no exact dump match;
   whether rendering ALL LOD families (vs one) is right.
 - Review images now live in /srv/shared/dirge-port/review/ (queue.json lists them):

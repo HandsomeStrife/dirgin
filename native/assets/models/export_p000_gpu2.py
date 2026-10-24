@@ -94,6 +94,11 @@ def solve_placement(M, W, piv, iters=3, keep=0.7):
                 n=int(len(M)))
 
 
+# Cape GS alpha test (dump: TEST ATE=1 ATST=GEQUAL AREF=100 AFAIL=RGB_ONLY), in the
+# renderer's 0..1 As scale (As = 1.0 at GS 128); same rounding as export_z128_room.py.
+CAPE_AREF_GL = round((100 - 0.5) / 128, 5)
+
+
 def world_to_model(Wp, pl, piv):
     """Inverse of place_character for one placement."""
     y = np.radians(pl['yaw']); cy, sy = np.cos(y), np.sin(y)
@@ -227,7 +232,8 @@ def main():
     def emit(p, n, uv, col, x):
         yo, rh, rw = region[x]
         flat.extend((p[0], p[1], p[2], n[0], n[1], n[2], (uv[0] * rw) / Wc, (yo + uv[1] * rh) / Hc,
-                     col[0] / 255.0, col[1] / 255.0, col[2] / 255.0, 1.0))
+                     col[0] / 255.0, col[1] / 255.0, col[2] / 255.0,
+                     (col[3] if len(col) > 3 else 128) / 255.0))   # GS vertex alpha: shader As = texel*va*2
     for i, t in enumerate(tris):
         x = tri_tex0[i]
         if x is None or x not in region: dropped += 1; continue
@@ -246,14 +252,28 @@ def main():
     mp = os.path.join(outdir, "vincent_p000.mesh")
     with open(mp, 'wb') as f: f.write(hdr); array.array('f', flat).tofile(f)
     Image.fromarray(combined, 'RGB').save(os.path.join(outdir, "vincent_p000_tex.png"))
-    rgba = np.dstack([combined, np.full(combined.shape[:2], 255, np.uint8)])
+    # Alpha: only the cape keeps its texture alpha. Its dump draws are ATE GEQUAL AREF 100,
+    # AFAIL RGB_ONLY, blended by As (20% of its texels are 0 = the torn hem/fold gaps);
+    # the body draws are not alpha-tested, so the body stays 255 (= opaque under any ref
+    # <= 1.0 with vertex alpha 128). Stored as A*255/128 like the room decoder, so the
+    # renderer's GS alpha test uses ref CAPE_AREF_GL (placement.json char_alpha_ref).
+    alpha = np.full(combined.shape[:2], 255, np.uint8)
+    yo, rh, rw = region[cape_tex0]
+    ca = np.asarray(tc.get(cape_tex0)[:, :, 3], np.float64)
+    alpha[yo:yo + rh, :rw] = np.clip(np.round(ca * 255 / 128), 0, 255).astype(np.uint8)
+    rgba = np.dstack([combined, alpha])
     with open(os.path.join(outdir, "vincent_p000_tex.rgba"), 'wb') as f:
         f.write(struct.pack('<II', Wc, Hc)); f.write(rgba.astype(np.uint8).tobytes())
     json.dump([dict(g=int(t[6]), name=gmeta[t[6]][0], tex0=(None if tri_tex0[i] is None else int(tri_tex0[i])),
                     how=how[i], uv=uvn(t), v=[int(k) for k in t[:3]]) for i, t in enumerate(tris)],
               open(os.path.join(outdir, "binding.json"), 'w'))
     json.dump(dict(placement=pl, binding=dict(hc), cape=cst, pose=pose_stats,
-                   render_args=f"-s {pl['s']:.4f} -yaw {pl['yaw']:.2f} -x {pl['x']:.2f} -y {pl['y']:.2f} -z {pl['z']:.2f}"),
+                   char_alpha_ref=CAPE_AREF_GL,
+                   render_args=f"-s {pl['s']:.4f} -yaw {pl['yaw']:.2f} -x {pl['x']:.2f} -y {pl['y']:.2f} -z {pl['z']:.2f}",
+                   # Vincent is placed in this camera's world: render with exactly it.
+                   camera_args="-fov {fov} -eye {e} -at {a} -up {u}".format(
+                       fov=C.HERO_CAM['fov'], e=','.join(map(str, C.HERO_CAM['eye'])),
+                       a=','.join(map(str, C.HERO_CAM['at'])), u=','.join(map(str, C.HERO_CAM['up'])))),
               open(os.path.join(outdir, "placement.json"), 'w'), indent=2)
     print(f"wrote {mp} ({vcount} verts) + placement.json")
 
