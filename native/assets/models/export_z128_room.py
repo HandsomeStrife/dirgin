@@ -24,11 +24,30 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from export_bmd_textured import find_bmd_payload, decode_packets, EXTRACT
 from export_bmd_bound import build_flat, emit_group, tex_png_for
 
+# Packets dropped by name (2026-10-24 investigation, review 27): big flat quads at
+# x=-829 with generic 0..1 UVs. They sit in front of the real x=-760 wall/roof, and
+# no hero-dump (163235) vertex lies within 3 units of them though 70-79% are in view,
+# so the game does not draw them in this shot. Explicit list on purpose: there is
+# deliberately no general "no dump match" rule (hidden surfaces would also fail it).
+EXCLUDE_PACKETS = {('06800a12', 29), ('06800a12', 31),
+                   ('06800c12', 70), ('06800c12', 71)}
+
+# Packet bindings set by name, overriding the pf json. 06800212 pkt 370 (2 tris)
+# holds the light-grey facet (old room_g42 tri 7880): the hero dump draws that
+# surface at the same depth (ratio 1.01) with TBP 12996, whose decoded texture is
+# FileCode 0680ff85 (correlation 1.000). Binding is per packet, so its second,
+# smaller triangle gets the same texture.
+BIND_OVERRIDE = {('06800212', 370): '0680ff85'}
+
+SKY_FC = '0680ff35'   # TBP 11504 sky-dome texture (correlation 1.000), see export_z128_sky.py
+
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--pf', required=True, help='dir of per-packet FileCode pf_<chunk>.json')
     ap.add_argument('-o', '--out', required=True, help='output prefix, e.g. out/z128_room_v2/room')
+    ap.add_argument('--sky', help='sky mesh from export_z128_sky.py (basename, next to the '
+                    '.list); appended as the last group, textured with ' + SKY_FC)
     a = ap.parse_args()
 
     cids = [os.path.basename(p)[3:11]
@@ -48,9 +67,15 @@ def main():
         pf = json.load(open(os.path.join(a.pf, 'pf_%s.json' % cid)))
         pf = [f if f else None for f in pf]
         n = min(len(pf), len(packets))
+        for (ecid, pi) in EXCLUDE_PACKETS | set(BIND_OVERRIDE):
+            if ecid == cid and pi >= n:
+                sys.exit('named packet %s/%d out of range (%d packets)' % (cid, pi, n))
         groups = defaultdict(list)
         for i in range(n):
-            groups[pf[i] if pf[i] else 'unbound'].append(i)
+            if (cid, i) in EXCLUDE_PACKETS:
+                continue
+            fc = BIND_OVERRIDE.get((cid, i), pf[i])
+            groups[fc if fc else 'unbound'].append(i)
         for key, idxs in groups.items():
             flat, ntri = build_flat(packets, idxs)
             if ntri == 0:
@@ -77,12 +102,20 @@ def main():
             'packets': npk_by[fc], 'tris': ntri_by[fc], 'texture': png,
             'texture_container': cont, 'abe': abe_by[fc]})
         total += ntri_by[fc]
+    manifest['excluded_packets'] = sorted('%s/%d' % k for k in EXCLUDE_PACKETS)
+    manifest['bind_override'] = {'%s/%d' % k: v for k, v in BIND_OVERRIDE.items()}
+    if a.sky:
+        skyp = os.path.join(os.path.dirname(os.path.abspath(a.out)), a.sky)
+        if not os.path.exists(skyp):
+            sys.exit('sky mesh not found: %s (run export_z128_sky.py first)' % skyp)
+        manifest['groups'].append({'mesh': a.sky, 'filecode': SKY_FC, 'sky': True,
+            'texture_container': os.path.join(EXTRACT, SKY_FC + '.bin'), 'abe': True})
     json.dump(manifest, open(a.out + '_manifest.json', 'w'), indent=2)
     with open(a.out + '.list', 'w') as f:
         for g in manifest['groups']:
             f.write('%s\t%s\t%d\n' % (g['mesh'], g['texture_container'] or 'NONE',
                                       1 if g['abe'] else 0))
-    nb = sum(1 for g in manifest['groups'] if g['filecode'])
+    nb = sum(1 for g in manifest['groups'] if g['filecode'] and not g.get('sky'))
     print('z128 room: %d chunks, %d textures (+%s unbound), %d/%d tris textured (%.2f%%) -> %s.list'
           % (len(cids), nb, '1' if 'unbound' in flat_by else '0',
              bound, total, 100 * bound / total, a.out))

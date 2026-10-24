@@ -9,9 +9,16 @@ Read this first instead of re-deriving. Review images: notes/review/ (README exp
   (hero frame 163235). Decompress: `zstd -dq <file>.gs.zst -o dump.bin`.
 
 ## Oracle (grade against this, never eyeball)
-- `python3 -I tools/gsdump/src/gsrender2.py dump.bin out.png --native`
-  GS drawable is 432x512, stretched to 4:3. Without --native, geometry lands shifted/thin.
+- `python3 -I tools/gsdump/src/gsrender2.py dump.bin out.png --native [--crop=display]`
+  Renders the last full frame, scene framebuffer only, textures as of each draw
+  (fixed 2026-10-24; old render = `--legacy`). Hero dump vs PCSX2 shot: PSNR 21.6 dB
+  (was 7.0). Drawable is 432x512 (scene SCISSOR), stretched to 4:3; the CRTC shows
+  425.5 of those columns (`--crop=display`, best match). FBW 448 is just alignment.
+  Wall planks / cape / clouds still flat: texture decode gap. See tools/gsdump/README.md.
 - Check placement by overlaying a silhouette on the game frame, not by looking.
+- Scope (Dan, 2026-10-24): the oracle is for PLACEMENT and draw attribution (where, how
+  deep, which draw made a pixel). Grade COLOUR against the PCSX2 screenshot. Its texture/HUD
+  gaps are parked on purpose; don't fix them unless we need colour from un-screenshotted angles.
 
 ## Vincent (fixed 2026-10-24; see notes/audit-2026-10-24.md for the audit)
 - Export: `python3 -I native/assets/models/export_p000_gpu2.py dump.bin native/assets/models/out/p000_gpu3`
@@ -43,9 +50,12 @@ Read this first instead of re-deriving. Review images: notes/review/ (README exp
   (tri-signature, then same-texture UV); a rigid transform per bone is solved from them and
   poses every vertex of that bone; a matched vertex keeps its dump position if it agrees
   with its bone within 1.0 unit. Of 2004 vertices: 1312 dump position, 163 dump rejected
-  (bone), 529 no dump candidate (bone). 62/71 bones solved with >=4 points; 9 copy their parent (18,28,36,38,43,47,62,69,71). placement.json "bones_with_matches"=70 counts any match, not MIN_PTS. Bones 24 and 34 fit on near-colinear points, so their twist is a guess (follow-up: require point spread before solving a bone).
-  Silhouette IoU vs game 0.81 -> 0.90; mantle region diff 42 -> 10; arm region 105 -> 52
-  (now slightly too bright: 106,89,67 vs 89,68,54). Valid for frame 163235 only.
+  (bone), 529 no dump candidate (bone). 57/71 bones solved (>=4 points AND 2nd principal spread >= 0.05 units; the hand bones 53-61 are
+  >= 0.087). 14 copy their nearest solved ancestor (18,24,28,32,34,36,38,43,47,62,67,69,71,75); of those,
+  the colinear ones (24,32,34,67,75) keep their fitted direction and position and take only the twist
+  from the parent. 0 bones lack a solved ancestor. placement.json pose stats list all of this.
+  Silhouette IoU vs game 0.81 -> 0.90; mantle region diff 42 -> 10; arm region 105 -> 53 (colinear-bone fix: 51.9 -> 52.9, accepted)
+  (now slightly too bright: 106,90,67 vs 89,68,54). Valid for frame 163235 only.
   Animation data: notes/autonomy-journal.md (~l.294) has the clip format (km0102vn, anim_eval.py);
   not used here.
 - Arm/boots (CLUT 0x2dd4) colour, pose-independent (our 0x2dd4 pixels vs the game's 0x2dd4
@@ -69,13 +79,40 @@ Read this first instead of re-deriving. Review images: notes/review/ (README exp
   in save-states/sea-of-flames-gs-dumps/ (resize to 640x480).
 
 ## Room
-- out/ is gitignored. Rebuild: export_z128_room.py + recover_z128_deck.py.
-  Deck = brown planks 0680ff87 (recovered). Pre-deck backup: out/z128_room_v2_PREDECK_bak/.
+- out/ is gitignored. Rebuild (in native/assets/models, run -I):
+    recover_z128_deck.py --in out/z128_pktfc_union --out out/z128_pktfc_v3
+    export_z128_room.py --pf out/z128_pktfc_v3 -o out/z128_room_v2/room       (room bbox for the sky check)
+    export_z128_sky.py <hero dump.bin> out/z128_room_v2/room_sky.mesh
+    export_z128_room.py --pf out/z128_pktfc_v3 -o out/z128_room_v2/room --sky room_sky.mesh
+  Deck = brown planks 0680ff87 (recovered). Backups: out/z128_room_v2_PREDECK_bak/,
+  out/z128_room_v2_PRE28_bak/ (before the sky/wall/facet fixes).
+- Grading: the hero dump holds 4 identical frames (vsyncs at tris 16876/33752/50629/67501).
+  Grade with the LAST frame and the main framebuffer only (FRAME FBP 224, FBW 7); rasterizing
+  all frames/targets (as `gsrender2 --legacy` still does) mixes post-process passes into the image.
+  Main-pass order: clear (38,38,47) -> room -> sky dome 11504 (additive) -> post (fb 336/352
+  read back as TBP 10752/11264) -> additive cloud layer 14272 + 15872 -> HUD.
+- Fixed 2026-10-24 (review 27 = evidence, 28 = result; not committed):
+  - Sky: export_z128_sky.py takes the dump's TBP 11504 draws (166 tris) as a dome, texture
+    0680ff35 (corr 1.000 with the dump texture). It isn't in any 0680* BMD. In-game it is
+    ADDITIVE with vcol 5/128 over the clear, so our opaque copy bakes vertex colour to keep
+    the mean. Scaled 0.2 about the eye, because the renderer's near plane = 0.0005 x far from
+    the bbox of ALL groups (the full-size dome clipped the deck). Valid for the hero camera only.
+  - Upper-right wall: EXCLUDE_PACKETS in export_z128_room.py (06800a12 p29/31, 06800c12
+    p70/71): big x=-829 quads with 0..1 UVs, in view but with no dump vertex within 3u.
+    Explicit list only; no general "no dump match" rule (it would also drop hidden surfaces).
+  - Grey facet: BIND_OVERRIDE 06800212 p370 -> 0680ff85 (dump TBP 12996, depth ratio 1.01).
+    Per-packet, so its second small tri is bound too.
+  - Result: upper-right depth match vs dump 37% -> 99.2% (ours in front 28% -> 0.1%).
+    Sky patch (x320-640,y0-40 of 640x480) 24,26,32 -> 34,35,44, game 53,54,66.
+    Upper right 25,28,31 -> 26,25,27, game 38,38,45. Mid-left reference matches within 1.
+- Remaining sky/UR gap: the additive cloud layer TBP 14272 (vcol ~93,102,140, alpha ~53)
+  and the post passes aren't reproduced. The renderer has no additive blend and a fixed
+  clear colour (24,26,32).
 - 47.9% of triangles bound (verified). The rest (unbound group room_g42) are NOT UV-matched;
   "dump-unseen" is UNVERIFIED. Left grey on purpose.
 - UNVERIFIED: deck (box fill, recover_z128_deck.py) and "seed+grow" bindings are not
   UV-checked; likely source of wrong textures (e.g. lower-right planked facets).
-  Sky layer and the large upper-right wall also differ from the game (cause unknown).
+  The seed binding also matched the excluded 0..1-UV quads, so generic UVs can fool it.
 - DMSH mesh header is 36 bytes (magic + 2 uint32 + 6-float bbox), then 12 floats/vertex.
 
 ## Open
@@ -85,3 +122,7 @@ Read this first instead of re-deriving. Review images: notes/review/ (README exp
    effect unmeasured, colour already matches without it.
 3. Room: unverified bindings and grey roof facets/fascias (needs more angles or the static
    binding table).
+4. Sky dome fits the hero camera only. Its guard (export_z128_sky.py) checks the room bbox,
+   not depth, so other cameras can put the sky in front of walls; on failure, edit SKY_SCALE.
+   Room packet exclusions are by index: re-check them if the packet decoder changes.
+5. Battlement gaps missing in our render: suspected alpha-test cutout, unverified.
