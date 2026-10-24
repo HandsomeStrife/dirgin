@@ -137,6 +137,9 @@ typedef struct {
      * before them (game order), or anything drawn later. */
     int            gs_atest;
     float          alpha_ref;
+    /* 1 = this draw ignores p->fog_* (e.g. a sky dome the game fogs with its own
+     * colour). 0 (zero-init) = fogged whenever p->fog_enable is set. */
+    int            no_fog;
 } rgl_scene_draw;
 
 /* Render `ndraws` meshes into one GL world and read back one framed image.

@@ -252,9 +252,59 @@ int main(int argc, char **argv) {
     FILE *lf = fopen(listpath, "r");
     if (!lf) { fprintf(stderr, "cannot open list %s\n", listpath); return 2; }
     Group g[MAXG]; int ng = 0;
+    /* @fog R G B near far min : GS per-vertex fog, F = clamp((far-w)/(far-near), min, 1)
+     * with w = view depth (world units); colour = mix(FOGCOL, colour, F). Applies to
+     * every env group and the character, except groups named by @nofog <mesh>.
+     * Absent = no fog (the image is unchanged). Any malformed directive is fatal:
+     * rendering on without it would silently drop the fog. */
+    int have_fog = 0; float fogc[3] = {0,0,0}, fog_near = 0, fog_far = 0, fog_min = 0;
+    char nofog[MAXG][256]; int nnofog = 0; int lineno = 0, bad_directive = 0;
     float rmin[3] = { 1e30f, 1e30f, 1e30f }, rmax[3] = { -1e30f, -1e30f, -1e30f };
     char line[2048];
     while (fgets(line, sizeof line, lf) && ng < MAXG) {
+        lineno++;
+        const char *ln = line;
+        while (*ln == ' ' || *ln == '\t') ln++;
+        if (*ln == '@') {
+            char kw[32] = {0}, extra[8] = {0};
+            sscanf(ln, "@%31s", kw);
+            if (!strcmp(kw, "fog")) {
+                float r, gg, b, n, f, mn;
+                int k = sscanf(ln, "@fog %f %f %f %f %f %f %7s", &r, &gg, &b, &n, &f, &mn, extra);
+                const char *why = NULL;
+                if (have_fog) why = "second @fog line";
+                else if (k != 6) why = "want exactly '@fog R G B near far min'";
+                else if (!isfinite(r) || !isfinite(gg) || !isfinite(b) || !isfinite(n) ||
+                         !isfinite(f) || !isfinite(mn)) why = "non-finite value";
+                else if (r < 0 || r > 255 || gg < 0 || gg > 255 || b < 0 || b > 255)
+                    why = "R G B must be 0..255";
+                else if (!(f > n)) why = "far must be greater than near";
+                else if (mn < 0 || mn > 1) why = "min must be 0..1";
+                if (why) {
+                    fprintf(stderr, "error: %s:%d: bad @fog (%s): %s", listpath, lineno, why, line);
+                    bad_directive = 1; continue;
+                }
+                have_fog = 1; fogc[0] = r / 255.f; fogc[1] = gg / 255.f; fogc[2] = b / 255.f;
+                fog_near = n; fog_far = f; fog_min = mn;
+            } else if (!strcmp(kw, "nofog")) {
+                char mname[256] = {0};
+                if (sscanf(ln, "@nofog %255s %7s", mname, extra) != 1) {
+                    fprintf(stderr, "error: %s:%d: bad @nofog (want '@nofog <mesh>'): %s",
+                            listpath, lineno, line);
+                    bad_directive = 1; continue;
+                }
+                if (nnofog >= MAXG) {
+                    fprintf(stderr, "error: %s:%d: too many @nofog lines (max %d)\n",
+                            listpath, lineno, MAXG);
+                    bad_directive = 1; continue;
+                }
+                snprintf(nofog[nnofog++], sizeof nofog[0], "%s", mname);
+            } else {
+                fprintf(stderr, "error: %s:%d: unknown directive: %s", listpath, lineno, line);
+                bad_directive = 1;
+            }
+            continue;
+        }
         /* columns: mesh, texture container, ABE, [alpha-test ref]. Col 3 (ABE) is
          * informational. Col 4, when present and >= 0, marks a GS alpha-tested
          * blended pass (export_z128_room.py ALPHA_TEST); absent = opaque. */
@@ -294,7 +344,19 @@ int main(int argc, char **argv) {
         ng++;
     }
     fclose(lf);
+    if (bad_directive) {
+        fprintf(stderr, "error: %s: fix the directive(s) above; not rendering\n", listpath);
+        return 2;
+    }
     if (ng == 0) { fprintf(stderr, "no env groups loaded\n"); return 2; }
+    if (nnofog && !have_fog)
+        fprintf(stderr, "warning: %s: @nofog without @fog does nothing\n", listpath);
+    for (int k = 0; k < nnofog; k++) {
+        int hit = 0;
+        for (int i = 0; i < ng; i++) if (!strcmp(g[i].meshf, nofog[k])) hit++;
+        if (!hit) fprintf(stderr, "warning: @nofog %s matches no group in %s; "
+                          "that mesh will NOT be exempt\n", nofog[k], listpath);
+    }
 
     /* env PRELIT brightness controls (character untouched) */
     if (neutralcol) {
@@ -358,6 +420,15 @@ int main(int argc, char **argv) {
     rgl_params p; memset(&p, 0, sizeof p);
     p.width = W; p.height = H; p.bilinear = 1; p.backface_cull = 0;
     p.rig = rgl_default_lightrig(); p.alpha_ref = -1.0f;
+    if (have_fog) {
+        p.fog_enable = 1;
+        p.fog_a = -1.0f / (fog_far - fog_near);       /* F = a*w + b */
+        p.fog_b = fog_far / (fog_far - fog_near);
+        p.fog_min = fog_min;
+        memcpy(p.fog_color, fogc, sizeof fogc);
+        printf("fog   : colour %.0f,%.0f,%.0f  F=1 at w=%.2f, 0 at w=%.2f, floor %.3f\n",
+               fogc[0]*255, fogc[1]*255, fogc[2]*255, fog_near, fog_far, fog_min);
+    }
 
     /* draws: every env group PRELIT + its texture, then the character LIT + body */
     rgl_scene_draw draws[MAXG + 1];
@@ -366,6 +437,9 @@ int main(int argc, char **argv) {
         draws[i].verts = g[i].v; draws[i].vcount = g[i].n;
         draws[i].shade_mode = RGL_SHADE_PRELIT; draws[i].tfx = RGL_TFX_MODULATE;
         draws[i].tex_rgba = g[i].tex; draws[i].tex_w = g[i].tw; draws[i].tex_h = g[i].th;
+        for (int k = 0; k < nnofog; k++)
+            if (!strcmp(g[i].meshf, nofog[k])) draws[i].no_fog = 1;
+        if (have_fog && draws[i].no_fog) printf("fog   : group %d (%s) not fogged\n", i, g[i].meshf);
         if (g[i].aref >= 0.0f && g[i].tex) {
             draws[i].gs_atest = 1; draws[i].alpha_ref = g[i].aref;
             printf("atest : group %d ref %.4f (blend, depth only where As >= ref)\n", i, g[i].aref);

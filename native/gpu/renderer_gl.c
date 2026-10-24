@@ -141,7 +141,7 @@ static const char *SHADE_VS =
     "uniform float uFogA, uFogB, uFogMin;\n"
     "out vec2  vUV;\n"
     "out vec4  vColor;\n"
-    "out float vFog;\n"
+    "noperspective out float vFog;\n"
     "void main(){\n"
     "    vec4 clip = uMVP * vec4(aPos, 1.0);\n"
     "    vUV = aUV;\n"                           /* perspective-correct by the rasteriser */
@@ -163,7 +163,7 @@ static const char *SHADE_FS =
     "#version 330 core\n"
     "in vec2  vUV;\n"
     "in vec4  vColor;\n"
-    "in float vFog;\n"
+    "noperspective in float vFog;\n"
     "uniform sampler2D uTex;\n"
     "uniform int   uTexEnable;\n"
     "uniform int   uTFX;\n"           /* 0 MODULATE 1 DECAL 2 HIGHLIGHT 3 HIGHLIGHT2 */
@@ -779,6 +779,7 @@ int rgl_render_scene(const rgl_scene_draw *draws, int ndraws,
     GLint locARef = glGetUniformLocation(prog,"uAlphaRef");
     GLint locAMode = glGetUniformLocation(prog,"uAlphaMode");
     GLint locOutA = glGetUniformLocation(prog,"uOutAlpha");
+    GLint locFog  = glGetUniformLocation(prog,"uFogEnable");
     glUniform1i(locAMode, 0); glUniform1i(locOutA, 0);
 
     int rc_fail = 0;
@@ -821,6 +822,7 @@ int rgl_render_scene(const rgl_scene_draw *draws, int ndraws,
         }
 
         glUniform1i(locLit, d->shade_mode == RGL_SHADE_LIT ? 1 : 0);
+        glUniform1i(locFog, (p->fog_enable && !d->no_fog) ? 1 : 0);
         glUniform1i(locTE,  use_tex ? 1 : 0);
         glUniform1i(locTFX, d->tfx);
         if (use_tex){ glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, tex); }
