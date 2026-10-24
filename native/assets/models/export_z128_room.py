@@ -43,9 +43,23 @@ EXCLUDE_PACKETS = {('06800a12', 29), ('06800a12', 31),
 # the same vertex colours (RGB 12-18/12-18/18-26, A 0-66). 986/1027 share that exact
 # colour/UV signature but are out of this view (dump-unverified). All three are ABE,
 # so with 0680ff07 in ALPHA_TEST they blend as a faint wash instead of opaque black.
-BIND_OVERRIDE = {('06800212', 370): '0680ff85',
-                 ('06800112', 585): '0680ff07', ('06800112', 986): '0680ff07',
-                 ('06800112', 1027): '0680ff07'}
+# 06800212 pkts 0/4 (1 tri each): the vertical outer edge of the walkway (z=-1117.6,
+# y -98.4..-94.5), the "grey banner" along Vincent's railing (review 34). Unbound: the
+# UV-triple seed missed them and recover_z128_deck.py only takes near-horizontal faces.
+# The hero dump draws them with TBP 13228 = 0680ff87 (deck planks, corr 1.000): pkt 0's
+# UV triple is identical to dump draw 3408's, pkt 4's two dump tris (3412/3413) share
+# its UVs, and the vertex colours agree within 6 (e.g. 108,63,53 vs 113,69,59).
+#
+# Each entry: (FileCode to bind, expected pf binding, expected ABE flag). Indices are
+# packet positions, so a decoder or pf change could point an entry at another packet.
+# If the packet's pf binding or ABE flag no longer matches, the export warns and does
+# NOT apply that override (the pf binding stays); re-check the evidence and update it.
+BIND_OVERRIDE = {('06800212', 370): ('0680ff85', None, False),
+                 ('06800112', 585): ('0680ff07', '0680ff06', True),
+                 ('06800112', 986): ('0680ff07', '0680ff06', True),
+                 ('06800112', 1027): ('0680ff07', '0680ff06', True),
+                 ('06800212', 0): ('0680ff87', None, False),
+                 ('06800212', 4): ('0680ff87', None, False)}
 
 # GS alpha-tested passes, from the hero dump (163235, last frame, FBP 224), 2026-10-24.
 # Each FileCode below is matched to its dump TBP by texture correlation 1.000. Its ABE
@@ -96,6 +110,7 @@ def main():
 
     flat_by = defaultdict(list); ntri_by = defaultdict(int)
     abe_by = defaultdict(bool);  npk_by = defaultdict(int)
+    overrides_applied = set()
     for cid in cids:
         binp = os.path.join(EXTRACT, cid + '.bin')
         if not os.path.exists(binp):
@@ -114,7 +129,15 @@ def main():
         for i in range(n):
             if (cid, i) in EXCLUDE_PACKETS:
                 continue
-            fc = BIND_OVERRIDE.get((cid, i), pf[i])
+            fc = pf[i]
+            if (cid, i) in BIND_OVERRIDE:
+                to, want_pf, want_abe = BIND_OVERRIDE[(cid, i)]
+                if pf[i] == want_pf and bool(packets[i]['abe']) == want_abe:
+                    fc = to; overrides_applied.add((cid, i))
+                else:
+                    print('warning: BIND_OVERRIDE %s/%d expects pf %s abe %s, found pf %s abe %s; '
+                          'NOT applied (kept pf binding)' % (cid, i, want_pf, want_abe, pf[i],
+                          bool(packets[i]['abe'])), file=sys.stderr)
             if fc in ALPHA_TEST and packets[i]['abe']:
                 fc += ATEST_SUFFIX
             groups[fc if fc else 'unbound'].append(i)
@@ -159,7 +182,9 @@ def main():
     for gi, key in enumerate(order):
         add_group(gi, key)
     manifest['excluded_packets'] = sorted('%s/%d' % k for k in EXCLUDE_PACKETS)
-    manifest['bind_override'] = {'%s/%d' % k: v for k, v in BIND_OVERRIDE.items()}
+    manifest['bind_override'] = {'%s/%d' % k: {'filecode': v[0], 'expected_pf': v[1],
+                                               'expected_abe': v[2], 'applied': k in overrides_applied}
+                                 for k, v in BIND_OVERRIDE.items()}
     if a.sky:
         skyp = os.path.join(os.path.dirname(os.path.abspath(a.out)), a.sky)
         if not os.path.exists(skyp):

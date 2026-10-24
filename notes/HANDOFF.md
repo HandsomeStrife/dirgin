@@ -140,6 +140,21 @@ Read this first instead of re-deriving. Review images: notes/review/ (README exp
   Gradient corr vs game ~0 before AND after (and with the wash removed): plank structure
   doesn't line up. Deck UVs (spatial fill) are still unverified. Grading scripts were scratch-only.
   Backup: out/z128_room_v2_PRESKY32_bak/ (= HEAD output, verified byte-identical).
+- Grey banner along the walkway edge (fixed 2026-10-24, review 34; not committed): the pale
+  beam by Vincent's railing was the UNBOUND group (flat vertex colour), not a wrong bind:
+  06800212 pkts 0 and 4 (1 tri each), the deck's vertical outer edge (z=-1117.6, y -98.4..-94.5).
+  The UV-triple seed left them null; recover_z128_deck.py skips them (|ny| < 0.8). Hero dump
+  draws them with TBP 13228 = 0680ff87 (corr 1.000): pkt 0 UV triple identical to draw 3408,
+  pkt 4 shares UVs with draws 3412/3413, vertex colours within 6. Fix: BIND_OVERRIDE -> 0680ff87.
+  Found with an ID render (per-tri colour R=group+1, GB=tri index, -notex). Beam (4319 px):
+  mean 66,51,51 -> 34,18,11 (game 30,17,12), |d| 36.2 -> 12.9; SSIM 0.31 -> 0.25, gradient corr
+  0.10 -> -0.09 (flat slab vs textured planks whose lines don't align with the game's, like the
+  floor). Other regions: 7 px change outside the beam (+2px). Backup: out/z128_room_v2_PRE34_bak/.
+  Also in the beam, NOT fixed: 06800212 pkt 424 (x=-1141, below the deck, ~280 px), an ABE
+  overlay the game draws with TBP 10756 (matches no FileCode, best corr 0.69) over 0680ff36.
+  BIND_OVERRIDE entries are now (FileCode, expected pf binding, expected ABE). On mismatch the
+  export warns ("warning: BIND_OVERRIDE ...") and does NOT apply it; manifest records `applied`.
+  Mutation-tested (wrong expected pf / wrong ABE -> warning, not applied).
 - Fog (checked 2026-10-24): the game fogs. 7914 draws have FGE=1 (all room + deck), FOGCOL
   38,38,47 (= clear colour), F falls with depth w=1/q: w<50 F~245 (4% toward FOGCOL),
   w 200-400 F~160 (37%), w 400-800 F~111 (56%), w 800-1600 F=51 (80%). Not the floor's cause
