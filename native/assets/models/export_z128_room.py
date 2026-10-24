@@ -53,6 +53,9 @@ BIND_OVERRIDE = {('06800212', 370): '0680ff85'}
 # no test), the sky 0680ff35 (ATST NEVER + FB_ONLY, not a cut-out), and the GREATER-100
 # ATE passes at TBP 11440/11476/11748/11880/12156, whose textures match nothing bound
 # here (corr <= 0.56).
+# Also not listed: 0680ff07 (TBP 10792, 10 ATE tris in the dump). All 37 of its BMD
+# packets are non-ABE, so an entry matches nothing (the exporter warns), and its texture
+# has no cut-out texels, so the test could not change a pixel anyway.
 # Vertex alpha (As = At*Av/128): every ATE vertex of 0680ff31 and 0680ff32 is 128, and
 # 153/156 of 0680ff28; 0680ff30 also has Av 76-78 (BMD and dump agree), which caps As
 # below the ref, so those faces blend semi-transparent and write no depth, as in-game.
@@ -62,7 +65,6 @@ ALPHA_TEST = {
     '0680ff31': (96, 'TBP 11220: battlements; 53 ATE tris, 15% cut-out texels'),
     '0680ff30': (96, 'TBP 10960: 84 ATE tris, 55% cut-out texels'),
     '0680ff28': (96, 'TBP 10828: 52 ATE tris, 3% cut-out texels'),
-    '0680ff07': (96, 'TBP 10792: 10 ATE tris, no cut-out texels'),
     '0680ff32': (96, 'TBP 11288: 8 ATE tris, no cut-out texels'),
     '0680ff54': (96, 'TBP 11800: 16 ATE tris, no cut-out texels'),
 }
@@ -120,6 +122,10 @@ def main():
     if 'unbound' in flat_by:
         order.append('unbound')
     atest = sorted([k for k in flat_by if k.endswith(ATEST_SUFFIX)], key=lambda k: -ntri_by[k])
+    for fc in sorted(ALPHA_TEST):
+        if fc + ATEST_SUFFIX not in flat_by:
+            print('warning: ALPHA_TEST %s matched no blended (ABE) packet; entry does nothing '
+                  '(%s)' % (fc, ALPHA_TEST[fc][1]), file=sys.stderr)
 
     manifest = {'method': 'z128 whole-room union; per-packet FileCode from 8-dump '
                 'UV-triple oracle (seed+grow, 99.6%) + spatial recovery of '

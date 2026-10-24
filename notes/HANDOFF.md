@@ -113,8 +113,8 @@ Read this first instead of re-deriving. Review images: notes/review/ (README exp
   (TBP->FC by texture corr 1.000; reasons recorded per entry). Their ABE packets go to
   separate groups listed AFTER the sky (game order) with the ref in room.list column 4;
   render_scene_textured draws those blended, depth only where As >= (96-0.5)/128. Five groups:
-  0680ff31 (battlements: g21 opaque 650 tris + g43 alpha 630 tris), 0680ff30, 0680ff28, 0680ff32, 0680ff54 (0680ff07 is in the table
-  but has no ABE packets). Not global on purpose: 0680ff36 has 16% cut-out texels but the
+  0680ff31 (battlements: g21 opaque 650 tris + g43 alpha 630 tris), 0680ff30, 0680ff28, 0680ff32, 0680ff54 (0680ff07 removed from the
+  table: all 37 of its packets are non-ABE and it has no cut-out texels). Not global on purpose: 0680ff36 has 16% cut-out texels but the
   game draws it opaque. Vertex alpha checked: 128 on the battlement ATE pass; 0680ff30 also
   has Av 76-78, which caps As below the ref, so those faces blend semi-transparent, as in-game.
   Result: 8309 px change at 640x480 exact (4300 with 2% tolerance), all in the battlement band + lower-right 0680ff30 strip. Gap px vs
@@ -124,6 +124,9 @@ Read this first instead of re-deriving. Review images: notes/review/ (README exp
   0 px different. Gaps: 0680ff30/28 have a few ABE draws with ATE off that the BMD can't tell
   apart (they get the test); As in (0.75,1) blends instead of being opaque. Backup:
   out/z128_room_v2_PRE31_bak/. Groups renumbered: unbound is now room_g40.
+  Fallbacks are loud (stderr "warning:"): bad/garbled/out-of-range col 4 (valid: absent, -1,
+  0..1) -> group drawn opaque; col-4 group with no texture -> test dropped; ALPHA_TEST entry
+  matching no ABE packet (exporter). A clean rebuild + render prints none of them.
 - 47.9% of triangles bound (verified). The rest (unbound group room_g40) are NOT UV-matched;
   "dump-unseen" is UNVERIFIED. Left grey on purpose.
 - UNVERIFIED: deck (box fill, recover_z128_deck.py) and "seed+grow" bindings are not

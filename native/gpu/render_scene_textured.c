@@ -53,7 +53,7 @@
 
 typedef struct { RVertex *v; size_t n; float bbmin[3], bbmax[3];
                  unsigned char *tex; int tw, th; char texname[64];
-                 float aref; } Group;   /* aref < 0: opaque; else GS ATE pass (list col 4) */
+                 float aref; char meshf[256], texf[512]; } Group;   /* aref < 0: opaque; else GS ATE pass (list col 4) */
 
 /* Load a bounds-checked "DMSH" triangle soup (the untrusted on-disk format). */
 static int mesh_load(const char *path, RVertex **vout, size_t *nout,
@@ -258,10 +258,19 @@ int main(int argc, char **argv) {
         /* columns: mesh, texture container, ABE, [alpha-test ref]. Col 3 (ABE) is
          * informational. Col 4, when present and >= 0, marks a GS alpha-tested
          * blended pass (export_z128_room.py ALPHA_TEST); absent = opaque. */
-        char meshf[1024] = {0}, texf[1024] = {0}; int abe = 0; float aref = -1.0f;
-        if (sscanf(line, "%1023s\t%1023s\t%d\t%f", meshf, texf, &abe, &aref) < 1) continue;
-        if (!(aref >= 0.0f && aref <= 1.0f)) aref = -1.0f;
+        char meshf[1024] = {0}, texf[1024] = {0}, areff[64] = {0}; int abe = 0; float aref = -1.0f;
+        if (sscanf(line, "%1023s\t%1023s\t%d\t%63s", meshf, texf, &abe, areff) < 1) continue;
         if (meshf[0] == 0 || meshf[0] == '#') continue;
+        /* col 4: absent or -1 = opaque, else a ref in [0,1]. Anything else (garbled,
+         * NaN, out of range, e.g. '0,75') is drawn opaque, but says so. */
+        if (areff[0]) {
+            char *end = NULL; float x = strtof(areff, &end);
+            if (end != areff && *end == 0 && x == -1.0f) aref = -1.0f;
+            else if (end != areff && *end == 0 && x >= 0.0f && x <= 1.0f) aref = x;
+            else fprintf(stderr, "warning: %s: bad alpha-test ref '%s' in column 4 "
+                         "(want -1 or 0..1); drawing this group OPAQUE, no alpha test\n",
+                         meshf, areff);
+        }
         char meshpath[2048];
         snprintf(meshpath, sizeof meshpath, "%s/%s", ldir, meshf);
         char err[256] = {0};
@@ -271,6 +280,8 @@ int main(int argc, char **argv) {
         g[ng].v = v; g[ng].n = n;
         memcpy(g[ng].bbmin, bbmn, 12); memcpy(g[ng].bbmax, bbmx, 12);
         g[ng].tex = NULL; g[ng].tw = g[ng].th = 0; g[ng].texname[0] = 0; g[ng].aref = aref;
+        snprintf(g[ng].meshf, sizeof g[ng].meshf, "%s", meshf);
+        snprintf(g[ng].texf, sizeof g[ng].texf, "%s", texf[0] ? texf : "no column 2");
         if (!notex && strcmp(texf, "NONE") != 0) {
             if (tex_load_largest(texf, &g[ng].tex, &g[ng].tw, &g[ng].th,
                                  g[ng].texname, sizeof g[ng].texname))
@@ -358,6 +369,10 @@ int main(int argc, char **argv) {
         if (g[i].aref >= 0.0f && g[i].tex) {
             draws[i].gs_atest = 1; draws[i].alpha_ref = g[i].aref;
             printf("atest : group %d ref %.4f (blend, depth only where As >= ref)\n", i, g[i].aref);
+        } else if (g[i].aref >= 0.0f && !notex) {
+            fprintf(stderr, "warning: group %d (%s): alpha-test ref %.4f but no texture loaded "
+                    "(%s); alpha test DROPPED, drawn opaque\n",
+                    i, g[i].meshf, g[i].aref, g[i].texf);
         }
     }
     /* The character body atlas can only be MODULATE-combined onto the mesh if
