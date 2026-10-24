@@ -173,7 +173,12 @@ def _valid_desc(buf, NB, P, doff):
     a = P + doff
     if a + 0x18 > NB or a < 0 or doff <= 0:
         return False
-    return _u16(buf, a + 2) == 0xffff and 0 < _u32(buf, a + 0x14) < NB
+    w0 = _u32(buf, a)
+    # Header word is normally 0xffff000N; a chain's first descriptor can instead
+    # carry a DMA tag (id cnt/next, often with the IRQ bit, e.g. 0xac010001).
+    # p000 S01 g1 (Vincent's gauntlet arm) was lost to the strict check.
+    hdr_ok = (w0 >> 16) == 0xffff or (((w0 >> 28) & 7) in (1, 2) and (w0 & 0xffff) < 64)
+    return hdr_ok and 0 < _u32(buf, a + 0x14) < NB
 
 
 def enum_descs(buf, NB, P, G):
@@ -215,7 +220,8 @@ def parse_drawpackets(buf, NB, start, end):
     _giftag_prim): 3=triangle LIST, 4=triangle STRIP (None -> assume strip)."""
     p = start; subs = []; cur = None; pending_prim = None
     while p < end and p + 4 <= NB:
-        code = _u32(buf, p); num = (code >> 16) & 0xff; cmd = (code >> 24) & 0xff
+        code = _u32(buf, p); num = (code >> 16) & 0xff
+        cmd = (code >> 24) & 0x7f              # bit 7 = VIF interrupt flag, not part of the cmd
         if cmd in (0x01, 0x00, 0x04, 0x05, 0x10, 0x11, 0x13, 0x14, 0x15):
             p += 4
         elif cmd == 0x17:                      # MSCNT = end of a sub-packet
@@ -243,6 +249,11 @@ def parse_drawpackets(buf, NB, start, end):
             p += 4 + nb
             if p & 3:
                 p = (p + 3) & ~3
+        elif (p & 15) == 0 and ((code >> 28) & 7) in (1, 2) and (code & 0xffff) < 64:
+            # Inline DMA tag (id cnt/next) between sub-packets: 8-byte tag + 2 VIF
+            # codes, then qwc quadwords of tag data; the packet chain continues after.
+            # (p000 S01 g1, Vincent's gauntlet arm, sat behind one of these.)
+            p += 16 + 16 * (code & 0xffff)
         else:
             break
     if cur and cur.get('idx'):

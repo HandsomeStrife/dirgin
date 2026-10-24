@@ -94,3 +94,4 @@ notes/doc-research-wiki/**
 *.pyc
 *.log
 *.err
+.claude/

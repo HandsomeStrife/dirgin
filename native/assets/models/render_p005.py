@@ -99,6 +99,8 @@ def decode_groups(buf, NB, Wm, bc):
     verts = []; norms = []; tris = []; gid = 0; gmeta = []
     for name, P in smdblk:
         if R._u32(buf, P) != R.SM2_MAGIC:
+            print(f"WARN decode_groups: skipping block {name}@{P - 0x10:#x}: bad smd magic",
+                  file=sys.stderr)
             continue
         sc = R._f32(buf, P + 0x2c) / 2048.0
         grparr = R._u32(buf, P + 0x20); gc = R._u16(buf, P + 0x0a)
@@ -106,6 +108,10 @@ def decode_groups(buf, NB, Wm, bc):
             G = P + R._u32(buf, P + grparr + 4 * gi)
             r = R.build_group_pool(buf, NB, Wm, bc, P, G, sc)
             if r is None:
+                # e.g. p000's cape block (0x19f70): no skinning batches, positions
+                # are posed at runtime -> not decodable here (see p000_cape.py).
+                print(f"WARN decode_groups: skipping {name}@{P - 0x10:#x}.g{gi}: "
+                      f"no skinned vertex pool (unskinned/runtime-posed group)", file=sys.stderr)
                 continue
             pool, nrmp, seen = r
             base = len(verts); psize = len(pool)
@@ -134,6 +140,9 @@ def decode_groups(buf, NB, Wm, bc):
                         # per-corner RGBA (game vertex colour) at idx 7,8,9 (gid stays 6)
                         c0 = R._corner_col(col, ja); c1 = R._corner_col(col, jb); c2 = R._corner_col(col, jc)
                         tris.append([base + a, base + b, base + c, uv0, uv1, uv2, gid, c0, c1, c2])
+            if len(tris) == ntri0:
+                print(f"WARN decode_groups: {name}@{P - 0x10:#x}.g{gi} decoded 0 triangles "
+                      f"({len(descs)} descriptors)", file=sys.stderr)
             gmeta.append((f"{name}@{P:x}.g{gi}", base, psize, seen, pool))
             gid += 1
     return (np.array(verts) if verts else np.zeros((0, 3)),
