@@ -222,14 +222,20 @@ Read this first instead of re-deriving. Review images: notes/review/ (README exp
 - Hero view: one region changes, the pale patch behind the far-right tower (x544-605 y141-175
   at 640x480): mean 37,37,44 -> 31,31,37 (game 31,30,36), |d| 7.0 -> 2.3, SSIM 0.79 -> 0.91.
   Elsewhere < 5 levels. Backup: out/z128_room_v2_PRE43_bak/. room.list now has the @fog lines.
-- Open: 16 other bindings the dump contradicts (not suspects, left), mostly 0680ff24 that should be
-  0680ff05/0680ff08 (e.g. 06800112/1049-1051, 1062; 06800212/588, 1035) and 0680ff31 -> 0680ff2e.
-  The unanimity guard can't be checked on the hero dump: filling mixed chains anyway adds 25 packets,
-  none of them visible in the dump.
-  Review caveats: bmd_chains.py's MSCNT search misreads some vertex words as end marks (54 false
-  chain breaks; a VIF-aware walk fills 773 vs 768, 0 wrong) and its "1-10 packets" docstring is
-  wrong (up to 47). 307 of 768 fills rest on a single bound packet, with no warning; a chunk
-  with no trailers silently becomes one chain. Follow-up: VIF-aware walk + warnings.
+- Dump-contradicted bindings (2026-10-24, review 45): 15 of the 16 fixed as BIND_OVERRIDE
+  (same standard: UV triple + vcol within 12 + screen within 4 px; matches 0.1-0.6 px, vcol
+  diff 0; no hit on the old FileCode there; all non-ABE). List and n/m counts in
+  export_z128_room.py. 06800212/1064 is the weakest (1/10 tris; chain-mates are ff33).
+  Skipped: 06800212/818 (0.8 px but vcol off by 31). Hero view: 0 px change; the game draws
+  these 54 tris but all are covered (removing them from the dump render: 0 px; control 6318).
+- bmd_chains.py walks VIF commands by size to each packet's MSCNT (the old 0x17 byte search
+  hit vertex data: 54 false breaks). Unparseable packet -> warning + chain break (fails toward
+  less fill); chunk with no trailer -> warning. Chains are 1-47 packets. Chain fill 768 -> 774
+  (0 dump-contradicted), mixed chains 14 -> 13. 310 fills rest on a single anchor (warning,
+  manifest chain_fill.single_anchor); a chain holding a BIND_OVERRIDE that was NOT applied is
+  not filled (manifest override_skipped_chains_left_unbound). Backup: out/z128_room_v2_PRE44_bak/.
+- Suspect: 06800912/171 is pf-bound to the sky texture 0680ff35 (small ABE object, off-screen);
+  chain fill spreads it to 168-170. Unverified.
 
 ## Open
 - Post foot vs cape (review 40, left on purpose by Dan): the dump draws the near post

@@ -84,13 +84,46 @@ BIND_OVERRIDE = {('06800212', 370): ('0680ff85', None, False),
                  ('06800212', 1048): ('0680ff05', '0680ff24', False),
                  # 06800212 pkt 579 (2 tris, off-screen in the hero view): both drawn with TBP
                  # 11620 = 0680ff2b (corr 1.000), like chain-mate 578.
-                 ('06800212', 579): ('0680ff2b', '0680ff27', False)}
+                 ('06800212', 579): ('0680ff2b', '0680ff27', False),
+                 # Dump-contradicted pf bindings (review 45): every packet whose dump evidence (same
+                 # standard as above) names a FileCode other than its binding. Each matched tri is
+                 # at 0.1-0.6 px with vertex colour diff 0; none of them hits the old FileCode at
+                 # its position. All non-ABE in the BMD and in the dump. "n/m" = matched/total tris.
+                 # 0680ff24 -> 0680ff05 (TBP 10756): 06800112 1049 4/8, 1050 10/16, 1051 2/6, 1062 4/4;
+                 # 06800212 588 (pf 0680ff33) 3/9.
+                 ('06800112', 1049): ('0680ff05', '0680ff24', False),
+                 ('06800112', 1050): ('0680ff05', '0680ff24', False),
+                 ('06800112', 1051): ('0680ff05', '0680ff24', False),
+                 ('06800112', 1062): ('0680ff05', '0680ff24', False),
+                 ('06800212', 588): ('0680ff05', '0680ff33', False),
+                 # 0680ff24 -> 0680ff08 (TBP 10924): 06800112 904 10/10, 06800212 1035 1/1.
+                 ('06800112', 904): ('0680ff08', '0680ff24', False),
+                 ('06800212', 1035): ('0680ff08', '0680ff24', False),
+                 # 0680ff31 -> 0680ff2e: 06800112 776 1/1 (straddles the screen edge), 1443 1/1.
+                 ('06800112', 776): ('0680ff2e', '0680ff31', False),
+                 ('06800112', 1443): ('0680ff2e', '0680ff31', False),
+                 # Singles: 06800112 705 0680ff32 -> 0680ff85 2/2 (grey facet, like 06800212/370);
+                 # 778 0680ff24 -> 0680ff27 8/12; 1111 0680ff87 -> 0680ff37 1/1; 06800212 1040
+                 # 0680ff2d -> 0680ff2b 4/8; 1148 0680ff24 -> 0680ff47 2/2; 1064 0680ff32 -> 0680ff33
+                 # on 1 of 10 tris only (the other 9 have no dump tri with their UVs: weakest entry).
+                 ('06800112', 705): ('0680ff85', '0680ff32', False),
+                 ('06800112', 778): ('0680ff27', '0680ff24', False),
+                 ('06800112', 1111): ('0680ff37', '0680ff87', False),
+                 ('06800212', 1040): ('0680ff2b', '0680ff2d', False),
+                 ('06800212', 1148): ('0680ff47', '0680ff24', False),
+                 ('06800212', 1064): ('0680ff33', '0680ff32', False)}
+# Not overridden: 06800212 pkt 818 (pf 0680ff31, 1 tri, mostly off-screen). Its UV triple sits
+# 0.8 px from a 0680ff2e dump tri, but the vertex colours differ by 31 (limit 12): unproven.
 
 # Chain fill (data-sources-2026-10-24 item 4): the texture binding unit is the chain
 # (bmd_chains.py), not the packet. An unbound packet takes its chain's FileCode when every
 # bound packet of that chain (after BIND_OVERRIDE, excluded packets ignored) agrees. Mixed
 # chains are left alone and listed in the manifest. Never touches excluded or overridden
 # packets; ALPHA_TEST/ABE grouping then applies to the filled packet as to any other.
+# Warnings: fills whose chain has only ONE bound packet (one wrong binding spreads to the
+# whole chain; listed in the manifest, summarised on stderr), and chains holding a
+# BIND_OVERRIDE that was NOT applied: those are not filled at all, because the override
+# says that packet's pf binding is wrong and the fill would copy it to its chain-mates.
 
 # GS alpha-tested passes, from the hero dump (163235, last frame, FBP 224), 2026-10-24.
 # Each FileCode below is matched to its dump TBP by texture correlation 1.000. Its ABE
@@ -155,7 +188,7 @@ def main():
     abe_by = defaultdict(bool);  npk_by = defaultdict(int)
     ntri_chunk = defaultdict(int)
     overrides_applied = set()
-    chain_filled = {}; chain_mixed = []
+    chain_filled = {}; chain_mixed = []; chain_single = {}; chain_skipped = []
     for cid in cids:
         binp = os.path.join(EXTRACT, cid + '.bin')
         if not os.path.exists(binp):
@@ -170,8 +203,11 @@ def main():
         for (ecid, pi) in EXCLUDE_PACKETS | set(BIND_OVERRIDE):
             if ecid == cid and pi >= n:
                 sys.exit('named packet %s/%d out of range (%d packets)' % (cid, pi, n))
-        chain = packet_chains(buf, pay, packets)
-        groups = defaultdict(list); final = {}
+        cwarn = []
+        chain = packet_chains(buf, pay, packets, cwarn)
+        for w in cwarn:
+            print('warning: chains %s: %s' % (cid, w), file=sys.stderr)
+        groups = defaultdict(list); final = {}; not_applied = set()
         for i in range(n):
             if (cid, i) in EXCLUDE_PACKETS:
                 continue
@@ -181,6 +217,7 @@ def main():
                 if pf[i] == want_pf and bool(packets[i]['abe']) == want_abe:
                     fc = to; overrides_applied.add((cid, i))
                 else:
+                    not_applied.add(i)
                     print('warning: BIND_OVERRIDE %s/%d expects pf %s abe %s, found pf %s abe %s; '
                           'NOT applied (kept pf binding)' % (cid, i, want_pf, want_abe, pf[i],
                           bool(packets[i]['abe'])), file=sys.stderr)
@@ -196,9 +233,21 @@ def main():
             if len(fcs) > 1:
                 chain_mixed.append({'chunk': cid, 'packets': idxs, 'unbound': unb,
                                     'filecodes': {f: sum(1 for i in idxs if final[i] == f) for f in fcs}})
-            elif not a.no_chain_fill:
+            elif a.no_chain_fill:
+                continue
+            elif any(i in not_applied for i in idxs):
+                skip = [i for i in idxs if i in not_applied]
+                chain_skipped.append({'chunk': cid, 'packets': idxs, 'unbound': unb,
+                                      'override_not_applied': skip, 'filecode': fcs[0]})
+                print('warning: chain fill skipped for %s packets %s: BIND_OVERRIDE on %s not '
+                      'applied, so its %s binding would spread to %d unbound packet(s)'
+                      % (cid, idxs, skip, fcs[0], len(unb)), file=sys.stderr)
+            else:
+                anchors = [i for i in idxs if final[i]]
                 for i in unb:
                     final[i] = fcs[0]; chain_filled['%s/%d' % (cid, i)] = fcs[0]
+                    if len(anchors) == 1:
+                        chain_single['%s/%d' % (cid, i)] = '%s/%d' % (cid, anchors[0])
         for i in sorted(final):
             fc = final[i]
             if fc in ALPHA_TEST and packets[i]['abe']:
@@ -247,7 +296,13 @@ def main():
         add_group(gi, key)
     manifest['excluded_packets'] = sorted('%s/%d' % k for k in EXCLUDE_PACKETS)
     manifest['chain_fill'] = {'enabled': not a.no_chain_fill, 'filled': chain_filled,
-                              'mixed_chains_left_unbound': chain_mixed}
+                              'single_anchor': chain_single,
+                              'mixed_chains_left_unbound': chain_mixed,
+                              'override_skipped_chains_left_unbound': chain_skipped}
+    if chain_single:
+        print('warning: %d of %d chain fills rest on a single bound packet (%d anchors); one '
+              'wrong anchor binding spreads to all of them. List: manifest chain_fill.single_anchor'
+              % (len(chain_single), len(chain_filled), len(set(chain_single.values()))), file=sys.stderr)
     manifest['bind_override'] = {'%s/%d' % k: {'filecode': v[0], 'expected_pf': v[1],
                                                'expected_abe': v[2], 'applied': k in overrides_applied}
                                  for k, v in BIND_OVERRIDE.items()}
@@ -311,8 +366,10 @@ def main():
             f.write('%s\t%s\t%d\t%g\n' % (g['mesh'], g['texture_container'] or 'NONE',
                                           1 if g['abe'] else 0, g.get('alpha_ref', -1)))
     nb = len({g['filecode'] for g in manifest['groups'] if g['filecode'] and not g.get('sky')})
-    print('chain fill: %s, %d packets filled; %d mixed chains with unbound packets left alone'
-          % ('on' if not a.no_chain_fill else 'OFF', len(chain_filled), len(chain_mixed)))
+    print('chain fill: %s, %d packets filled (%d on a single anchor); %d mixed chains with '
+          'unbound packets left alone; %d chains skipped (override not applied)'
+          % ('on' if not a.no_chain_fill else 'OFF', len(chain_filled), len(chain_single),
+             len(chain_mixed), len(chain_skipped)))
     print('z128 room: %d chunks, %d textures (+%s unbound), %d/%d tris textured (%.2f%%) -> %s.list'
           % (len(cids), nb, '1' if 'unbound' in flat_by else '0',
              bound, total, 100 * bound / total, a.out))
