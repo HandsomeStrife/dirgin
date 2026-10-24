@@ -13,11 +13,43 @@ zstd -dc doc_gsdump_03.gs.zst > d03.bin
 python3 -I src/gsparse.py          d03.bin              # parse: packets, draws, prim/tex stats
 python3 -I src/extract_screenshot.py d03.bin shot.png   # the exact-frame embedded 640x480 screenshot
 python3 -I src/gsrender.py         d03.bin render.png    # rasterize triangles (painter order, vertex colour)
+python3 -I src/gsrender2.py        d03.bin oracle.png --native   # faithful textured frame (the oracle, see below)
 python3 -I src/gstex.py            d03.bin --table        # list all texture/CLUT uploads
 python3 -I src/gstex_decode.py     d03.bin outdir/        # decode uploads -> PNGs + montage
 python3 -I src/gsbind.py           d03.bin outdir/        # TEXTURE<->GEOMETRY BINDING table + material montage
 python3 -I src/match_tex.py        outdir/ '/path/tex_*/*.png'   # match GS textures vs on-disk extracted textures
 ```
+
+## gsrender2: the frame oracle (2026-10-24)
+Default mode reproduces one displayed frame; `--legacy` keeps the old
+all-frames/all-buffers render byte-for-byte. What it does and why:
+- **One frame** (`--frame=last|all|N`): a dump holds several frames split by
+  VSync packets (hero dump 163235: 4). Default = last frame ending in a VSync;
+  frame 0 inherits pre-dump register state and differs on ~57% of pixels.
+- **Scene framebuffer only** (`--fb=main|N`): reads DISPFB from the privileged
+  regs (displayed FBP 112, CT24, FBW 448), follows the blit into it back to its
+  source (FBP 224, copied in 32px strips), and also renders the offscreen
+  buffers 224 samples (352 flame layer, 336 bloom/shadow, 256x256 CT16/CT32).
+- **Textures as of each draw** (`--tex=live|largest`): uploads are captured in
+  stream order; a draw uses the latest upload that started before it. Sixteen
+  addresses get different content within one frame. A texture at a render
+  target's base samples that buffer (render-to-texture).
+- **GS memory aliasing Dirge relies on** (page-level model): the frame clear is
+  drawn at FBW 4 over the FBW-7 scene buffer, and its "Z" (= the clear colour,
+  ZBP 280) lands in the buffer's second half; the scene Z buffer (ZBP 0) is
+  cleared by the display blit's Z write. Also SCISSOR, alpha test, TEXA/AEM and
+  destination-alpha blending, and FST sprites keep their UVs (gsrender.py's
+  TriInterp zeroes them; fixed only in faithful mode / `build(..., sprite_uv=True)`).
+- **Size:** drawable is **432x512** (scene SCISSOR_1 = X 0..431, Y 0..511, written
+  in the stream); FBW 448 is 64-alignment. The CRTC shows only **425.5** columns
+  (DISPLAY DW+1=2553 VCK / MAGH+1=6). `--crop=display` crops to that before the
+  4:3 stretch; it matches the PCSX2 screenshot best (width sweep optimum 424-426).
+- Hero dump vs PCSX2 screenshot (640x480): legacy MAE 74.6 / PSNR 7.0 dB;
+  default 14.4 / 21.6 dB; `--crop=display` 14.0 / 21.9 dB.
+- Known gaps: some PSMT4 room textures (wall planks), the cape and sky clouds
+  render flat or missing (texture decode, not this renderer); HUD digits missing;
+  draws that reinterpret a buffer's format, or textured draws at a mismatched
+  FBW, are skipped (counted in the stats line).
 
 ## Validation (why these are trusted)
 - **Parser:** walks the entire ~12 MB packet stream and lands **exactly on EOF**
