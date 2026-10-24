@@ -170,10 +170,23 @@ Read this first instead of re-deriving. Review images: notes/review/ (README exp
   BIND_OVERRIDE entries are now (FileCode, expected pf binding, expected ABE). On mismatch the
   export warns ("warning: BIND_OVERRIDE ...") and does NOT apply it; manifest records `applied`.
   Mutation-tested (wrong expected pf / wrong ABE -> warning, not applied).
-- Fog (checked 2026-10-24): the game fogs. 7914 draws have FGE=1 (all room + deck), FOGCOL
-  38,38,47 (= clear colour), F falls with depth w=1/q: w<50 F~245 (4% toward FOGCOL),
-  w 200-400 F~160 (37%), w 400-800 F~111 (56%), w 800-1600 F=51 (80%). Not the floor's cause
-  (floor w~40). Likely matters for the far walls/battlements. Neither our renderer nor gsrender2 fogs.
+- Fog (2026-10-24; renderer b8d529f; exporter + bmd_env.py committed with this note): the game
+  fogs. 7914 draws have FGE=1 (all room + deck). bmd_env.py reads the BMD header env block
+  (FUN_0026afe8: 32 slots x 0xC4 at +0x24) and refuses BMD version <= 3 at +4. export_z128_room.py
+  puts `@fog 38 38 47 0 810 0.2` and `@nofog room_sky.mesh` at the top of room.list, from slot 0
+  of ENV_CHUNK = 06800012. Matches the hero dump: FOGCOL 38,38,47 and floor 51 exact,
+  ramp F = 254.56 - 0.3150*w (within 1 level of the hand fit; Dan approved, review 41).
+  CAVEAT: the 13 chunks disagree on slot 0:
+    06800012/112/212 (35.7k tris)  38,38,47  far 810   floor 51   <- used
+    06800312         (26.2k tris)  39,39,46  far 640   floor 128
+    06800412-0a12    (93.3k tris)  39,39,46  far 640   floor 240
+    06800b12/0c12    (22.2k tris)  20,20,29  far 1280  floor 240
+  Which chunk's env is live at runtime (by area/camera?) is NOT decoded; 06800012 is chosen
+  because the dump confirms it. Every build warns "chunks disagree"; --env-chunk/--env-slot
+  override. far <= near and floor >= 255 write no @fog (with the reason); a negative floor is
+  clamped with a warning. Lighting fields (2 light colours, 2 directions, int at +0x90) only
+  feed character lighting (room colours are pre-baked); using them means dropping -charprelit.
+  NOTE: live out/z128_room_v2/room.list predates this; re-export to get the @fog lines.
 - 47.9% of triangles bound (verified). The rest (unbound group room_g40) are NOT UV-matched;
   "dump-unseen" is UNVERIFIED. Left grey on purpose.
 - UNVERIFIED: deck (box fill, recover_z128_deck.py) and "seed+grow" bindings are not
@@ -182,6 +195,11 @@ Read this first instead of re-deriving. Review images: notes/review/ (README exp
 - DMSH mesh header is 36 bytes (magic + 2 uint32 + 6-float bbox), then 12 floats/vertex.
 
 ## Open
+- Post foot vs cape (review 40, left on purpose by Dan): the dump draws the near post
+  (54050-54113) before the cape, and the hem triangles over its foot (= ours exactly, texel
+  alpha 127) pass depth GEQUAL, covering 221-247 of 250 foot px in all 4 dump frames. Ours
+  matches the dump; the screenshot is likely a different cloth frame. The cape/body average
+  all 4 dump frames. Revisit with real animation/cloth, or if clipping shows elsewhere.
 1. Pose is a single-frame snapshot (body and cape both from 163235); any other frame or
    motion needs the animation system. Arm region reads ~20% too bright.
 2. 0x2ee8 second pass (16x16 CT24, ABE on, 596 tris over the arm/boots): not reproduced;

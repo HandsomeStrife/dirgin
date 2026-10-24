@@ -23,6 +23,7 @@ from collections import defaultdict
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from export_bmd_textured import find_bmd_payload, decode_packets, EXTRACT
 from export_bmd_bound import build_flat, emit_group, tex_png_for
+from bmd_env import read_env, fog_directive
 
 # Packets dropped by name (2026-10-24 investigation, review 27): big flat quads at
 # x=-829 with generic 0..1 UVs. They sit in front of the real x=-760 wall/roof, and
@@ -95,6 +96,13 @@ ATEST_SUFFIX = '@atest'
 
 SKY_FC = '0680ff35'   # TBP 11504 sky-dome texture (correlation 1.000), see export_z128_sky.py
 
+# z128's chunks do NOT agree on env slot 0 (fog): 06800012/112/212 '38 38 47, 0 810, floor 51',
+# 06800312 '39 39 46, 0 640, 128', 06800412-0a12 '39 39 46, 0 640, 240', 06800b12/0c12
+# '20 20 29, 0 1280, 240'. Which chunk's env the game makes live is not decoded. 06800012 is
+# chosen because it is the one the hero dump confirms: FOGCOL 38,38,47 and floor 51 exact,
+# ramp F = 254.56 - 0.3150*w (far 810). Not by triangle count, not by glob order.
+ENV_CHUNK = '06800012'
+
 
 def main():
     ap = argparse.ArgumentParser()
@@ -102,6 +110,9 @@ def main():
     ap.add_argument('-o', '--out', required=True, help='output prefix, e.g. out/z128_room_v2/room')
     ap.add_argument('--sky', help='sky mesh from export_z128_sky.py (basename, next to the '
                     '.list); appended as the last group, textured with ' + SKY_FC)
+    ap.add_argument('--env-chunk', default=None, help='chunk whose BMD env slot gives the fog '
+                    '(default %s, the one the hero dump confirms; see ENV_CHUNK)' % ENV_CHUNK)
+    ap.add_argument('--env-slot', type=int, default=0, help='BMD env slot (0 = level default)')
     a = ap.parse_args()
 
     cids = [os.path.basename(p)[3:11]
@@ -110,6 +121,7 @@ def main():
 
     flat_by = defaultdict(list); ntri_by = defaultdict(int)
     abe_by = defaultdict(bool);  npk_by = defaultdict(int)
+    ntri_chunk = defaultdict(int)
     overrides_applied = set()
     for cid in cids:
         binp = os.path.join(EXTRACT, cid + '.bin')
@@ -146,6 +158,7 @@ def main():
             if ntri == 0:
                 continue
             flat_by[key].extend(flat); ntri_by[key] += ntri; npk_by[key] += len(idxs)
+            ntri_chunk[cid] += ntri
             if any(packets[i]['abe'] for i in idxs):
                 abe_by[key] = True
 
@@ -194,8 +207,53 @@ def main():
     # alpha-tested passes after the sky, as in the game's draw order
     for k, key in enumerate(atest):
         add_group(len(order) + k, key)
+    # Fog from the BMD env block (bmd_env.py), not from constants. The sky dome is
+    # exempt: the game draws it after the room with its own additive blend.
+    env_cid = a.env_chunk or ENV_CHUNK
+    if env_cid not in cids:
+        sys.exit('env chunk %s is not one of this room\'s chunks (%s)' % (env_cid, ' '.join(cids)))
+    def chunk_env(cid):
+        p = os.path.join(EXTRACT, cid + '.bin')
+        return read_env(open(p, 'rb').read(), a.env_slot) if os.path.exists(p) else None
+    try:
+        env = chunk_env(env_cid)
+    except ValueError as x:
+        sys.exit('%s: %s' % (env_cid, x))
+    if env is None:
+        sys.exit('no BMD env table in %s slot %d' % (env_cid, a.env_slot))
+    fog, notes = fog_directive(env)
+    for n_ in notes:
+        print('warning: %s env slot %d: %s' % (env_cid, a.env_slot, n_), file=sys.stderr)
+    # The other chunks' slot: list the ones whose fog disagrees with the chosen one.
+    differ = defaultdict(list); agree = [env_cid]
+    for cid in cids:
+        if cid == env_cid:
+            continue
+        try:
+            e = chunk_env(cid)
+            d = 'no env table' if e is None else (fog_directive(e)[0] or 'no @fog')
+        except ValueError as x:
+            d = 'refused (%s)' % x
+        if d != fog:
+            differ[d].append(cid)
+        else:
+            agree.append(cid)
+    if differ:
+        why = '--env-chunk' if a.env_chunk else 'ENV_CHUNK in export_z128_room.py, dump-confirmed'
+        print('warning: chunks disagree on env slot %d fog; using %s (%s; why: %s). Agreeing: '
+              '%s (%d room tris). Differing:' % (a.env_slot, env_cid, fog, why, ' '.join(agree),
+              sum(ntri_chunk[c] for c in agree)), file=sys.stderr)
+        for d, cs in differ.items():
+            print('warning:   %s: %s (%d room tris)' % (d, ' '.join(cs),
+                  sum(ntri_chunk[c] for c in cs)), file=sys.stderr)
+    manifest['env'] = dict(env, chunk=env_cid, fog_directive=fog,
+                           chunks_differing={d: cs for d, cs in differ.items()})
     json.dump(manifest, open(a.out + '_manifest.json', 'w'), indent=2)
     with open(a.out + '.list', 'w') as f:
+        if fog:
+            f.write(fog + '\n')
+            if a.sky:
+                f.write('@nofog %s\n' % a.sky)
         for g in manifest['groups']:
             f.write('%s\t%s\t%d\t%g\n' % (g['mesh'], g['texture_container'] or 'NONE',
                                           1 if g['abe'] else 0, g.get('alpha_ref', -1)))
