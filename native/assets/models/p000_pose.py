@@ -7,6 +7,8 @@ UV (triangle-signature matches first, then same-texture vertex UV). A rigid tran
 per BONE is solved from the matched vertices (bind pose, already placed) -> dump; it
 poses every vertex of that bone, matched or not. A matched vertex takes its dump
 position directly when it agrees with its bone's prediction (within TOL).
+A bone is solved only with >= MIN_PTS matches whose 2nd principal spread is >= MIN_SPREAD;
+otherwise it takes its twist from the nearest solved ancestor, keeping its own direction/position (colinear bones), or copies it outright (too few points) (stats list which bones and why).
 """
 import collections
 import numpy as np
@@ -14,6 +16,10 @@ import render_skinned as R
 
 TOL = 1.0          # world units (Vincent is ~19 tall): max dump-vs-bone disagreement
 MIN_PTS = 4        # matched vertices needed to solve a bone on its own
+MIN_SPREAD = 0.05  # min 2nd principal spread (RMS, world units) to solve a bone; below it
+                   # the twist about the points' line is unconstrained. Data (frame 163235):
+                   # 6 bones are exactly 0 (24,32,34,38,67,75); the next is 0.058 (bone 26) and
+                   # the hand bones 53-61 are >= 0.087, so 0.05 sits in the gap.
 
 
 def slot_bones(buf, NB, bc, P, G):
@@ -58,6 +64,26 @@ def _rigid(A, B):
     return Rm, cb - Rm @ ca
 
 
+def _spread(A):
+    """RMS extent of A along its principal axes, largest first."""
+    return np.linalg.svd(A - A.mean(0), compute_uv=False) / np.sqrt(len(A))
+
+
+def _fit_line(Rp, A, B):
+    """R, t for points on (or near) a line: the twist about the line comes from Rp,
+    the line's direction and the centroid come from A -> B."""
+    ca, cb = A.mean(0), B.mean(0); Rm = Rp
+    if _spread(A)[0] >= MIN_SPREAD:
+        da = np.linalg.svd(A - ca)[2][0]; db = np.linalg.svd(B - cb)[2][0]
+        if ((A - ca) @ da) @ ((B - cb) @ db) < 0:
+            db = -db
+        u = Rp @ da; ax = np.cross(u, db); sn = np.linalg.norm(ax); cs = float(u @ db)
+        if sn > 1e-9:
+            K = np.array([[0, -ax[2], ax[1]], [ax[2], 0, -ax[0]], [-ax[1], ax[0], 0]]) / sn
+            Rm = (np.eye(3) + sn * K + (1 - cs) * K @ K) @ Rp     # swing u -> db
+    return Rm, cb - Rm @ ca
+
+
 def pose(placed, cands, vbone, parent, iters=4):
     """placed: {v: bind world pos (placed)}; cands: {v: [dump world pos]}.
     Returns (posed {v: pos}, rot {v: R}, stats)."""
@@ -77,26 +103,31 @@ def pose(placed, cands, vbone, parent, iters=4):
         byb = collections.defaultdict(list)
         for v, c in pick.items():
             byb[vbone[v]].append(v)
-        solved = {}
+        solved, flat = {}, {}
         for b, vs in byb.items():
             if len(vs) < MIN_PTS:
                 continue
             A = np.array([placed[v] for v in vs]); B = np.array([pick[v] for v in vs])
+            if _spread(A)[1] < MIN_SPREAD:          # (near-)colinear: twist unconstrained
+                flat[b] = (A, B); continue
             Rm, t = _rigid(A, B)
             res = np.linalg.norm(A @ Rm.T + t - B, axis=1)
             keep = res <= max(np.percentile(res, 75), 1e-6) if len(vs) >= 8 else res >= 0
-            if keep.sum() >= MIN_PTS:
+            if keep.sum() >= MIN_PTS and _spread(A[keep])[1] >= MIN_SPREAD:
                 Rm, t = _rigid(A[keep], B[keep])
             solved[b] = (Rm, t)
-        # unsolved bones inherit the nearest solved ancestor (else keep identity)
+        # unsolved bones copy the nearest solved ancestor; with none, bind pose (identity).
+        # A colinear bone takes only its twist from there (_fit_line keeps the rest).
+        copied, unposed = [], []
         for b in bones:
             if b in solved:
                 T[b] = solved[b]; continue
             a = b
             while a >= 0 and a not in solved:
                 a = parent[a] if a < len(parent) else -1
-            if a >= 0:
-                T[b] = solved[a]
+            base = solved[a] if a >= 0 else (np.eye(3), np.zeros(3))
+            T[b] = _fit_line(base[0], *flat[b]) if b in flat else base
+            (copied if a >= 0 else unposed).append(b)
     posed, rot = {}, {}
     how = collections.Counter()
     for v in placed:
@@ -108,5 +139,7 @@ def pose(placed, cands, vbone, parent, iters=4):
             posed[v] = c; how['dump'] += 1
         else:
             posed[v] = p; how['bone' if not cands.get(v) else 'bone(dump rejected)'] += 1
-    nsolved = len({b for b in bones if any(vbone.get(v) == b for v in pick)})
-    return posed, rot, dict(how=dict(how), bones=len(bones), bones_with_matches=nsolved)
+    # stats describe the final pass
+    return posed, rot, dict(how=dict(how), bones=len(bones), bones_solved=len(solved),
+                            bones_copied_parent=sorted(copied),
+                            bones_colinear=sorted(flat), bones_unposed=sorted(unposed))
