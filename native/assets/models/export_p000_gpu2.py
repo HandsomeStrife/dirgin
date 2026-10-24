@@ -188,6 +188,41 @@ def main():
 
     Nn = (N.astype(np.float64) if N is not None and len(N) == len(V) else np.zeros_like(Pn))
     ln = np.linalg.norm(Nn, axis=1, keepdims=True); ln[ln < 1e-9] = 1.0; Nn = Nn / ln
+
+    # ---- pose the body to this frame from the dump (p000_pose.py); POSE=0 = bind pose
+    pose_stats = None
+    if os.environ.get('POSE', '1') != '0':
+        import p000_pose as PZ
+        yr = np.radians(pl['yaw']); cy, sy = np.cos(yr), np.sin(yr)
+        Ry = np.array([[cy, 0, sy], [0, 1, 0], [-sy, 0, cy]])      # place_character's yaw
+        fwd = lambda X: pl['s'] * (np.asarray(X) - piv) @ Ry.T + np.array([pl['x'], pl['y'], pl['z']])
+        placed = {v: fwd(Pn[v]) for v in used_idx}
+        dall = collections.defaultdict(list)
+        for t0, vs in dtris:
+            dall[tri_sig([v[1] for v in vs])].append({q(v[1]): v[0] for v in vs})
+        byuv = collections.defaultdict(list)
+        for t0, vs in dtris:
+            for w, uv, _c in vs: byuv[(t0, q(uv))].append(w)
+        cands = collections.defaultdict(list); src = collections.Counter()
+        for i, t in enumerate(tris):
+            uvs = uvn(t)
+            if how[i] == 'exact':
+                for dmap in dall.get(tri_sig(uvs), []):
+                    for k in range(3):
+                        w = dmap.get(q(uvs[k]))
+                        if w is not None: cands[t[k]].append(w)
+            elif tri_tex0[i] is not None:
+                for k in range(3):
+                    cands[t[k]].extend(byuv.get((tri_tex0[i], q(uvs[k])), []))
+        vb = PZ.vertex_bones(buf, NB, bc, gmeta)
+        posed, rot, pose_stats = PZ.pose(placed, dict(cands), vb, sk['parent'])
+        pose_stats['vertices'] = len(used_idx)
+        pose_stats['with_dump_candidates'] = sum(1 for v in used_idx if cands.get(v))
+        print("pose:", pose_stats)
+        Rinv = Ry.T
+        for v in used_idx:
+            Pn[v] = world_to_model(posed[v][None], pl, piv)[0]
+            Nn[v] = Rinv @ (rot[v] @ (Ry @ Nn[v]))
     flat = []; dropped = 0
     def emit(p, n, uv, col, x):
         yo, rh, rw = region[x]
@@ -217,7 +252,7 @@ def main():
     json.dump([dict(g=int(t[6]), name=gmeta[t[6]][0], tex0=(None if tri_tex0[i] is None else int(tri_tex0[i])),
                     how=how[i], uv=uvn(t), v=[int(k) for k in t[:3]]) for i, t in enumerate(tris)],
               open(os.path.join(outdir, "binding.json"), 'w'))
-    json.dump(dict(placement=pl, binding=dict(hc), cape=cst,
+    json.dump(dict(placement=pl, binding=dict(hc), cape=cst, pose=pose_stats,
                    render_args=f"-s {pl['s']:.4f} -yaw {pl['yaw']:.2f} -x {pl['x']:.2f} -y {pl['y']:.2f} -z {pl['z']:.2f}"),
               open(os.path.join(outdir, "placement.json"), 'w'), indent=2)
     print(f"wrote {mp} ({vcount} verts) + placement.json")
