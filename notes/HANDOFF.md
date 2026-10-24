@@ -93,6 +93,15 @@ Read this first instead of re-deriving. Review images: notes/review/ (README exp
   The old level-remap/ folder is gone. Game reference = the PCSX2 PNG next to the hero dump
   in save-states/sea-of-flames-gs-dumps/ (resize to 640x480).
 
+- Clips (phase 1, 2026-10-24): all 112 p000 v0x13 clips decode, and skinning with clip
+  matrices is exact (fast path == decode_groups). But the anim_eval rotation decode is WRONG
+  for them: best local-rotation error over 55 dump-solved bones = 72 deg median across all
+  clips/frames (bind = 16 deg; h_wk ~90 deg every frame). Euler reading (4096/8192 per turn,
+  6 orders, +/-transpose) is no better: 49 deg. Bone order looks right (bone 2 = hips carries
+  P1 root motion). FUN_005af618 returns integer magnitudes + signs only; the math is in VU0
+  macro code in FUN_005afa58 (table at PTR_DAT_0046dc04+0x400, probably trig). Next: decode
+  that VU0 block. Review 42_anim_clip.png. Dump pose remains in use.
+
 ## Room
 - out/ is gitignored. Rebuild (in native/assets/models, run -I):
     recover_z128_deck.py --in out/z128_pktfc_union --out out/z128_pktfc_v3
@@ -193,6 +202,34 @@ Read this first instead of re-deriving. Review images: notes/review/ (README exp
   UV-checked; likely source of wrong textures (e.g. lower-right planked facets).
   The seed binding also matched the excluded 0..1-UV quads, so generic UVs can fool it.
 - DMSH mesh header is 36 bytes (magic + 2 uint32 + 6-float bbox), then 12 floats/vertex.
+
+- Chain fill (2026-10-24, review 43): bmd_chains.py gives each decoded packet its
+  chain id (raw STCYCL starts; a gap after MSCNT = chain trailer). decode_packets now records
+  `off` (stream offset) so dropped geometry-less packets don't shift indices (the earlier probe
+  skipped chunks where counts differed; all 13 chunks are covered now). export_z128_room.py:
+  an unbound packet takes its chain's FileCode only when every bound packet of the chain
+  (after BIND_OVERRIDE, excluded packets ignored) agrees. --no-chain-fill turns it off. Manifest:
+  chain_fill.filled, chain_fill.mixed_chains_left_unbound (14 chains, 25 packets, left grey).
+  Bound tris 47.93% -> 51.77% (768 packets).
+- Suspect audit: 50 within-chain disagreements (v3, all chunks) checked with dump UV triple +
+  vcol within 12 + screen position within 4 px (hero camera projection); TBP -> FileCode by
+  texture corr over all 138 0680ff* (agrees with 627/653 existing bindings it can see).
+  BIND_OVERRIDE added: 06800012/179 -> 0680ff32; 06800112/1095,1096,1107,1108 -> 0680ff05;
+  06800212/579 -> 0680ff2b (off-screen); chain anchors 06800112/1082,1093 and 06800212/1048
+  -> 0680ff05 (without them the fill copied a wrong 0680ff24 onto 7 dump-visible packets).
+  TBP 10756 = 0680ff05 (corr 1.000), new; this is the pkt 424 overlay texture ("matches no
+  FileCode" above was a search over bound textures only). The other suspects are dump-unseen, left as-is.
+- Hero view: one region changes, the pale patch behind the far-right tower (x544-605 y141-175
+  at 640x480): mean 37,37,44 -> 31,31,37 (game 31,30,36), |d| 7.0 -> 2.3, SSIM 0.79 -> 0.91.
+  Elsewhere < 5 levels. Backup: out/z128_room_v2_PRE43_bak/. room.list now has the @fog lines.
+- Open: 16 other bindings the dump contradicts (not suspects, left), mostly 0680ff24 that should be
+  0680ff05/0680ff08 (e.g. 06800112/1049-1051, 1062; 06800212/588, 1035) and 0680ff31 -> 0680ff2e.
+  The unanimity guard can't be checked on the hero dump: filling mixed chains anyway adds 25 packets,
+  none of them visible in the dump.
+  Review caveats: bmd_chains.py's MSCNT search misreads some vertex words as end marks (54 false
+  chain breaks; a VIF-aware walk fills 773 vs 768, 0 wrong) and its "1-10 packets" docstring is
+  wrong (up to 47). 307 of 768 fills rest on a single bound packet, with no warning; a chunk
+  with no trailers silently becomes one chain. Follow-up: VIF-aware walk + warnings.
 
 ## Open
 - Post foot vs cape (review 40, left on purpose by Dan): the dump draws the near post

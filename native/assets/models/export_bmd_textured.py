@@ -198,7 +198,7 @@ def decode_packets(buf, pay):
                 pp = (pp + 3) & ~3
         if pos and col and uv and len(pos) == len(col) == len(uv) and len(pos) >= 3:
             packets.append(dict(verts=pos, uv=uv, col=col, sel=sel, prim=prim,
-                                abe=abe, is_list=is_list))
+                                abe=abe, is_list=is_list, off=p))   # off: STCYCL offset (bmd_chains.py)
         p = pp
     return packets
 

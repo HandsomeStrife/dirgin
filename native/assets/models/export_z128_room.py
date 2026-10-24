@@ -24,6 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from export_bmd_textured import find_bmd_payload, decode_packets, EXTRACT
 from export_bmd_bound import build_flat, emit_group, tex_png_for
 from bmd_env import read_env, fog_directive
+from bmd_chains import packet_chains
 
 # Packets dropped by name (2026-10-24 investigation, review 27): big flat quads at
 # x=-829 with generic 0..1 UVs. They sit in front of the real x=-760 wall/roof, and
@@ -60,7 +61,36 @@ BIND_OVERRIDE = {('06800212', 370): ('0680ff85', None, False),
                  ('06800112', 986): ('0680ff07', '0680ff06', True),
                  ('06800112', 1027): ('0680ff07', '0680ff06', True),
                  ('06800212', 0): ('0680ff87', None, False),
-                 ('06800212', 4): ('0680ff87', None, False)}
+                 ('06800212', 4): ('0680ff87', None, False),
+                 # Chain audit (review 43): within-chain disagreements checked against the hero
+                 # dump. Evidence = dump tris with the same UV triple, vertex colour within 12 AND
+                 # screen position within 4 px of our hero-camera projection; dump TBP -> FileCode
+                 # by texture correlation (all 138 0680ff* textures, not only bound ones).
+                 # 06800012 pkt 179 (16 tris, battlement ABE): 2 tris drawn with TBP 11288 =
+                 # 0680ff32 (corr 1.000); its chain-mates 178/180 are 0680ff32 (dump agrees).
+                 ('06800012', 179): ('0680ff32', '0680ff31', True),
+                 # 06800112 pkts 1095/1096/1107/1108: drawn with TBP 10756 = 0680ff05 (corr 1.000;
+                 # bound nowhere before) on 8/12/6/4 tris; none on their pf textures.
+                 ('06800112', 1095): ('0680ff05', '0680ff32', False),
+                 ('06800112', 1096): ('0680ff05', '0680ff24', False),
+                 ('06800112', 1107): ('0680ff05', '0680ff87', False),
+                 ('06800112', 1108): ('0680ff05', '0680ff33', False),
+                 # Chain anchors: the only 0680ff24-bound packets of chains whose other packets the
+                 # dump also draws as 0680ff05; without these, chain fill would copy 0680ff24 onto
+                 # them. 06800112 pkt 1093 (9/10 tris on TBP 10756), 1082 (1/5), 06800212 pkt 1048
+                 # (12/16); dump-confirmed unbound mates: 1094, 1080/1081/1083, 1044-1047.
+                 ('06800112', 1093): ('0680ff05', '0680ff24', False),
+                 ('06800112', 1082): ('0680ff05', '0680ff24', False),
+                 ('06800212', 1048): ('0680ff05', '0680ff24', False),
+                 # 06800212 pkt 579 (2 tris, off-screen in the hero view): both drawn with TBP
+                 # 11620 = 0680ff2b (corr 1.000), like chain-mate 578.
+                 ('06800212', 579): ('0680ff2b', '0680ff27', False)}
+
+# Chain fill (data-sources-2026-10-24 item 4): the texture binding unit is the chain
+# (bmd_chains.py), not the packet. An unbound packet takes its chain's FileCode when every
+# bound packet of that chain (after BIND_OVERRIDE, excluded packets ignored) agrees. Mixed
+# chains are left alone and listed in the manifest. Never touches excluded or overridden
+# packets; ALPHA_TEST/ABE grouping then applies to the filled packet as to any other.
 
 # GS alpha-tested passes, from the hero dump (163235, last frame, FBP 224), 2026-10-24.
 # Each FileCode below is matched to its dump TBP by texture correlation 1.000. Its ABE
@@ -113,6 +143,8 @@ def main():
     ap.add_argument('--env-chunk', default=None, help='chunk whose BMD env slot gives the fog '
                     '(default %s, the one the hero dump confirms; see ENV_CHUNK)' % ENV_CHUNK)
     ap.add_argument('--env-slot', type=int, default=0, help='BMD env slot (0 = level default)')
+    ap.add_argument('--no-chain-fill', action='store_true', help='leave unbound packets unbound '
+                    'even when their chain agrees on one FileCode')
     a = ap.parse_args()
 
     cids = [os.path.basename(p)[3:11]
@@ -123,6 +155,7 @@ def main():
     abe_by = defaultdict(bool);  npk_by = defaultdict(int)
     ntri_chunk = defaultdict(int)
     overrides_applied = set()
+    chain_filled = {}; chain_mixed = []
     for cid in cids:
         binp = os.path.join(EXTRACT, cid + '.bin')
         if not os.path.exists(binp):
@@ -137,7 +170,8 @@ def main():
         for (ecid, pi) in EXCLUDE_PACKETS | set(BIND_OVERRIDE):
             if ecid == cid and pi >= n:
                 sys.exit('named packet %s/%d out of range (%d packets)' % (cid, pi, n))
-        groups = defaultdict(list)
+        chain = packet_chains(buf, pay, packets)
+        groups = defaultdict(list); final = {}
         for i in range(n):
             if (cid, i) in EXCLUDE_PACKETS:
                 continue
@@ -150,6 +184,23 @@ def main():
                     print('warning: BIND_OVERRIDE %s/%d expects pf %s abe %s, found pf %s abe %s; '
                           'NOT applied (kept pf binding)' % (cid, i, want_pf, want_abe, pf[i],
                           bool(packets[i]['abe'])), file=sys.stderr)
+            final[i] = fc
+        members = defaultdict(list)
+        for i in final:
+            members[chain[i]].append(i)
+        for c, idxs in members.items():
+            fcs = sorted({final[i] for i in idxs if final[i]})
+            unb = [i for i in idxs if not final[i]]
+            if not unb or not fcs:
+                continue
+            if len(fcs) > 1:
+                chain_mixed.append({'chunk': cid, 'packets': idxs, 'unbound': unb,
+                                    'filecodes': {f: sum(1 for i in idxs if final[i] == f) for f in fcs}})
+            elif not a.no_chain_fill:
+                for i in unb:
+                    final[i] = fcs[0]; chain_filled['%s/%d' % (cid, i)] = fcs[0]
+        for i in sorted(final):
+            fc = final[i]
             if fc in ALPHA_TEST and packets[i]['abe']:
                 fc += ATEST_SUFFIX
             groups[fc if fc else 'unbound'].append(i)
@@ -195,6 +246,8 @@ def main():
     for gi, key in enumerate(order):
         add_group(gi, key)
     manifest['excluded_packets'] = sorted('%s/%d' % k for k in EXCLUDE_PACKETS)
+    manifest['chain_fill'] = {'enabled': not a.no_chain_fill, 'filled': chain_filled,
+                              'mixed_chains_left_unbound': chain_mixed}
     manifest['bind_override'] = {'%s/%d' % k: {'filecode': v[0], 'expected_pf': v[1],
                                                'expected_abe': v[2], 'applied': k in overrides_applied}
                                  for k, v in BIND_OVERRIDE.items()}
@@ -258,6 +311,8 @@ def main():
             f.write('%s\t%s\t%d\t%g\n' % (g['mesh'], g['texture_container'] or 'NONE',
                                           1 if g['abe'] else 0, g.get('alpha_ref', -1)))
     nb = len({g['filecode'] for g in manifest['groups'] if g['filecode'] and not g.get('sky')})
+    print('chain fill: %s, %d packets filled; %d mixed chains with unbound packets left alone'
+          % ('on' if not a.no_chain_fill else 'OFF', len(chain_filled), len(chain_mixed)))
     print('z128 room: %d chunks, %d textures (+%s unbound), %d/%d tris textured (%.2f%%) -> %s.list'
           % (len(cids), nb, '1' if 'unbound' in flat_by else '0',
              bound, total, 100 * bound / total, a.out))
