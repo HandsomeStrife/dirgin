@@ -113,8 +113,8 @@ Read this first instead of re-deriving. Review images: notes/review/ (README exp
   (TBP->FC by texture corr 1.000; reasons recorded per entry). Their ABE packets go to
   separate groups listed AFTER the sky (game order) with the ref in room.list column 4;
   render_scene_textured draws those blended, depth only where As >= (96-0.5)/128. Five groups:
-  0680ff31 (battlements: g21 opaque 650 tris + g43 alpha 630 tris), 0680ff30, 0680ff28, 0680ff32, 0680ff54 (0680ff07 removed from the
-  table: all 37 of its packets are non-ABE and it has no cut-out texels). Not global on purpose: 0680ff36 has 16% cut-out texels but the
+  0680ff31 (battlements: g21 opaque 650 tris + g43 alpha 630 tris), 0680ff30, 0680ff28, 0680ff32, 0680ff54 (0680ff07's own 37
+  packets are non-ABE; it is in the table only for the 3 rebound wash packets, see deck fix below). Not global on purpose: 0680ff36 has 16% cut-out texels but the
   game draws it opaque. Vertex alpha checked: 128 on the battlement ATE pass; 0680ff30 also
   has Av 76-78, which caps As below the ref, so those faces blend semi-transparent, as in-game.
   Result: 8309 px change at 640x480 exact (4300 with 2% tolerance), all in the battlement band + lower-right 0680ff30 strip. Gap px vs
@@ -127,6 +127,23 @@ Read this first instead of re-deriving. Review images: notes/review/ (README exp
   Fallbacks are loud (stderr "warning:"): bad/garbled/out-of-range col 4 (valid: absent, -1,
   0..1) -> group drawn opaque; col-4 group with no texture -> test dropped; ALPHA_TEST entry
   matching no ABE packet (exporter). A clean rebuild + render prints none of them.
+- Dark deck at Vincent's feet (fixed 2026-10-24, review 33; not committed): NOT the deck
+  fill. 06800112 pkts 585/986/1027 (ABE, the only 0680ff06 packets) were bound to 0680ff06
+  (near-black texture, corr 0.06 with the dump) and drawn opaque. The game draws those
+  pixels with TBP 10792 = 0680ff07 (corr 1.000), same vertex colours (RGB 12-26, A 0-66),
+  ATE GEQUAL 96 + (Cs-Cd)*As+Cd: a faint dark wash over the deck 0680ff87 (TBP 13228).
+  Fix: BIND_OVERRIDE -> 0680ff07, and 0680ff07 added to ALPHA_TEST (its 37 non-ABE packets
+  stay opaque). 986/1027 are out of view (same signature, dump-unverified). Floor mask
+  (5328 px): mean 10,8,9 -> 33,21,17 (game 49,34,26), |d| 27.5 -> 12.6, SSIM 0.25 -> 0.51;
+  strip left of Vincent (18.7k px) |d| 27.8 -> 5.5. Sky/mid-left/upper-right identical.
+  The rest of the gap is shared with the oracle (35,26,20 there), so it's post/fog, not the wash.
+  Gradient corr vs game ~0 before AND after (and with the wash removed): plank structure
+  doesn't line up. Deck UVs (spatial fill) are still unverified. Grading scripts were scratch-only.
+  Backup: out/z128_room_v2_PRESKY32_bak/ (= HEAD output, verified byte-identical).
+- Fog (checked 2026-10-24): the game fogs. 7914 draws have FGE=1 (all room + deck), FOGCOL
+  38,38,47 (= clear colour), F falls with depth w=1/q: w<50 F~245 (4% toward FOGCOL),
+  w 200-400 F~160 (37%), w 400-800 F~111 (56%), w 800-1600 F=51 (80%). Not the floor's cause
+  (floor w~40). Likely matters for the far walls/battlements. Neither our renderer nor gsrender2 fogs.
 - 47.9% of triangles bound (verified). The rest (unbound group room_g40) are NOT UV-matched;
   "dump-unseen" is UNVERIFIED. Left grey on purpose.
 - UNVERIFIED: deck (box fill, recover_z128_deck.py) and "seed+grow" bindings are not

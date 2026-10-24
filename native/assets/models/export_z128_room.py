@@ -37,7 +37,15 @@ EXCLUDE_PACKETS = {('06800a12', 29), ('06800a12', 31),
 # surface at the same depth (ratio 1.01) with TBP 12996, whose decoded texture is
 # FileCode 0680ff85 (correlation 1.000). Binding is per packet, so its second,
 # smaller triangle gets the same texture.
-BIND_OVERRIDE = {('06800212', 370): '0680ff85'}
+# 06800112 pkts 585/986/1027 (the only 0680ff06 packets; 585 is the strip at
+# Vincent's feet, y=-98): the hero dump draws pkt 585's pixels with TBP 10792, whose
+# texture is 0680ff07 (corr 1.000; 0680ff06 corr 0.06, mean 15 = near-black), and with
+# the same vertex colours (RGB 12-18/12-18/18-26, A 0-66). 986/1027 share that exact
+# colour/UV signature but are out of this view (dump-unverified). All three are ABE,
+# so with 0680ff07 in ALPHA_TEST they blend as a faint wash instead of opaque black.
+BIND_OVERRIDE = {('06800212', 370): '0680ff85',
+                 ('06800112', 585): '0680ff07', ('06800112', 986): '0680ff07',
+                 ('06800112', 1027): '0680ff07'}
 
 # GS alpha-tested passes, from the hero dump (163235, last frame, FBP 224), 2026-10-24.
 # Each FileCode below is matched to its dump TBP by texture correlation 1.000. Its ABE
@@ -53,9 +61,9 @@ BIND_OVERRIDE = {('06800212', 370): '0680ff85'}
 # no test), the sky 0680ff35 (ATST NEVER + FB_ONLY, not a cut-out), and the GREATER-100
 # ATE passes at TBP 11440/11476/11748/11880/12156, whose textures match nothing bound
 # here (corr <= 0.56).
-# Also not listed: 0680ff07 (TBP 10792, 10 ATE tris in the dump). All 37 of its BMD
-# packets are non-ABE, so an entry matches nothing (the exporter warns), and its texture
-# has no cut-out texels, so the test could not change a pixel anyway.
+# 0680ff07 (TBP 10792): its 37 pf-bound packets are non-ABE and stay opaque; its ABE
+# packets are the three BIND_OVERRIDE rebinds above (dump ATE draws: same TEST/ALPHA).
+# Their vertex alpha <= 66 keeps As below the ref, so they blend and write no depth.
 # Vertex alpha (As = At*Av/128): every ATE vertex of 0680ff31 and 0680ff32 is 128, and
 # 153/156 of 0680ff28; 0680ff30 also has Av 76-78 (BMD and dump agree), which caps As
 # below the ref, so those faces blend semi-transparent and write no depth, as in-game.
@@ -67,6 +75,7 @@ ALPHA_TEST = {
     '0680ff28': (96, 'TBP 10828: 52 ATE tris, 3% cut-out texels'),
     '0680ff32': (96, 'TBP 11288: 8 ATE tris, no cut-out texels'),
     '0680ff54': (96, 'TBP 11800: 16 ATE tris, no cut-out texels'),
+    '0680ff07': (96, 'TBP 10792: deck wash at Vincent\'s feet, Av 0-66 (blends, no depth)'),
 }
 ATEST_SUFFIX = '@atest'
 
