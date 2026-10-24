@@ -93,14 +93,16 @@ Read this first instead of re-deriving. Review images: notes/review/ (README exp
   The old level-remap/ folder is gone. Game reference = the PCSX2 PNG next to the hero dump
   in save-states/sea-of-flames-gs-dumps/ (resize to 640x480).
 
-- Clips (phase 1, 2026-10-24): all 112 p000 v0x13 clips decode, and skinning with clip
-  matrices is exact (fast path == decode_groups). But the anim_eval rotation decode is WRONG
-  for them: best local-rotation error over 55 dump-solved bones = 72 deg median across all
-  clips/frames (bind = 16 deg; h_wk ~90 deg every frame). Euler reading (4096/8192 per turn,
-  6 orders, +/-transpose) is no better: 49 deg. Bone order looks right (bone 2 = hips carries
-  P1 root motion). FUN_005af618 returns integer magnitudes + signs only; the math is in VU0
-  macro code in FUN_005afa58 (table at PTR_DAT_0046dc04+0x400, probably trig). Next: decode
-  that VU0 block. Review 42_anim_clip.png. Dump pose remains in use.
+- Clips (phase 1b, 2026-10-24, review 44): rotation decode SOLVED in anim_rot.py (replaces
+  anim_eval's quaternion formula; track walk unchanged). VU0 micro at vcallms 0x218: each
+  TRACK Q key is an axis in spherical angles (x, y: 12 bits over [0, pi/2], octant from the
+  sign bits) plus half-angle z (13 bits over [0, pi]); unit pi/8192; sin/cos via Taylor
+  coeffs at 0x5b3ae0/af0. q = sin z*(cx*cy, cy*sx, sy)*signs, w = cos z. Between keys:
+  hemisphere flip, nlerp. Replaces the local bone rotation. Error vs 55 dump-solved bones:
+  6.8 deg median (bind 16.2, old 72). Best fit h_swtch f58 (0770000b), not confirmed as the
+  clip playing at 163235; h_wk 15-17 deg every frame; hands worst (36-39 deg). Not wired into
+  the export; dump pose still in use. Undecoded: translation tracks (P1), vf28 pose blend.
+  sample() extrapolates past the last key (f > 1); check the game clamps before relying on it.
 
 ## Room
 - out/ is gitignored. Rebuild (in native/assets/models, run -I):

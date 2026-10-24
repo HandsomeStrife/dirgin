@@ -35,6 +35,11 @@ tracks + 1 "trans-style" track; this is what makes the segment walk exact):
                             sign+magnitude (FUN_005af618) -> the per-bone
                             QUATERNION.  Present on ALL bones (this is the pose).
 
+SUPERSEDED (2026-10-24): the quaternion formula below is WRONG. The real maths is
+the VU0 micro program at vcallms(0x218); see anim_rot.py (anim_rot.decode_frame).
+Per-bone rotation error vs the hero-frame dump: 72 deg here, 6.8 deg there.
+The key bit layout and the track walk below are still right.
+
 QUATERNION decode (TRACK Q key, FUN_005af618): each 6-byte key is
   byte0 = time ; byte1 = y_hi ; u16@2 = (z_mag<<3)|signbits ; u16@4 = (x_mag<<4)|y_lo
   x_mag = u16@4 >> 4           (12 bits)   sign = bit0 of u16@2
