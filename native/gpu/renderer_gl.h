@@ -129,6 +129,14 @@ typedef struct {
     const unsigned char *tex_rgba;  /* optional RGBA8 top-left; NULL = none  */
     int            tex_w, tex_h;
     int            tfx;             /* RGL_TFX_* texture combine             */
+    /* GS alpha-tested blended pass (TEST ATE=1 ATST=GEQUAL AFAIL=RGB_ONLY, ALPHA
+     * (Cs-Cd)*As+Cd). 0 = off (opaque draw; zero-init keeps old callers opaque).
+     * 1 = colour blends by As everywhere, depth is written only where
+     * As >= alpha_ref (0..1, As=1.0 at GS 128). Texels below the ref leave no depth
+     * and (near As=0) no colour, so what is behind them shows through: the sky drawn
+     * before them (game order), or anything drawn later. */
+    int            gs_atest;
+    float          alpha_ref;
 } rgl_scene_draw;
 
 /* Render `ndraws` meshes into one GL world and read back one framed image.

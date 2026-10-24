@@ -52,7 +52,8 @@
 #define MAXG 64
 
 typedef struct { RVertex *v; size_t n; float bbmin[3], bbmax[3];
-                 unsigned char *tex; int tw, th; char texname[64]; } Group;
+                 unsigned char *tex; int tw, th; char texname[64];
+                 float aref; } Group;   /* aref < 0: opaque; else GS ATE pass (list col 4) */
 
 /* Load a bounds-checked "DMSH" triangle soup (the untrusted on-disk format). */
 static int mesh_load(const char *path, RVertex **vout, size_t *nout,
@@ -254,8 +255,12 @@ int main(int argc, char **argv) {
     float rmin[3] = { 1e30f, 1e30f, 1e30f }, rmax[3] = { -1e30f, -1e30f, -1e30f };
     char line[2048];
     while (fgets(line, sizeof line, lf) && ng < MAXG) {
-        char meshf[1024] = {0}, texf[1024] = {0}; int abe = 0;
-        if (sscanf(line, "%1023s\t%1023s\t%d", meshf, texf, &abe) < 1) continue;
+        /* columns: mesh, texture container, ABE, [alpha-test ref]. Col 3 (ABE) is
+         * informational. Col 4, when present and >= 0, marks a GS alpha-tested
+         * blended pass (export_z128_room.py ALPHA_TEST); absent = opaque. */
+        char meshf[1024] = {0}, texf[1024] = {0}; int abe = 0; float aref = -1.0f;
+        if (sscanf(line, "%1023s\t%1023s\t%d\t%f", meshf, texf, &abe, &aref) < 1) continue;
+        if (!(aref >= 0.0f && aref <= 1.0f)) aref = -1.0f;
         if (meshf[0] == 0 || meshf[0] == '#') continue;
         char meshpath[2048];
         snprintf(meshpath, sizeof meshpath, "%s/%s", ldir, meshf);
@@ -265,7 +270,7 @@ int main(int argc, char **argv) {
             fprintf(stderr, "skip %s: %s\n", meshf, err); continue; }
         g[ng].v = v; g[ng].n = n;
         memcpy(g[ng].bbmin, bbmn, 12); memcpy(g[ng].bbmax, bbmx, 12);
-        g[ng].tex = NULL; g[ng].tw = g[ng].th = 0; g[ng].texname[0] = 0;
+        g[ng].tex = NULL; g[ng].tw = g[ng].th = 0; g[ng].texname[0] = 0; g[ng].aref = aref;
         if (!notex && strcmp(texf, "NONE") != 0) {
             if (tex_load_largest(texf, &g[ng].tex, &g[ng].tw, &g[ng].th,
                                  g[ng].texname, sizeof g[ng].texname))
@@ -350,6 +355,10 @@ int main(int argc, char **argv) {
         draws[i].verts = g[i].v; draws[i].vcount = g[i].n;
         draws[i].shade_mode = RGL_SHADE_PRELIT; draws[i].tfx = RGL_TFX_MODULATE;
         draws[i].tex_rgba = g[i].tex; draws[i].tex_w = g[i].tw; draws[i].tex_h = g[i].th;
+        if (g[i].aref >= 0.0f && g[i].tex) {
+            draws[i].gs_atest = 1; draws[i].alpha_ref = g[i].aref;
+            printf("atest : group %d ref %.4f (blend, depth only where As >= ref)\n", i, g[i].aref);
+        }
     }
     /* The character body atlas can only be MODULATE-combined onto the mesh if
      * the mesh carries real per-vertex UVs. char_e000.mesh (the render_skinned.py

@@ -108,7 +108,23 @@ Read this first instead of re-deriving. Review images: notes/review/ (README exp
 - Remaining sky/UR gap: the additive cloud layer TBP 14272 (vcol ~93,102,140, alpha ~53)
   and the post passes aren't reproduced. The renderer has no additive blend and a fixed
   clear colour (24,26,32).
-- 47.9% of triangles bound (verified). The rest (unbound group room_g42) are NOT UV-matched;
+- Alpha test (fixed 2026-10-24, review 31; not committed): ALPHA_TEST in export_z128_room.py
+  lists FileCodes whose dump ABE draws use ATE GEQUAL 96 + AFAIL RGB_ONLY + (Cs-Cd)*As+Cd
+  (TBP->FC by texture corr 1.000; reasons recorded per entry). Their ABE packets go to
+  separate groups listed AFTER the sky (game order) with the ref in room.list column 4;
+  render_scene_textured draws those blended, depth only where As >= (96-0.5)/128. Five groups:
+  0680ff31 (battlements: g21 opaque 650 tris + g43 alpha 630 tris), 0680ff30, 0680ff28, 0680ff32, 0680ff54 (0680ff07 is in the table
+  but has no ABE packets). Not global on purpose: 0680ff36 has 16% cut-out texels but the
+  game draws it opaque. Vertex alpha checked: 128 on the battlement ATE pass; 0680ff30 also
+  has Av 76-78, which caps As below the ref, so those faces blend semi-transparent, as in-game.
+  Result: 8309 px change at 640x480 exact (4300 with 2% tolerance), all in the battlement band + lower-right 0680ff30 strip. Gap px vs
+  game |d| 20.5 -> 14.3 (they now show our sky, which is darker than the game's); gap spacing
+  22 -> 11.5 px across the band vs game teeth 19 -> 13 px; 0680ff30 region 8.6 -> 6.1; 0680ff28
+  only 5 px in view; sky patch identical. Control: the same list without column 4 = old image,
+  0 px different. Gaps: 0680ff30/28 have a few ABE draws with ATE off that the BMD can't tell
+  apart (they get the test); As in (0.75,1) blends instead of being opaque. Backup:
+  out/z128_room_v2_PRE31_bak/. Groups renumbered: unbound is now room_g40.
+- 47.9% of triangles bound (verified). The rest (unbound group room_g40) are NOT UV-matched;
   "dump-unseen" is UNVERIFIED. Left grey on purpose.
 - UNVERIFIED: deck (box fill, recover_z128_deck.py) and "seed+grow" bindings are not
   UV-checked; likely source of wrong textures (e.g. lower-right planked facets).
@@ -125,4 +141,3 @@ Read this first instead of re-deriving. Review images: notes/review/ (README exp
 4. Sky dome fits the hero camera only. Its guard (export_z128_sky.py) checks the room bbox,
    not depth, so other cameras can put the sky in front of walls; on failure, edit SKY_SCALE.
    Room packet exclusions are by index: re-check them if the packet decoder changes.
-5. Battlement gaps missing in our render: suspected alpha-test cutout, unverified.

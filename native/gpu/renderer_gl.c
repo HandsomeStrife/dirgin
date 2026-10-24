@@ -170,6 +170,8 @@ static const char *SHADE_FS =
     "uniform vec3  uFogColor;\n"
     "uniform int   uFogEnable;\n"
     "uniform float uAlphaRef;\n"      /* <0 disables */
+    "uniform int   uAlphaMode;\n"     /* 0 discard a<ref; 1 keep a>=ref; 2 keep a<ref */
+    "uniform int   uOutAlpha;\n"      /* 1 = emit c.a for blending, else 1.0 */
     "out vec4 fragColor;\n"
     "void main(){\n"
     "    vec4 c = vColor;\n"
@@ -186,9 +188,10 @@ static const char *SHADE_FS =
     "            c.a   = (uTFX == 2) ? t.a : vColor.a;\n"
     "        }\n"
     "    }\n"
-    "    if (uAlphaRef >= 0.0 && c.a < uAlphaRef) discard;\n"
+    "    if (uAlphaRef >= 0.0 && uAlphaMode != 2 && c.a < uAlphaRef) discard;\n"
+    "    if (uAlphaMode == 2 && c.a >= uAlphaRef) discard;\n"
     "    if (uFogEnable == 1) c.rgb = mix(uFogColor, c.rgb, vFog);\n"
-    "    fragColor = vec4(c.rgb, 1.0);\n"
+    "    fragColor = vec4(c.rgb, uOutAlpha == 1 ? c.a : 1.0);\n"
     "}\n";
 
 /* 3-light rig for VU1 program D (RENDER-MATH §6).
@@ -773,6 +776,10 @@ int rgl_render_scene(const rgl_scene_draw *draws, int ndraws,
     GLint locLit = glGetUniformLocation(prog,"uLit");
     GLint locTE  = glGetUniformLocation(prog,"uTexEnable");
     GLint locTFX = glGetUniformLocation(prog,"uTFX");
+    GLint locARef = glGetUniformLocation(prog,"uAlphaRef");
+    GLint locAMode = glGetUniformLocation(prog,"uAlphaMode");
+    GLint locOutA = glGetUniformLocation(prog,"uOutAlpha");
+    glUniform1i(locAMode, 0); glUniform1i(locOutA, 0);
 
     int rc_fail = 0;
     for (int di = 0; di < ndraws; di++){
@@ -819,7 +826,27 @@ int rgl_render_scene(const rgl_scene_draw *draws, int ndraws,
         if (use_tex){ glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, tex); }
 
         glBindVertexArray(vao);
-        glDrawArrays(GL_TRIANGLES, 0, (GLsizei)d->vcount);
+        if (!d->gs_atest){
+            glDrawArrays(GL_TRIANGLES, 0, (GLsizei)d->vcount);
+        } else {
+            /* GS ATE pass, AFAIL=RGB_ONLY: every fragment blends by As; only those
+             * passing the test write depth. Pass 1 = passing texels (depth on),
+             * pass 2 = failing texels (depth write off). Dest alpha is kept. */
+            glEnable(GL_BLEND);
+            glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA, GL_ZERO, GL_ONE);
+            glUniform1i(locOutA, 1);
+            glUniform1f(locARef, d->alpha_ref);
+            glUniform1i(locAMode, 1);
+            glDrawArrays(GL_TRIANGLES, 0, (GLsizei)d->vcount);
+            glDepthMask(GL_FALSE);
+            glUniform1i(locAMode, 2);
+            glDrawArrays(GL_TRIANGLES, 0, (GLsizei)d->vcount);
+            glDepthMask(GL_TRUE);
+            glDisable(GL_BLEND);
+            glUniform1i(locOutA, 0);
+            glUniform1i(locAMode, 0);
+            glUniform1f(locARef, p->alpha_ref);
+        }
 
         if (tex) glDeleteTextures(1,&tex);
         glDeleteBuffers(1,&vbo); glDeleteVertexArrays(1,&vao);

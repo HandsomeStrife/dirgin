@@ -33,6 +33,8 @@ extern "C" {
     X(PFNGLCLEARPROC,                glClear) \
     X(PFNGLCLEARCOLORPROC,           glClearColor) \
     X(PFNGLDEPTHFUNCPROC,            glDepthFunc) \
+    X(PFNGLDEPTHMASKPROC,            glDepthMask) \
+    X(PFNGLBLENDFUNCSEPARATEPROC,    glBlendFuncSeparate) \
     X(PFNGLCULLFACEPROC,             glCullFace) \
     X(PFNGLFRONTFACEPROC,            glFrontFace) \
     X(PFNGLVIEWPORTPROC,             glViewport) \
