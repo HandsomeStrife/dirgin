@@ -93,6 +93,18 @@ Read this first instead of re-deriving. Review images: notes/review/ (README exp
   The old level-remap/ folder is gone. Game reference = the PCSX2 PNG next to the hero dump
   in save-states/sea-of-flames-gs-dumps/ (resize to 640x480).
 
+- Character lighting (2026-10-25, review 48): opt-in, in place of -charprelit:
+    $(python3 -I native/assets/models/bmd_env.py --rig extract/_KEL/noPath/06800012.bin 0 123 hero) -chartwosided 3
+  VU1 program D + FUN_005ab0b0 rig: env slot light A (dir = -light_dir1) + ambient
+  (light_col_b), x obj+0x450/128 (=123 for Vincent), plus a runtime point light
+  (HERO_POINT_LIGHT in bmd_env.py, FITTED to the dump's vertex colours, not decoded; source
+  FUN_0026a710 / FUN_0030e208). Body vertex colours match the dump to median 0.9 levels.
+  Grade (mean |d|, prelit -> lit): body 9.7 -> 0.9, mantle 2.6 -> 1.7, cape 4.4 -> 1.6,
+  arms 6.1 -> 26.6 (too dark: the 0x2ee8 glow pass isn't drawn). Cape normals are rest-pose
+  (flat facets on the lower cape): exporter fix needed. -chartwosided 3 lights the side facing
+  the eye (cape winding is opposite to the body's). The worker measured the screenshot
+  registration on a Vincent crop as game sampled at (1.02x-1, 1.00y); unconfirmed vs the
+  +9,-3 room alignment.
 - Clips (phase 1b, 2026-10-24, review 44): rotation decode SOLVED in anim_rot.py (replaces
   anim_eval's quaternion formula; track walk unchanged). VU0 micro at vcallms 0x218: each
   TRACK Q key is an axis in spherical angles (x, y: 12 bits over [0, pi/2], octant from the

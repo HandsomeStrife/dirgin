@@ -223,6 +223,13 @@ int main(int argc, char **argv) {
     float cam_eye[3], cam_at[3], cam_up[3] = {0,1,0}, cam_fov = 50.f;  /* -eye/-at free camera */
     int have_eye = 0, have_at = 0;
     int opt_W = 1280, opt_H = 960;   /* -W/-H override output size (anamorphic match) */
+    /* -light0/-light1/-light2 dx,dy,dz,r,g,b and -ambient r,g,b: the character's VU1
+     * program-D rig (world-space direction TOWARD the light; colours in program-D units,
+     * i.e. env colour/128 x obj scale/128). Any of them replaces the placeholder rig,
+     * unset lights stay 0. Generate them with `bmd_env.py --rig BMD slot scale [hero]`. */
+    rgl_lightrig crig; memset(&crig, 0, sizeof crig); crig.saturate = 1.0f;
+    int have_crig = 0, bad_rig = 0;
+    int char_two_sided = 0;   /* -chartwosided 1|2: see rgl_scene_draw.two_sided */
 
     for (int i = 1; i < argc; i++) {
         if      (!strcmp(argv[i], "-l")  && i+1<argc) listpath = argv[++i];
@@ -240,6 +247,19 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "-charprelit")) charprelit = 1;
         else if (!strcmp(argv[i], "-charatest") && i+1<argc) char_aref = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "-flipy")) flipy = 1;
+        else if (!strncmp(argv[i], "-light", 6) && argv[i][6] >= '0' && argv[i][6] <= '2' &&
+                 !argv[i][7] && i+1<argc) {
+            float *d = crig.dir[argv[i][6]-'0'], *c = crig.col[argv[i][6]-'0'];
+            if (sscanf(argv[++i], "%f,%f,%f,%f,%f,%f", &d[0],&d[1],&d[2],&c[0],&c[1],&c[2]) != 6)
+                bad_rig = 1;
+            have_crig = 1;
+        }
+        else if (!strcmp(argv[i], "-chartwosided") && i+1<argc) char_two_sided = atoi(argv[++i]);
+        else if (!strcmp(argv[i], "-ambient") && i+1<argc) {
+            if (sscanf(argv[++i], "%f,%f,%f", &crig.ambient[0],&crig.ambient[1],&crig.ambient[2]) != 3)
+                bad_rig = 1;
+            have_crig = 1;
+        }
         else if (!strcmp(argv[i], "-notex")) notex = 1;
         else if (!strcmp(argv[i],"-eye")&&i+1<argc) have_eye=(sscanf(argv[++i],"%f,%f,%f",&cam_eye[0],&cam_eye[1],&cam_eye[2])==3);
         else if (!strcmp(argv[i],"-at") &&i+1<argc) have_at =(sscanf(argv[++i],"%f,%f,%f",&cam_at[0],&cam_at[1],&cam_at[2])==3);
@@ -247,6 +267,19 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i],"-fov")&&i+1<argc) cam_fov=(float)atof(argv[++i]);
         else if (!strcmp(argv[i],"-W")&&i+1<argc) opt_W=atoi(argv[++i]);
         else if (!strcmp(argv[i],"-H")&&i+1<argc) opt_H=atoi(argv[++i]);
+    }
+
+    if (bad_rig) { fprintf(stderr, "bad -lightN (want dx,dy,dz,r,g,b) or -ambient (r,g,b)\n"); return 2; }
+    if (char_two_sided < 0 || char_two_sided > 3 || (char_two_sided && charprelit)) {
+        fprintf(stderr, "-chartwosided takes 1, 2 or 3 and needs the LIT character (not -charprelit)\n"); return 2; }
+    if (have_crig && charprelit) {
+        fprintf(stderr, "-charprelit and -light*/-ambient conflict: prelit ignores the rig\n"); return 2; }
+    if (have_crig) {
+        for (int k = 0; k < 3; k++)
+            printf("crig  : light%d dir %.4f,%.4f,%.4f col %.4f,%.4f,%.4f\n", k,
+                   crig.dir[k][0], crig.dir[k][1], crig.dir[k][2],
+                   crig.col[k][0], crig.col[k][1], crig.col[k][2]);
+        printf("crig  : ambient %.4f,%.4f,%.4f\n", crig.ambient[0], crig.ambient[1], crig.ambient[2]);
     }
 
     /* ---- load the textured environment groups ---- */
@@ -421,7 +454,7 @@ int main(int argc, char **argv) {
 
     rgl_params p; memset(&p, 0, sizeof p);
     p.width = W; p.height = H; p.bilinear = 1; p.backface_cull = 0;
-    p.rig = rgl_default_lightrig(); p.alpha_ref = -1.0f;
+    p.rig = have_crig ? &crig : rgl_default_lightrig(); p.alpha_ref = -1.0f;
     if (have_fog) {
         p.fog_enable = 1;
         p.fog_a = -1.0f / (fog_far - fog_near);       /* F = a*w + b */
@@ -474,6 +507,7 @@ int main(int argc, char **argv) {
      * the game's GIF modulate) instead of a synthetic light rig, which over-brightens
      * near-vertical surfaces (e.g. hair) into a washed/blonde look. */
     draws[ng].shade_mode = charprelit ? RGL_SHADE_PRELIT : RGL_SHADE_LIT;
+    draws[ng].two_sided = char_two_sided;
     draws[ng].tfx = RGL_TFX_MODULATE;
     if (char_uv_degenerate) {
         draws[ng].tex_rgba = NULL; draws[ng].tex_w = 0; draws[ng].tex_h = 0;

@@ -140,6 +140,12 @@ typedef struct {
     /* 1 = this draw ignores p->fog_* (e.g. a sky dome the game fogs with its own
      * colour). 0 (zero-init) = fogged whenever p->fog_enable is set. */
     int            no_fog;
+    /* LIT only: also light the -n side and pick per fragment by facing (a cloth drawn
+     * double-sided, e.g. the cape: the game draws a front and a back copy). 0 (zero-init)
+     * = off; 1 = the +n side is GL front-facing; 2 = the +n side is GL back-facing;
+     * 3 = per fragment, the side whose normal faces the eye (explicit camera only; works
+     * when one draw mixes winding conventions, e.g. Vincent's body vs cape). */
+    int            two_sided;
 } rgl_scene_draw;
 
 /* Render `ndraws` meshes into one GL world and read back one framed image.

@@ -139,13 +139,23 @@ static const char *SHADE_VS =
     "uniform float uSaturate;\n"                 /* MINIi I */
     "uniform int   uFogEnable;\n"
     "uniform float uFogA, uFogB, uFogMin;\n"
+    "uniform int   uTwoSided;\n"                /* 0 off; else also light the -n side */
+    "uniform vec3  uEye;\n"                     /* world eye (two-sided mode 3) */
+    "out float vFace;\n"                        /* n . (eye - p): > 0 = +n side faces the eye */
     "out vec2  vUV;\n"
-    "out vec4  vColor;\n"
+    "out vec4  vColorIn;\n"
+    "out vec4  vColorB;\n"
     "noperspective out float vFog;\n"
     "void main(){\n"
     "    vec4 clip = uMVP * vec4(aPos, 1.0);\n"
     "    vUV = aUV;\n"                           /* perspective-correct by the rasteriser */
-    "    vec3 col = aColor.rgb;\n"
+    "    vec3 col = aColor.rgb, colB = aColor.rgb;\n"
+    "    if (uLit == 1 && uTwoSided != 0){\n"     /* back side: same rig, normal -n */
+    "        vec3 n = -normalize(aNormal);\n"
+    "        vec3 lit = uLcol0*max(dot(uLdir0, n), 0.0) + uLcol1*max(dot(uLdir1, n), 0.0)\n"
+    "                 + uLcol2*max(dot(uLdir2, n), 0.0) + uAmbient;\n"
+    "        colB = min(lit * colB, vec3(uSaturate));\n"
+    "    }\n"
     "    if (uLit == 1){\n"
     "        vec3 n = normalize(aNormal);\n"
     "        float d0 = max(dot(uLdir0, n), 0.0);\n"   /* [VU1-D idx 88-94] */
@@ -154,7 +164,9 @@ static const char *SHADE_VS =
     "        vec3 lit = uLcol0*d0 + uLcol1*d1 + uLcol2*d2 + uAmbient;\n" /* [idx 98-102] */
     "        col = min(lit * col, vec3(uSaturate));\n"  /* saturate [idx 111-115] */
     "    }\n"
-    "    vColor = vec4(col, aColor.a);\n"        /* alpha rides through lighting */
+    "    vColorIn = vec4(col, aColor.a);\n"
+    "    vColorB = vec4(colB, aColor.a);\n"
+    "    vFace = dot(aNormal, uEye - aPos);\n"        /* alpha rides through lighting */
     "    vFog = (uFogEnable == 1) ? clamp(uFogA*clip.w + uFogB, uFogMin, 1.0) : 1.0;\n"
     "    gl_Position = clip;\n"
     "}\n";
@@ -162,8 +174,11 @@ static const char *SHADE_VS =
 static const char *SHADE_FS =
     "#version 330 core\n"
     "in vec2  vUV;\n"
-    "in vec4  vColor;\n"
+    "in vec4  vColorIn;\n"
+    "in vec4  vColorB;\n"
+    "in float vFace;\n"
     "noperspective in float vFog;\n"
+    "uniform int   uTwoSided;\n"     /* 1: +n side = GL front; 2: = GL back; 3: side facing the eye */
     "uniform sampler2D uTex;\n"
     "uniform int   uTexEnable;\n"
     "uniform int   uTFX;\n"           /* 0 MODULATE 1 DECAL 2 HIGHLIGHT 3 HIGHLIGHT2 */
@@ -174,6 +189,8 @@ static const char *SHADE_FS =
     "uniform int   uOutAlpha;\n"      /* 1 = emit c.a for blending, else 1.0 */
     "out vec4 fragColor;\n"
     "void main(){\n"
+    "    bool plus = (uTwoSided == 3) ? (vFace >= 0.0) : (gl_FrontFacing == (uTwoSided == 1));\n"
+    "    vec4 vColor = (uTwoSided == 0 || plus) ? vColorIn : vColorB;\n"
     "    vec4 c = vColor;\n"
     "    if (uTexEnable == 1){\n"
     "        vec4 t = texture(uTex, vUV);\n"
@@ -781,6 +798,8 @@ int rgl_render_scene(const rgl_scene_draw *draws, int ndraws,
     GLint locOutA = glGetUniformLocation(prog,"uOutAlpha");
     GLint locFog  = glGetUniformLocation(prog,"uFogEnable");
     glUniform1i(locAMode, 0); glUniform1i(locOutA, 0);
+    GLint locTwo  = glGetUniformLocation(prog,"uTwoSided");
+    if (p->use_explicit_cam) glUniform3fv(glGetUniformLocation(prog,"uEye"), 1, p->eye);
 
     int rc_fail = 0;
     for (int di = 0; di < ndraws; di++){
@@ -823,6 +842,12 @@ int rgl_render_scene(const rgl_scene_draw *draws, int ndraws,
 
         glUniform1i(locLit, d->shade_mode == RGL_SHADE_LIT ? 1 : 0);
         glUniform1i(locFog, (p->fog_enable && !d->no_fog) ? 1 : 0);
+        int two = d->shade_mode == RGL_SHADE_LIT ? d->two_sided : 0;
+        if (two == 3 && !p->use_explicit_cam){
+            fprintf(stderr, "two_sided 3 needs the explicit camera (eye); draw %d lit one-sided\n", di);
+            two = 0;
+        }
+        glUniform1i(locTwo, two);
         glUniform1i(locTE,  use_tex ? 1 : 0);
         glUniform1i(locTFX, d->tfx);
         if (use_tex){ glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, tex); }

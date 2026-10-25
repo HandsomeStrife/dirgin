@@ -69,6 +69,56 @@ def fog_directive(env):
     return '@fog %d %d %d %g %g %g' % (r, g, b, near, far, floor / 255.0), notes
 
 
+# --- character lighting (VU1 program D) ------------------------------------------------
+# FUN_005ab0b0 builds an actor's light rig every frame from env slot obj[+0x44e]:
+#   light 0  dir = -light_dir1 (VU +0xc0, toward the light), colour = light_col_a/128
+#   light 1  a point light near the actor (FUN_0026a710 / obj+0x160 / FUN_0030e208):
+#            dir = normalize(lightpos - actorpos), colour = col * k*100/dist^2.
+#            Runtime only; NOT in the env block.
+#   light 2  smoothed toward colour 0 (FUN_005ab608): 0 at steady state
+#   ambient  light_col_b/128 (VU +0xe0)
+# Lights 0, 1 and the ambient are then scaled by obj[+0x450]/128. FUN_005ab738 only blends
+# when the slot changes. light_dir2/i90 go to FUN_005acc00 (obj+0x453), not to colour.
+# Program D per vertex: rgb = min(vcol * (sum C_i*max(L_i.n, 0) + A), 255), then GS
+# MODULATE texel*rgb/128.
+# Vincent, z128 hero frame 163235: the dump's 10930 body vertex colours are reproduced to a
+# median 0.9 levels with slot 0, scale 123/128 and the point light HERO_POINT_LIGHT (fitted
+# from those colours: direction + colour are runtime state, not decoded from game data).
+HERO_SCALE_BYTE = 123
+HERO_POINT_LIGHT = ((-0.1514, -0.3678, -0.9175), (83.7, 43.6, 28.1))   # dir, colour x128
+
+
+def char_rig(env, scale_byte=128, point=None):
+    """Return {'lights': [(dir3, rgb3) x up to 2], 'ambient': rgb3} in program-D units
+    (colours already x scale_byte/128). point = (dir3, rgb3 x128) or None."""
+    s = scale_byte / 128.0
+    d = tuple(-x for x in env['light_dir1'])
+    lights = [(d, tuple(c / 128.0 * s for c in env['light_col_a']))]
+    if point is not None:
+        lights.append((tuple(point[0]), tuple(c / 128.0 * s for c in point[1])))
+    return {'lights': lights, 'ambient': tuple(c / 128.0 * s for c in env['light_col_b'])}
+
+
+def rig_args(rig):
+    """render_scene_textured flags for a char_rig(): -light0/-light1 dx,dy,dz,r,g,b -ambient r,g,b."""
+    a = []
+    for k, (d, c) in enumerate(rig['lights']):
+        a += ['-light%d' % k, ','.join('%.6g' % x for x in tuple(d) + tuple(c))]
+    return a + ['-ambient', ','.join('%.6g' % x for x in rig['ambient'])]
+
+
+if __name__ == '__main__' and len(__import__('sys').argv) > 1 and __import__('sys').argv[1] == '--rig':
+    # bmd_env.py --rig BMD [slot] [scale_byte] [hero]   -> print renderer light flags
+    import sys
+    a = sys.argv[2:]
+    e = read_env(open(a[0], 'rb').read(), int(a[1]) if len(a) > 1 else 0)
+    if e is None:
+        sys.exit('no BMD env table in %s' % a[0])
+    hero = len(a) > 3 and a[3] == 'hero'
+    print(' '.join(rig_args(char_rig(e, int(a[2]) if len(a) > 2 else 128,
+                                     HERO_POINT_LIGHT if hero else None))))
+    sys.exit(0)
+
 if __name__ == '__main__':
     import sys
     for p in sys.argv[1:]:
