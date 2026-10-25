@@ -84,9 +84,10 @@ def _fit_line(Rp, A, B):
     return Rm, cb - Rm @ ca
 
 
-def pose(placed, cands, vbone, parent, iters=4):
+def pose(placed, cands, vbone, parent, iters=4, src=None):
     """placed: {v: bind world pos (placed)}; cands: {v: [dump world pos]}.
-    Returns (posed {v: pos}, rot {v: R}, stats)."""
+    Returns (posed {v: pos}, rot {v: R}, stats). If `src` is a dict, it is filled
+    with {v: 'dump' | 'bone' | ...}: which posed positions are the dump's own."""
     bones = sorted(set(vbone.values()))
     T = {b: (np.eye(3), np.zeros(3)) for b in bones}
     pred = lambda v: T[vbone[v]][0] @ placed[v] + T[vbone[v]][1]
@@ -136,9 +137,12 @@ def pose(placed, cands, vbone, parent, iters=4):
         p = pred(v); rot[v] = T[vbone[v]][0]
         c = pick.get(v)
         if c is not None and np.linalg.norm(c - p) < TOL:
-            posed[v] = c; how['dump'] += 1
+            posed[v] = c; h = 'dump'
         else:
-            posed[v] = p; how['bone' if not cands.get(v) else 'bone(dump rejected)'] += 1
+            posed[v] = p; h = 'bone' if not cands.get(v) else 'bone(dump rejected)'
+        how[h] += 1
+        if src is not None:
+            src[v] = h
     # stats describe the final pass
     return posed, rot, dict(how=dict(how), bones=len(bones), bones_solved=len(solved),
                             bones_copied_parent=sorted(copied),

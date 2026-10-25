@@ -17,7 +17,15 @@ hero-frame GS dump.
 - Placement: scale/yaw/feet solved from matched body vertices (dump unprojected
   through the hero camera); written to placement.json for render_scene_textured.
 
-Run: python3 -I export_p000_gpu2.py <dump.bin> <outdir>
+- Clip pose (optional): --clip NAME --frame F poses the body from a real animation
+  clip frame (anim_rot.py: rotation, translation and scale tracks, composed like the
+  game's VU0 micro) instead of the dump. Placement is re-solved for that pose; the
+  cape stays dump-posed (it has no skinning). The dump pose is still computed as the
+  reference and placement.json "clip" gets the vertex error vs it. --in-place drops
+  the root motion (bone 1 x/z); --clip-cont picks the clip container; --no-cape leaves
+  the (frozen, dump-posed) cape out, e.g. to see the legs of a walk frame.
+
+Run: python3 -I export_p000_gpu2.py <dump.bin> <outdir> [--clip h_swtch --frame 58]
 """
 import sys, os, struct, array, collections, json
 import numpy as np
@@ -29,6 +37,9 @@ from gsrender2 import TexCache, tex0_fields
 from char_dumpbind import tri_sig
 from render_p000_bound import CONT, TEXC, dump_sig2tex0
 import p000_cape as C
+import anim_rot as AR
+
+CLIP_CONT = "/srv/games/dirge-port/extract/_KEL/noPath/0770000b.bin"   # h_* (handgun) clips
 
 UVRES = 128                     # UV-coverage map resolution (texels of a 256 atlas / 2)
 UVMAP_MIN_SHARE = 0.6           # a CLUT must own >=60% of the sampled coverage
@@ -107,8 +118,41 @@ def world_to_model(Wp, pl, piv):
     return np.c_[px, r[:, 1], pz] / pl['s'] + piv
 
 
+def umeyama(A, B):
+    """s, R, t minimising |s R a + t - b| (similarity)."""
+    ca, cb = A.mean(0), B.mean(0); a = A - ca; b = B - cb
+    U, D, Vt = np.linalg.svd(b.T @ a / len(A))
+    S = np.diag([1, 1, np.sign(np.linalg.det(U @ Vt))])
+    Rm = U @ S @ Vt; sc = np.trace(np.diag(D) @ S) / ((a ** 2).sum() / len(A))
+    return sc, Rm, cb - sc * Rm @ ca
+
+
+def err_stats(X, D):
+    e = np.linalg.norm(X - D, axis=1)
+    return dict(median=round(float(np.median(e)), 3), rms=round(float(np.sqrt((e ** 2).mean())), 3),
+                p90=round(float(np.percentile(e, 90)), 3), max=round(float(e.max()), 3), n=int(len(e)))
+
+
+def parse_args(argv):
+    a = dict(dump=None, out=None, clip=None, frame=0.0, cont=CLIP_CONT, in_place=False, no_cape=False)
+    pos = []; i = 0
+    while i < len(argv):
+        k = argv[i]
+        if k == '--clip': a['clip'] = argv[i + 1]; i += 2
+        elif k == '--frame': a['frame'] = float(argv[i + 1]); i += 2
+        elif k == '--clip-cont': a['cont'] = argv[i + 1]; i += 2
+        elif k == '--in-place': a['in_place'] = True; i += 1
+        elif k == '--no-cape': a['no_cape'] = True; i += 1
+        elif k.startswith('--'): sys.exit(f"unknown option {k}")
+        else: pos.append(k); i += 1
+    if len(pos) != 2: sys.exit(__doc__)
+    a['dump'], a['out'] = pos
+    return a
+
+
 def main():
-    dumppath, outdir = sys.argv[1], sys.argv[2]; os.makedirs(outdir, exist_ok=True)
+    args = parse_args(sys.argv[1:])
+    dumppath, outdir = args['dump'], args['out']; os.makedirs(outdir, exist_ok=True)
     P.CONT = CONT; P.TEXC = TEXC
     buf, NB = P.R.load_container(CONT); sk = P.load_skeleton(CONT, trans_scale=1.0)
     bc = sk['bone_count']; Wm = [np.array(m, float) for m in sk['world_bind']]
@@ -164,15 +208,17 @@ def main():
     dsig = {}
     for t0, vs in dtris:
         dsig.setdefault(tri_sig([v[1] for v in vs]), {q(v[1]): v[0] for v in vs})
-    Ms, Ws = [], []
-    for i, t in enumerate(tris):
-        if how[i] != 'exact': continue
-        d = dsig.get(tri_sig(uvn(t)))
-        if not d: continue
-        for k, uv in enumerate(uvn(t)):
-            w = d.get(q(uv))
-            if w is not None: Ms.append(Pn[t[k]]); Ws.append(w)
-    pl = solve_placement(np.array(Ms), np.array(Ws), piv)
+    def exact_pairs(Pm):
+        Ms, Ws = [], []
+        for i, t in enumerate(tris):
+            if how[i] != 'exact': continue
+            d = dsig.get(tri_sig(uvn(t)))
+            if not d: continue
+            for k, uv in enumerate(uvn(t)):
+                w = d.get(q(uv))
+                if w is not None: Ms.append(Pm[t[k]]); Ws.append(w)
+        return np.array(Ms), np.array(Ws)
+    pl = solve_placement(*exact_pairs(Pn), piv)
     print("placement:", {k: round(v, 3) if isinstance(v, float) else v for k, v in pl.items()})
 
     # ---- cape (block 0x19f70) posed from the dump
@@ -191,12 +237,13 @@ def main():
         region[x] = (yoff, h, w); rows.append(pad); yoff += h
     combined = np.vstack(rows); Hc = combined.shape[0]
 
+    Pn_bind = Pn.copy()
     Nn = (N.astype(np.float64) if N is not None and len(N) == len(V) else np.zeros_like(Pn))
     ln = np.linalg.norm(Nn, axis=1, keepdims=True); ln[ln < 1e-9] = 1.0; Nn = Nn / ln
 
     # ---- pose the body to this frame from the dump (p000_pose.py); POSE=0 = bind pose
-    pose_stats = None
-    if os.environ.get('POSE', '1') != '0':
+    pose_stats = None; clip_stats = None; src = {}; posed = None
+    if os.environ.get('POSE', '1') != '0' or args['clip']:
         import p000_pose as PZ
         yr = np.radians(pl['yaw']); cy, sy = np.cos(yr), np.sin(yr)
         Ry = np.array([[cy, 0, sy], [0, 1, 0], [-sy, 0, cy]])      # place_character's yaw
@@ -220,14 +267,55 @@ def main():
                 for k in range(3):
                     cands[t[k]].extend(byuv.get((tri_tex0[i], q(uvs[k])), []))
         vb = PZ.vertex_bones(buf, NB, bc, gmeta)
-        posed, rot, pose_stats = PZ.pose(placed, dict(cands), vb, sk['parent'])
+        posed, rot, pose_stats = PZ.pose(placed, dict(cands), vb, sk['parent'], src=src)
         pose_stats['vertices'] = len(used_idx)
         pose_stats['with_dump_candidates'] = sum(1 for v in used_idx if cands.get(v))
         print("pose:", pose_stats)
-        Rinv = Ry.T
-        for v in used_idx:
-            Pn[v] = world_to_model(posed[v][None], pl, piv)[0]
-            Nn[v] = Rinv @ (rot[v] @ (Ry @ Nn[v]))
+        if not args['clip']:
+            Rinv = Ry.T
+            for v in used_idx:
+                Pn[v] = world_to_model(posed[v][None], pl, piv)[0]
+                Nn[v] = Rinv @ (rot[v] @ (Ry @ Nn[v]))
+    if args['clip']:
+        # ---- pose from a clip frame instead; the dump pose above is the reference.
+        cbuf, CP = AR.find_clip(args['cont'], args['clip'])
+        trs = AR.decode_frame_trs(cbuf, CP, bc, args['frame'])
+        dv = [v for v in used_idx if src.get(v) == 'dump']        # dump's own positions
+        Dw = np.array([posed[v] for v in dv])
+        # bones where P1 / P2 can be judged: translation off bind by > 0.05 units, or a
+        # scale component off 1 by > 5%
+        moved = [b for b in range(bc) if b > 2 and (
+                 (trs[b][0] is not None and np.linalg.norm(np.subtract(trs[b][0], sk['local_T'][b])) > 0.05)
+                 or (trs[b][1] is not None and max(abs(c - 1) for c in trs[b][1]) > 0.05))]
+        def clip_pose(**kw):
+            Wc = AR.compose(sk, trs, root_motion=not args['in_place'], **kw)
+            Vc, Nc, tris_c, _g = P.decode_groups(buf, NB, Wc, bc)
+            assert len(Vc) == len(V) and [t[:3] for t in tris_c if t[6] in keep] == [t[:3] for t in tris]
+            Pc = Vc.astype(np.float64); pv = Pc[used_idx]
+            pc = np.array([(pv[:, 0].min() + pv[:, 0].max()) / 2, pv[:, 1].max(), (pv[:, 2].min() + pv[:, 2].max()) / 2])
+            plc = solve_placement(*exact_pairs(Pc), pc)
+            yr = np.radians(plc['yaw']); cy, sy = np.cos(yr), np.sin(yr)
+            Ryc = np.array([[cy, 0, sy], [0, 1, 0], [-sy, 0, cy]])
+            X = plc['s'] * (Pc[dv] - pc) @ Ryc.T + np.array([plc['x'], plc['y'], plc['z']])
+            sc, Rm, t = umeyama(Pc[dv], Dw)
+            e = np.linalg.norm(X - Dw, axis=1)
+            per = {b: round(float(np.median(e[m])), 3) for b in moved
+                   for m in [np.array([vb.get(v) == b for v in dv])] if m.sum() >= 4}
+            return Pc, Nc, pv, pc, plc, dict(placed=err_stats(X, Dw), aligned=err_stats(sc * Pc[dv] @ Rm.T + t, Dw),
+                                             moved_bones_median=per)
+        Pn, Nc, pv, piv, pl, err = clip_pose()
+        Nn = Nc.astype(np.float64); ln = np.linalg.norm(Nn, axis=1, keepdims=True); ln[ln < 1e-9] = 1.0; Nn = Nn / ln
+        bbmin, bbmax = pv.min(0), pv.max(0)
+        rot_only = clip_pose(use_t=False, use_s=False)[5]
+        no_scale = clip_pose(use_s=False)[5]
+        sb, Rb, tb = umeyama(Pn_bind[dv], Dw)
+        clip_stats = dict(clip=args['clip'], frame=args['frame'], container=os.path.basename(args['cont']),
+                          frames=AR.clip_frames(cbuf, CP), in_place=args['in_place'],
+                          ref_vertices=len(dv), error_vs_dump=err,
+                          error_rotation_only=rot_only, error_no_scale=no_scale,
+                          error_bind_aligned=err_stats(sb * Pn_bind[dv] @ Rb.T + tb, Dw))
+        print("clip pose:", clip_stats)
+        print("placement (clip):", {k: round(v, 3) if isinstance(v, float) else v for k, v in pl.items()})
     flat = []; dropped = 0
     def emit(p, n, uv, col, x):
         yo, rh, rw = region[x]
@@ -240,7 +328,7 @@ def main():
         cols = (t[7], t[8], t[9]) if len(t) >= 10 else ((122, 122, 122, 128),) * 3
         for k in range(3): emit(Pn[t[k]], Nn[t[k]], uvn(t)[k], cols[k], x)
     nb = len(flat) // 12
-    for ws, uvs, cols in cape:
+    for ws, uvs, cols in ([] if args['no_cape'] else cape):
         m = world_to_model(np.array(ws), pl, piv)
         n = np.cross(m[1] - m[0], m[2] - m[0]); n = n / (np.linalg.norm(n) or 1.0)
         for k in range(3): emit(m[k], n, uvs[k], cols[k], cape_tex0)
@@ -267,7 +355,7 @@ def main():
     json.dump([dict(g=int(t[6]), name=gmeta[t[6]][0], tex0=(None if tri_tex0[i] is None else int(tri_tex0[i])),
                     how=how[i], uv=uvn(t), v=[int(k) for k in t[:3]]) for i, t in enumerate(tris)],
               open(os.path.join(outdir, "binding.json"), 'w'))
-    json.dump(dict(placement=pl, binding=dict(hc), cape=cst, pose=pose_stats,
+    json.dump(dict(placement=pl, binding=dict(hc), cape=cst, pose=pose_stats, clip=clip_stats,
                    char_alpha_ref=CAPE_AREF_GL,
                    render_args=f"-s {pl['s']:.4f} -yaw {pl['yaw']:.2f} -x {pl['x']:.2f} -y {pl['y']:.2f} -z {pl['z']:.2f}",
                    # Vincent is placed in this camera's world: render with exactly it.

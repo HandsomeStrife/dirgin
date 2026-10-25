@@ -112,9 +112,16 @@ Read this first instead of re-deriving. Review images: notes/review/ (README exp
   coeffs at 0x5b3ae0/af0. q = sin z*(cx*cy, cy*sx, sy)*signs, w = cos z. Between keys:
   hemisphere flip, nlerp. Replaces the local bone rotation. Error vs 55 dump-solved bones:
   6.8 deg median (bind 16.2, old 72). Best fit h_swtch f58 (0770000b), not confirmed as the
-  clip playing at 163235; h_wk 15-17 deg every frame; hands worst (36-39 deg). Not wired into
-  the export; dump pose still in use. Undecoded: translation tracks (P1), vf28 pose blend.
-  sample() extrapolates past the last key (f > 1); check the game clamps before relying on it.
+  clip playing at 163235; h_wk 15-17 deg every frame; hands worst (36-39 deg).
+- Clips (phase 1c, 2026-10-25, review 46/47): translation + scale decoded in anim_rot.py
+  (FUN_005aefd0 + micro 137..216). P1 = local translation /256 (empty -> bind T; bone 1 root
+  motion, bone 2 hips), P2 = per-axis local SCALE /256 (empty -> 1); S_w = S_parent*s,
+  p_w = p_parent + R_parent(S_parent*t), skin basis axis k scaled by S_w[k]. The game does NOT
+  clamp the interp factor (sample() extrapolating is correct).
+  `export_p000_gpu2.py dump.bin OUT --clip h_swtch --frame 58 [--in-place] [--no-cape]` poses
+  the body from a clip (cape stays dump-posed; default = dump pose, unchanged). h_swtch f58 vs
+  dump-posed verts: median 0.109 / rms 0.251 units (bind 0.861); f59 0.089. Undecoded: vf26-28
+  previous-pose blend; clip playing at 163235 unconfirmed (h_st untested); cape doesn't animate.
 
 ## Room
 - out/ is gitignored. Rebuild (in native/assets/models, run -I):
