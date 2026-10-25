@@ -21,7 +21,8 @@ Read this first instead of re-deriving. Review images: notes/review/ (README exp
   gaps are parked on purpose; don't fix them unless we need colour from un-screenshotted angles.
 
 ## Vincent (fixed 2026-10-24; see notes/audit-2026-10-24.md for the audit)
-- Export: `python3 -I native/assets/models/export_p000_gpu2.py dump.bin native/assets/models/out/p000_gpu3`
+- Export: `python3 -I native/assets/models/export_p000_gpu2.py tools/gsdump/dumps/z128_hero_163235.bin native/assets/models/out/p000_gpu3`
+  (hero GS dump, frame 163235; gitignored game data, keep it)
   (writes mesh, atlas and `placement.json` with the render args). Old output kept in out/p000_gpu2.
 - Cape = mesh block **0x19f70** of 07700001.bin (smd 'p000_L02', 112 tris), NOT a procedural
   object. It has 0 skinning batches (positions posed at runtime), which is why the skinned
