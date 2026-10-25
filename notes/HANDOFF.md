@@ -67,13 +67,13 @@ Read this first instead of re-deriving. Review images: notes/review/ (README exp
     -l native/assets/models/out/z128_room_v2/room.list \
     -m native/assets/models/out/p000_gpu3/vincent_p000.mesh \
     -t native/assets/models/out/p000_gpu3/vincent_p000_tex.rgba \
-    -s 0.9641 -yaw 163.63 -x -1395.59 -y -98.76 -z -1110.57 -colscale 1.0 -charprelit \
+    -s 0.9639 -yaw 164.45 -x -1395.63 -y -98.75 -z -1110.51 -colscale 1.0 -charprelit \
     -charatest 0.77734 \
     -W 2628 -H 2048 $(camera_args from out/p000_gpu3/placement.json) -o OUT -tag T
   (OUT must exist). Hero camera fitted 2026-10-24 to 5164 dump room vertices (near error
   4.5 px -> 0.05 px): -fov 59.2749 -eye -1419.227,-115.571,-1129.797
   -at -631.348,-77.227,-515.163 -up 0.03023,-0.99926,0.02358. Placement for that camera:
-  -s 0.9641 -yaw 163.63 -x -1395.59 -y -98.76 -z -1110.57 (always take both from
+  -s 0.9639 -yaw 164.45 -x -1395.63 -y -98.75 -z -1110.51 (always take both from
   placement.json). The old rounded camera put near geometry ~4.5 px off. export_z128_sky.py
   still has its own copy of the old camera (0.07 px at sky depth; should import HERO_CAM).
   convert OUT/T_freecam.png -crop 2592x2048+36+0 +repage -resize 640x480! final.png
@@ -110,6 +110,16 @@ Read this first instead of re-deriving. Review images: notes/review/ (README exp
   texel x mask per triangle; 64/149 tris reuse our body tris, 85 sit at dump positions (body
   UVs missing from our decode). Arms |d| 30.1 -> 16.3, SSIM 0.615 -> 0.811; boots 20.1 -> 21.6
   (glow overlap with the game only 28%: boot geometry). Dump-frame UVs/colours: dump pose only.
+- UV matching (2026-10-25, review 50): dump<->mesh UVs match on the native 1/4096 grid
+  (export_p000_gpu2.py sets char_dumpbind.ROUND = 4096 for itself; older scripts keep 512).
+  The 1/512 grid failed 40% of dump body tris on exact rounding halves. Binding: exact 1684,
+  uvmap 387, neighbour 240, group 15, unbound 2 (of 2328). Pose: dump 1559 / bone 232 /
+  rejected 213; 59/71 bones solved. Placement changed (take it from placement.json).
+  Glow: mirrored parts share UV triples (boots x2, some arm tris x4), so p000_glow picks the
+  body tri nearest the dump position (median 0.003 units). 99/149 on our body tris, 50 at dump
+  positions (48 mix UVs across index positions/sub-packets in ways no reading of our
+  sub-packets produces; open). Lit+glow: boots 18.2/0.772 (was 22.1/0.710), glow overlap
+  73% (was 19%); arms 12.0/0.876.
 - Cape normals are smooth (default; sign-aligned per triangle so the front and back copies
   don't cancel); --cape-flat-normals = the old flat output. Cape 6.0/0.791 -> 5.5/0.805.
 - SCREENSHOT REGISTRATION (2026-10-25, Vincent AND room): sample the PCSX2 shot at
@@ -276,7 +286,7 @@ Read this first instead of re-deriving. Review images: notes/review/ (README exp
   all 4 dump frames. Revisit with real animation/cloth, or if clipping shows elsewhere.
 1. Pose is a single-frame snapshot (body and cape both from 163235); any other frame or
    motion needs the animation system. Arm region reads ~20% too bright.
-2. Boots: glow overlap with the game only 28% (our boot geometry / missing body UVs).
+2. Glow: 50/149 tris still at dump positions (body tris our sub-packet reading doesn't produce).
 3. Room: unverified bindings and grey roof facets/fascias (needs more angles or the static
    binding table).
 4. Sky dome fits the hero camera only. Its guard (export_z128_sky.py) checks the room bbox,
