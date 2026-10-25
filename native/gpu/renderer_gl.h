@@ -146,6 +146,13 @@ typedef struct {
      * 3 = per fragment, the side whose normal faces the eye (explicit camera only; works
      * when one draw mixes winding conventions, e.g. Vincent's body vs cape). */
     int            two_sided;
+    /* GS additive pass by source alpha, colour only (Vincent's 0x2ee8 glow: ALPHA
+     * A=Cs B=0 C=Ad D=Cd, ATST=NEVER AFAIL=RGB_ONLY, ZTST=GEQUAL; the exporter bakes
+     * Ad into the texture alpha). 1 = blend (SRC_ALPHA, ONE) after fog, dest alpha and
+     * depth kept, depth test LEQUAL, optionally pulled toward the eye (depth_bias, in
+     * glPolygonOffset units; 0 = none). 0 (zero-init) = off. */
+    int            gs_additive;
+    float          depth_bias;
 } rgl_scene_draw;
 
 /* Render `ndraws` meshes into one GL world and read back one framed image.

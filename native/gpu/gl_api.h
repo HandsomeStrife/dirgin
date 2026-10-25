@@ -39,6 +39,7 @@ extern "C" {
     X(PFNGLFRONTFACEPROC,            glFrontFace) \
     X(PFNGLVIEWPORTPROC,             glViewport) \
     X(PFNGLPOLYGONMODEPROC,          glPolygonMode) \
+    X(PFNGLPOLYGONOFFSETPROC,        glPolygonOffset) \
     X(PFNGLLINEWIDTHPROC,            glLineWidth) \
     X(PFNGLDRAWARRAYSPROC,           glDrawArrays) \
     X(PFNGLREADPIXELSPROC,           glReadPixels) \

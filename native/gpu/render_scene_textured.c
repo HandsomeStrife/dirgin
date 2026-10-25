@@ -229,6 +229,9 @@ int main(int argc, char **argv) {
      * unset lights stay 0. Generate them with `bmd_env.py --rig BMD slot scale [hero]`. */
     rgl_lightrig crig; memset(&crig, 0, sizeof crig); crig.saturate = 1.0f;
     int have_crig = 0, bad_rig = 0;
+    const char *glowmesh = NULL, *glowtex = NULL;   /* -charglow MESH TEX: 0x2ee8 pass */
+    float glow_bias = 0.0f;   /* -charglowbias N (polygon offset). 0 measured best: a bias lets
+                                 the dump-positioned glow tris spill past our boots */
     int char_two_sided = 0;   /* -chartwosided 1|2: see rgl_scene_draw.two_sided */
 
     for (int i = 1; i < argc; i++) {
@@ -254,6 +257,8 @@ int main(int argc, char **argv) {
                 bad_rig = 1;
             have_crig = 1;
         }
+        else if (!strcmp(argv[i], "-charglow") && i+2<argc) { glowmesh = argv[++i]; glowtex = argv[++i]; }
+        else if (!strcmp(argv[i], "-charglowbias") && i+1<argc) glow_bias = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "-chartwosided") && i+1<argc) char_two_sided = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-ambient") && i+1<argc) {
             if (sscanf(argv[++i], "%f,%f,%f", &crig.ambient[0],&crig.ambient[1],&crig.ambient[2]) != 3)
@@ -466,7 +471,7 @@ int main(int argc, char **argv) {
     }
 
     /* draws: every env group PRELIT + its texture, then the character LIT + body */
-    rgl_scene_draw draws[MAXG + 1];
+    rgl_scene_draw draws[MAXG + 2];
     memset(draws, 0, sizeof draws);
     for (int i = 0; i < ng; i++) {
         draws[i].verts = g[i].v; draws[i].vcount = g[i].n;
@@ -520,6 +525,27 @@ int main(int argc, char **argv) {
     }
     int ndraws = ng + 1;
 
+    /* -charglow: Vincent's additive 0x2ee8 pass (p000_glow.py), placed exactly like
+     * the character (pivot = the CHARACTER mesh bbox), drawn after it, PRELIT. */
+    RVertex *gplaced = NULL; unsigned char *gtex = NULL;
+    if (glowmesh) {
+        RVertex *gv = NULL; size_t gn = 0; float gmn[3], gmx[3], dmn[3], dmx[3]; char gerr[256] = {0};
+        int gw = 0, gh = 0; char gname[64] = {0};
+        if (mesh_load(glowmesh, &gv, &gn, gmn, gmx, gerr, sizeof gerr)) {
+            fprintf(stderr, "charglow: %s\n", gerr); return 2; }
+        if (tex_load_raw(glowtex, &gtex, &gw, &gh, gname, sizeof gname)) {
+            fprintf(stderr, "charglow: texture %s failed\n", glowtex); return 2; }
+        gplaced = place_character(gv, gn, cbmn, cbmx, scale, yaw, TX, FY, TZ, cam_up[1], dmn, dmx);
+        free(gv);
+        if (!gplaced) { fprintf(stderr, "charglow: place failed\n"); return 2; }
+        draws[ndraws].verts = gplaced; draws[ndraws].vcount = gn;
+        draws[ndraws].shade_mode = RGL_SHADE_PRELIT; draws[ndraws].tfx = RGL_TFX_MODULATE;
+        draws[ndraws].tex_rgba = gtex; draws[ndraws].tex_w = gw; draws[ndraws].tex_h = gh;
+        draws[ndraws].gs_additive = 1; draws[ndraws].depth_bias = glow_bias;
+        printf("glow  : %s  (%zu tris)  additive by As, bias %.1f\n", glowmesh, gn / 3, glow_bias);
+        ndraws++;
+    }
+
     /* frame on the CHARACTER box, pull the eye back to show the room around it */
     struct { const char *tag; float az, el, zoom; } views[] = {
         { "hero",   44.f, 11.f, 1.85f },
@@ -559,7 +585,7 @@ int main(int argc, char **argv) {
         printf("wrote %-44s (az=%.0f el=%.0f zoom=%.1f)\n", path, views[i].az, views[i].el, views[i].zoom);
     }
 
-    free(ctex); free(placed);
+    free(ctex); free(placed); free(gplaced); free(gtex);
     for (int i = 0; i < ng; i++) { free(g[i].v); free(g[i].tex); }
     gfx_context_destroy(ctx);
     return fail ? 1 : 0;

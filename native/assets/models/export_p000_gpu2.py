@@ -133,8 +133,35 @@ def err_stats(X, D):
                 p90=round(float(np.percentile(e, 90)), 3), max=round(float(e.max()), 3), n=int(len(e)))
 
 
+def cape_normals(tris_m, flat=False, quant=1e-3):
+    """Per-corner cape normals from the posed positions. Smooth (default): the
+    area-weighted face normals of every cape triangle sharing the corner's position,
+    each flipped to agree with this triangle's own face normal first, so the front and
+    back copies (same positions, opposite winding) don't cancel and each keeps its own
+    side. flat=True: the old per-triangle face normal (lit cape shows flat facets)."""
+    fn = [np.cross(m[1] - m[0], m[2] - m[0]) for m in tris_m]          # area-weighted
+    unit = lambda v: v / (np.linalg.norm(v) or 1.0)
+    if flat:
+        return [[unit(n)] * 3 for n in fn]
+    key = lambda p: tuple(np.round(np.asarray(p) / quant).astype(np.int64))
+    share = collections.defaultdict(list)
+    for i, m in enumerate(tris_m):
+        for k in range(3): share[key(m[k])].append(i)
+    out = []
+    for i, m in enumerate(tris_m):
+        own = fn[i]; ns = []
+        for k in range(3):
+            acc = np.zeros(3)
+            for j in share[key(m[k])]:
+                acc += fn[j] if np.dot(fn[j], own) >= 0 else -fn[j]
+            ns.append(unit(acc if np.linalg.norm(acc) > 1e-12 else own))
+        out.append(ns)
+    return out
+
+
 def parse_args(argv):
-    a = dict(dump=None, out=None, clip=None, frame=0.0, cont=CLIP_CONT, in_place=False, no_cape=False)
+    a = dict(dump=None, out=None, clip=None, frame=0.0, cont=CLIP_CONT, in_place=False, no_cape=False,
+             cape_flat=False)
     pos = []; i = 0
     while i < len(argv):
         k = argv[i]
@@ -143,6 +170,7 @@ def parse_args(argv):
         elif k == '--clip-cont': a['cont'] = argv[i + 1]; i += 2
         elif k == '--in-place': a['in_place'] = True; i += 1
         elif k == '--no-cape': a['no_cape'] = True; i += 1
+        elif k == '--cape-flat-normals': a['cape_flat'] = True; i += 1
         elif k.startswith('--'): sys.exit(f"unknown option {k}")
         else: pos.append(k); i += 1
     if len(pos) != 2: sys.exit(__doc__)
@@ -328,10 +356,11 @@ def main():
         cols = (t[7], t[8], t[9]) if len(t) >= 10 else ((122, 122, 122, 128),) * 3
         for k in range(3): emit(Pn[t[k]], Nn[t[k]], uvn(t)[k], cols[k], x)
     nb = len(flat) // 12
-    for ws, uvs, cols in ([] if args['no_cape'] else cape):
-        m = world_to_model(np.array(ws), pl, piv)
-        n = np.cross(m[1] - m[0], m[2] - m[0]); n = n / (np.linalg.norm(n) or 1.0)
-        for k in range(3): emit(m[k], n, uvs[k], cols[k], cape_tex0)
+    capes = [] if args['no_cape'] else cape
+    cm = [world_to_model(np.array(ws), pl, piv) for ws, _u, _c in capes]
+    cn = cape_normals(cm, flat=args['cape_flat'])
+    for (ws, uvs, cols), m, ns in zip(capes, cm, cn):
+        for k in range(3): emit(m[k], ns[k], uvs[k], cols[k], cape_tex0)
     vcount = len(flat) // 12
     print(f"body verts {nb} (dropped tris {dropped}), cape verts {vcount - nb}; atlas {Wc}x{Hc}, {len(used)} textures")
     # header bbox = BODY bbox: render_scene_textured pivots on it, and the cape was
@@ -352,10 +381,24 @@ def main():
     rgba = np.dstack([combined, alpha])
     with open(os.path.join(outdir, "vincent_p000_tex.rgba"), 'wb') as f:
         f.write(struct.pack('<II', Wc, Hc)); f.write(rgba.astype(np.uint8).tobytes())
+    # ---- 0x2ee8 glow pass (p000_glow.py): extra draw, only used with -charglow.
+    # Dump-frame UVs and colours, so only for the dump pose.
+    glow_stats = None
+    if not args['clip']:
+        import p000_glow as GL
+        gflat, gatlas, glow_stats = GL.build_glow(dumppath, tc, tris, tri_tex0, uvn, Pn, Nn,
+                                                    lambda W: world_to_model(W, pl, piv))
+        print("glow:", glow_stats)
+        with open(os.path.join(outdir, "vincent_p000_glow.mesh"), 'wb') as f:
+            f.write(struct.pack('<4sII', b'DMSH', 1, len(gflat) // 12) + struct.pack('<6f', *bbmin, *bbmax))
+            array.array('f', gflat).tofile(f)
+        with open(os.path.join(outdir, "vincent_p000_glow_tex.rgba"), 'wb') as f:
+            f.write(struct.pack('<II', gatlas.shape[1], gatlas.shape[0])); f.write(gatlas.tobytes())
     json.dump([dict(g=int(t[6]), name=gmeta[t[6]][0], tex0=(None if tri_tex0[i] is None else int(tri_tex0[i])),
                     how=how[i], uv=uvn(t), v=[int(k) for k in t[:3]]) for i, t in enumerate(tris)],
               open(os.path.join(outdir, "binding.json"), 'w'))
     json.dump(dict(placement=pl, binding=dict(hc), cape=cst, pose=pose_stats, clip=clip_stats,
+                   **({} if glow_stats is None else dict(glow=glow_stats)),
                    char_alpha_ref=CAPE_AREF_GL,
                    render_args=f"-s {pl['s']:.4f} -yaw {pl['yaw']:.2f} -x {pl['x']:.2f} -y {pl['y']:.2f} -z {pl['z']:.2f}",
                    # Vincent is placed in this camera's world: render with exactly it.

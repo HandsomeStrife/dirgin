@@ -853,7 +853,18 @@ int rgl_render_scene(const rgl_scene_draw *draws, int ndraws,
         if (use_tex){ glActiveTexture(GL_TEXTURE0); glBindTexture(GL_TEXTURE_2D, tex); }
 
         glBindVertexArray(vao);
-        if (!d->gs_atest){
+        if (d->gs_additive){
+            glEnable(GL_BLEND);
+            glBlendFuncSeparate(GL_SRC_ALPHA, GL_ONE, GL_ZERO, GL_ONE);
+            glUniform1i(locOutA, 1);
+            glDepthMask(GL_FALSE); glDepthFunc(GL_LEQUAL);
+            if (d->depth_bias != 0.0f){ glEnable(GL_POLYGON_OFFSET_FILL); glPolygonOffset(-d->depth_bias, -d->depth_bias); }
+            glDrawArrays(GL_TRIANGLES, 0, (GLsizei)d->vcount);
+            glDisable(GL_POLYGON_OFFSET_FILL); glPolygonOffset(0.0f, 0.0f);
+            glDepthFunc(GL_LESS); glDepthMask(GL_TRUE);
+            glDisable(GL_BLEND);
+            glUniform1i(locOutA, 0);
+        } else if (!d->gs_atest){
             glDrawArrays(GL_TRIANGLES, 0, (GLsizei)d->vcount);
         } else {
             /* GS ATE pass, AFAIL=RGB_ONLY: every fragment blends by As; only those

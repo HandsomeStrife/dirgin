@@ -59,8 +59,8 @@ Read this first instead of re-deriving. Review images: notes/review/ (README exp
   Animation data: notes/autonomy-journal.md (~l.294) has the clip format (km0102vn, anim_eval.py);
   not used here.
 - Arm/boots (CLUT 0x2dd4) colour, pose-independent (our 0x2dd4 pixels vs the game's 0x2dd4
-  region): RGB 90,75,57 vs game 89,68,54, |d| 11 (was 102). The 0x2ee8 pass is NOT needed
-  to explain it.
+  region): RGB 90,75,57 vs game 89,68,54, |d| 11 (was 102). (Measured prelit; with the lit
+  render the 0x2ee8 glow pass IS needed, see Glow pass below.)
 - Render (hero camera), then crop:
   env EGL_PLATFORM=surfaceless GALLIUM_DRIVER=llvmpipe ./native/gpu/render_scene_textured \
     -l native/assets/models/out/z128_room_v2/room.list \
@@ -100,11 +100,20 @@ Read this first instead of re-deriving. Review images: notes/review/ (README exp
   (HERO_POINT_LIGHT in bmd_env.py, FITTED to the dump's vertex colours, not decoded; source
   FUN_0026a710 / FUN_0030e208). Body vertex colours match the dump to median 0.9 levels.
   Grade (mean |d|, prelit -> lit): body 9.7 -> 0.9, mantle 2.6 -> 1.7, cape 4.4 -> 1.6,
-  arms 6.1 -> 26.6 (too dark: the 0x2ee8 glow pass isn't drawn). Cape normals are rest-pose
-  (flat facets on the lower cape): exporter fix needed. -chartwosided 3 lights the side facing
-  the eye (cape winding is opposite to the body's). The worker measured the screenshot
-  registration on a Vincent crop as game sampled at (1.02x-1, 1.00y); unconfirmed vs the
-  +9,-3 room alignment.
+  arms 6.1 -> 26.6 (too dark until the glow pass below). -chartwosided 3 lights the side
+  facing the eye (cape winding is opposite to the body's).
+- Glow pass (2026-10-25, review 49): opt-in, add to the lit render
+    -charglow out/p000_gpu3/vincent_p000_glow.mesh out/p000_gpu3/vincent_p000_glow_tex.rgba
+  0x2ee8 = ALPHA (Cs-0)*Ad+Cd, TEST ATST NEVER/AFAIL RGB_ONLY, ZTST GEQUAL, FGE on; Ad = the
+  body pass's alpha = arm CLUT 0x2dd4 texel alpha (the glow mask). p000_glow.py bakes glow
+  texel x mask per triangle; 64/149 tris reuse our body tris, 85 sit at dump positions (body
+  UVs missing from our decode). Arms |d| 30.1 -> 16.3, SSIM 0.615 -> 0.811; boots 20.1 -> 21.6
+  (glow overlap with the game only 28%: boot geometry). Dump-frame UVs/colours: dump pose only.
+- Cape normals are smooth (default; sign-aligned per triangle so the front and back copies
+  don't cancel); --cape-flat-normals = the old flat output. Cape 6.0/0.791 -> 5.5/0.805.
+- SCREENSHOT REGISTRATION (2026-10-25, Vincent AND room): sample the PCSX2 shot at
+  (1.015x+1, 1.00y) at 640x480 (= the 432/425.5 CRTC crop). The older "+9,-3" alignment is
+  wrong (SSIM ~0.2); numbers graded with it before 2026-10-25 are suspect.
 - Clips (phase 1b, 2026-10-24, review 44): rotation decode SOLVED in anim_rot.py (replaces
   anim_eval's quaternion formula; track walk unchanged). VU0 micro at vcallms 0x218: each
   TRACK Q key is an axis in spherical angles (x, y: 12 bits over [0, pi/2], octant from the
@@ -266,8 +275,7 @@ Read this first instead of re-deriving. Review images: notes/review/ (README exp
   all 4 dump frames. Revisit with real animation/cloth, or if clipping shows elsewhere.
 1. Pose is a single-frame snapshot (body and cape both from 163235); any other frame or
    motion needs the animation system. Arm region reads ~20% too bright.
-2. 0x2ee8 second pass (16x16 CT24, ABE on, 596 tris over the arm/boots): not reproduced;
-   effect unmeasured, colour already matches without it.
+2. Boots: glow overlap with the game only 28% (our boot geometry / missing body UVs).
 3. Room: unverified bindings and grey roof facets/fascias (needs more angles or the static
    binding table).
 4. Sky dome fits the hero camera only. Its guard (export_z128_sky.py) checks the room bbox,
