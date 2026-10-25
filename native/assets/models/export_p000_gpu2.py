@@ -19,11 +19,15 @@ hero-frame GS dump.
 
 - Clip pose (optional): --clip NAME --frame F poses the body from a real animation
   clip frame (anim_rot.py: rotation, translation and scale tracks, composed like the
-  game's VU0 micro) instead of the dump. Placement is re-solved for that pose; the
-  cape stays dump-posed (it has no skinning). The dump pose is still computed as the
-  reference and placement.json "clip" gets the vertex error vs it. --in-place drops
-  the root motion (bone 1 x/z); --clip-cont picks the clip container; --no-cape leaves
-  the (frozen, dump-posed) cape out, e.g. to see the legs of a walk frame.
+  game's VU0 micro) instead of the dump. Placement is re-solved for that pose. The
+  dump pose is still computed as the reference and placement.json "clip" gets the
+  vertex error vs it. --in-place drops the root motion (bone 1 x/z); --clip-cont picks
+  the clip container; --no-cape leaves the cape out.
+  Cape in --clip mode (p000_cloth.py): by default the SKINNED cape, i.e. the game's
+  per-vertex cloth target (28 weighted skin records, bones 28-79 incl. the cape's own
+  chains), posed with the same bone matrices (and root-motion setting) as the body.
+  --cape-cloth uses the game's cloth sim instead (run from clip frame 0 to --frame,
+  last frame). Without --clip the cape stays dump-posed (unchanged).
 
 Run: python3 -I export_p000_gpu2.py <dump.bin> <outdir> [--clip h_swtch --frame 58]
 """
@@ -165,9 +169,33 @@ def cape_normals(tris_m, flat=False, quant=1e-3):
     return out
 
 
+def clip_pose_cape(args, sk, cbuf, CP, trs, cape, pl, piv):
+    """Cape triangles in the clip-posed model space (same order/UVs as `cape`, the
+    dump-posed cape) + stats. Skinned target by default, cloth sim with --cape-cloth."""
+    import p000_cloth as CL
+    cp = CL.Cape()
+    if [u for _v, u, _c in cp.tris] != [tuple(tuple(x) for x in u) for _w, u, _c in cape]:
+        raise ValueError("p000_cloth cape triangles do not match p000_cape's order/UVs")
+    root = not args['in_place']
+    if args['cape_cloth']:
+        f = args['frame']; frames = [float(x) for x in np.arange(f % 1.0, f + 1e-6, 1.0)]
+        pos, tg, ks, info = CL.run_clip(cp, sk, args['clip'], frames, cont=args['cont'], in_place=args['in_place'])
+        P = pos[-1]; dev = np.linalg.norm(P - tg[-1], axis=1)
+        st = dict(mode='cloth', ticks=len(frames), k=round(float(ks[-1]), 3), window=info['window'],
+                  offset_from_skinned=err_stats(P, tg[-1]))
+    else:
+        P = cp.targets(AR.compose(sk, trs, root_motion=root))
+        st = dict(mode='skinned')
+    tm = [P[list(v)] for v, _u, _c in cp.tris]
+    # vs the dump-posed cape (world units; dump corners are UV-matched, some interpolated)
+    D = np.concatenate([world_to_model(np.array(ws), pl, piv) for ws, _u, _c in cape])
+    st['vs_dump_cape'] = err_stats(np.concatenate(tm) * pl['s'], D * pl['s'])
+    return tm, st
+
+
 def parse_args(argv):
     a = dict(dump=None, out=None, clip=None, frame=0.0, cont=CLIP_CONT, in_place=False, no_cape=False,
-             cape_flat=False)
+             cape_flat=False, cape_cloth=False)
     pos = []; i = 0
     while i < len(argv):
         k = argv[i]
@@ -177,6 +205,7 @@ def parse_args(argv):
         elif k == '--in-place': a['in_place'] = True; i += 1
         elif k == '--no-cape': a['no_cape'] = True; i += 1
         elif k == '--cape-flat-normals': a['cape_flat'] = True; i += 1
+        elif k == '--cape-cloth': a['cape_cloth'] = True; i += 1
         elif k.startswith('--'): sys.exit(f"unknown option {k}")
         else: pos.append(k); i += 1
     if len(pos) != 2: sys.exit(__doc__)
@@ -276,7 +305,7 @@ def main():
     ln = np.linalg.norm(Nn, axis=1, keepdims=True); ln[ln < 1e-9] = 1.0; Nn = Nn / ln
 
     # ---- pose the body to this frame from the dump (p000_pose.py); POSE=0 = bind pose
-    pose_stats = None; clip_stats = None; src = {}; posed = None
+    pose_stats = None; clip_stats = None; src = {}; posed = None; clip_cape = None
     if os.environ.get('POSE', '1') != '0' or args['clip']:
         import p000_pose as PZ
         yr = np.radians(pl['yaw']); cy, sy = np.cos(yr), np.sin(yr)
@@ -349,6 +378,9 @@ def main():
                           error_rotation_only=rot_only, error_no_scale=no_scale,
                           error_bind_aligned=err_stats(sb * Pn_bind[dv] @ Rb.T + tb, Dw))
         print("clip pose:", clip_stats)
+        if not args['no_cape']:
+            clip_cape, cst['clip_cape'] = clip_pose_cape(args, sk, cbuf, CP, trs, cape, pl, piv)
+            print("cape (clip):", cst['clip_cape'])
         print("placement (clip):", {k: round(v, 3) if isinstance(v, float) else v for k, v in pl.items()})
     flat = []; dropped = 0
     def emit(p, n, uv, col, x):
@@ -363,7 +395,7 @@ def main():
         for k in range(3): emit(Pn[t[k]], Nn[t[k]], uvn(t)[k], cols[k], x)
     nb = len(flat) // 12
     capes = [] if args['no_cape'] else cape
-    cm = [world_to_model(np.array(ws), pl, piv) for ws, _u, _c in capes]
+    cm = clip_cape if clip_cape is not None else [world_to_model(np.array(ws), pl, piv) for ws, _u, _c in capes]
     cn = cape_normals(cm, flat=args['cape_flat'])
     for (ws, uvs, cols), m, ns in zip(capes, cm, cn):
         for k in range(3): emit(m[k], ns[k], uvs[k], cols[k], cape_tex0)

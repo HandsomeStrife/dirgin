@@ -25,8 +25,8 @@ Read this first instead of re-deriving. Review images: notes/review/ (README exp
   (hero GS dump, frame 163235; gitignored game data, keep it)
   (writes mesh, atlas and `placement.json` with the render args). Old output kept in out/p000_gpu2.
 - Cape = mesh block **0x19f70** of 07700001.bin (smd 'p000_L02', 112 tris), NOT a procedural
-  object. It has 0 skinning batches (positions posed at runtime), which is why the skinned
-  decoder dropped it silently. `p000_cape.py`: topology/UV/colour from the file, this frame's
+  object. It has 0 skinning batches, so the body decoder dropped it silently; it is skinned
+  through its own path instead (see Cape skinning below). `p000_cape.py`: topology/UV/colour from the file, this frame's
   positions from the dump's 0x2e68 draws (vertex UVs identical). Cape IoU vs dump: 0.98
   (drawable), 0.92 in-render (railing occlusion). `decode_groups` now WARNs on skipped blocks.
 - Dump -> world: hero camera below, depth w = 1/q (verified: room vertices unprojected with
@@ -141,7 +141,22 @@ Read this first instead of re-deriving. Review images: notes/review/ (README exp
   `export_p000_gpu2.py dump.bin OUT --clip h_swtch --frame 58 [--in-place] [--no-cape]` poses
   the body from a clip (cape stays dump-posed; default = dump pose, unchanged). h_swtch f58 vs
   dump-posed verts: median 0.109 / rms 0.251 units (bind 0.861); f59 0.089. Undecoded: vf26-28
-  previous-pose blend; clip playing at 163235 unconfirmed (h_st untested); cape doesn't animate.
+  previous-pose blend; clip playing at 163235 unconfirmed (h_st untested).
+- Cape skinning (2026-10-25, reviews 51-54): smd p000_L02 @0x19f70 has a weighted skin path at
+  +0x18: 28 records (FUN_005b06d0), bone-local xyz x meshScale/4096, bones 28-79 incl. the
+  cape's own chains. Draw slots -> the 82 cloth vertices via the draw-group +0x14 list
+  (FUN_005b1260). `--clip X --frame F` now poses the cape from its bones (default); without
+  --clip it stays dump-posed (unchanged). h_swtch f58 skinned vs dump cape: median 0.61 (pinned
+  0.23). Code: p000_cloth.py (decode, sim, validate), p000_cloth_render.py (render/grade helper).
+- Cloth sim, decoded (FUN_005b0d30), opt-in `--cape-cloth`: group +0x24: gravity 0.2/tick,
+  velocity = movement x 0.1, 4 passes over 336 stretch-only constraints (gain 0.8), 20 pinned.
+  Free vertices pulled toward the skinned target by max(k, 0.1), k = (1 - rem/total)^2; window
+  2 x u16 at clip +0x1a when clip byte +0x19 == 2 (h_wk 60), re-armed on every clip (re)start
+  incl. loops and on turns > ~7 deg/tick; outside it the cape sits on its target. World space.
+  Dan judged our sim STIFFER than the bones alone (review 53), so it is off by default; two
+  attempts used. Unproven: clip frames per game tick (assumed 1). Next evidence: a PCSX2
+  capture of Vincent walking. --cape-cloth with --frame past the clip length loops the cape
+  but not the body.
 
 ## Room
 - out/ is gitignored. Rebuild (in native/assets/models, run -I):
