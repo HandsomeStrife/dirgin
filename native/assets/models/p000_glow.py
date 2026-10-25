@@ -87,23 +87,30 @@ def build_glow(dumppath, tc, tris, tri_tex0, uvn, Pn, Nn, to_model):
     triangle's vertices (depth-equal); otherwise (the dump's body UVs aren't in our
     decode) it takes the dump's own positions via to_model (world -> model space)."""
     pairs, st = glow_pairs(dumppath)
-    q = lambda uv: (int(round(uv[0] * 512)), int(round(uv[1] * 512)))
+    q = lambda uv: (int(round(uv[0] * 4096)), int(round(uv[1] * 4096)))   # native 1/4096 grid (see export_p000_gpu2 UVQ)
     bysig = collections.defaultdict(list)
     for i, t in enumerate(tris):
         bysig[tri_sig(uvn(t))].append(i)
     rows = []  # (tri index, [corner k for dump corner 0..2], glow uvs, glow cols, body uvs, body tex0, glow tex0)
-    nomesh = 0
+    nomesh = 0; near_err = []
     for btex0, gtex0, cs in pairs:
         cand = bysig.get(tri_sig([c[0] for c in cs]), [])
         cand = [i for i in cand if tri_tex0[i] == btex0] or cand
-        hit = None
+        # Mirrored / duplicated parts share UV triples (each boot tri has 2 copies, some
+        # arm tris 4), so take the copy nearest this glow tri's dump position, not the first.
+        hit = None; best = None
+        dpos = np.asarray(to_model(np.array([c[3] for c in cs])))
         for i in cand:
             m = {q(uv): k for k, uv in enumerate(uvn(tris[i]))}
             ks = [m.get(q(c[0])) for c in cs]
             if None not in ks and len(set(ks)) == 3:
-                hit = (i, ks); break
+                e = float(np.linalg.norm(np.array([Pn[tris[i][k]] for k in ks]) - dpos, axis=1).mean())
+                if best is None or e < best:
+                    hit = (i, ks); best = e
         if hit is None:
             nomesh += 1
+        else:
+            near_err.append(best)
         rows.append((hit, cs, btex0, gtex0))
     n = len(rows)
     nrow = (n + COLS - 1) // COLS
@@ -138,5 +145,7 @@ def build_glow(dumppath, tc, tris, tri_tex0, uvn, Pn, Nn, to_model):
             flat.extend((*P3[c], *N3[c], *corner_uv[c],
                          col[0] / 255.0, col[1] / 255.0, col[2] / 255.0, 128 / 255.0))   # C=Ad: vertex alpha unused
     st.update(tris=n, on_our_body_tri=n - nomesh, at_dump_position=nomesh, atlas=[AW, AH],
+              body_tri_vs_dump_err=dict(median=round(float(np.median(near_err)), 3) if near_err else None,
+                                        max=round(float(max(near_err)), 3) if near_err else None),
               mask_mean=round(float(atlas[..., 3].mean()) * 128 / 255, 1))
     return flat, atlas, st

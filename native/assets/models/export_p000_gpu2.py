@@ -34,7 +34,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, "/srv/games/dirge-port/tools/gsdump/src")
 import render_p005 as P
 from gsrender2 import TexCache, tex0_fields
+import char_dumpbind
 from char_dumpbind import tri_sig
+# UVs are 1/4096 fixed point in the file (V2-16) and in the dump (s/q, float noise ~1e-4).
+# Matching on char_dumpbind's default 1/512 grid put ~24% of our UVs exactly on a rounding
+# half, where round() and the dump's noise disagree: 40% of the dump's body tris (85 of the
+# 149 glow tris) found no UV-triple match. Match on the native grid instead.
+UVQ = char_dumpbind.ROUND = 4096
 from render_p000_bound import CONT, TEXC, dump_sig2tex0
 import p000_cape as C
 import anim_rot as AR
@@ -232,7 +238,7 @@ def main():
     used_idx = sorted({i for t in tris for i in t[:3]})
     Pn = V.astype(np.float64); bbmin = Pn[used_idx].min(0); bbmax = Pn[used_idx].max(0)
     piv = np.array([(bbmin[0] + bbmax[0]) / 2, bbmax[1], (bbmin[2] + bbmax[2]) / 2])  # -Y-up: feet = max Y
-    q = lambda uv: (int(round(uv[0] * 512)), int(round(uv[1] * 512)))
+    q = lambda uv: (int(round(uv[0] * UVQ)), int(round(uv[1] * UVQ)))
     dsig = {}
     for t0, vs in dtris:
         dsig.setdefault(tri_sig([v[1] for v in vs]), {q(v[1]): v[0] for v in vs})
