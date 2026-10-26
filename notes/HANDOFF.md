@@ -230,6 +230,22 @@ Read this first instead of re-deriving. Review images: notes/review/ (README exp
   slots 5/6, cloak 7); L01@cf00 is a separate detailed face block, not a copy. Viewer light only.
   Open: the p000 GPU export draws the hair opaque (268 flagged tris; 38% of p000_2 texels < 100):
   needs flagged tris in an atlas region that keeps texture alpha, plus the -charatest pass.
+- p000 hair alpha + game draw order (2026-10-26, review 65): flag-bit-1 descriptors (301 body tris:
+  hair cards, some cloth edges) map to an atlas copy ('A', tex0) that keeps texture alpha; drawn
+  with -charatest like the cape. Draw order DECODED: FUN_005b2550 draws a group at once unless
+  group header word bit 0 is set; those go on bucket (w&0x3e)>>1 (LIFO), drawn by FUN_005b26b0
+  after all parts (bucket 0 first). p000: opaque groups part by part (last part first), then
+  L02.g1, cape, S02.g0, hair alpha (buckets 5/10/20/30); matches the hero dump run for run
+  (smd_material.group_draw_keys; --render now uses it, moving 1-6% of the p005 preview pixels).
+  The mesh stays in binding.json order (export_cerberus, swap_cape); render_args carries
+  -charruns S:C,... (render_scene_textured: ranges drawn in order, must cover all, max 64; p000 16).
+  Head+hair box (285,189)-(356,296) lit 5.61/0.768 -> 5.05/0.793; Vincent lit 5.02/0.831 -> 4.94/0.834.
+  Open: the dump has ~half our tris per run; the VU may cull back faces (unverified).
+- File binding is the default (2026-10-26, review 66): export_p000_gpu2.py binds every triangle from
+  the files; --bind-from-dump = old behaviour. Every run prints "file binding vs dump 'exact'
+  triangles" (100% in hero/185126/185138; slot+1 mutation 22.6%). bind_ref applies only with
+  --bind-from-dump (redundant otherwise). Switch alone: 79/76/17 tris change texture/CLUT,
+  136/65/0 px, pose vertices unchanged. Gun 0.086/0.079/0.117.
 
 ## Room
 - out/ is gitignored. Rebuild (in native/assets/models, run -I):

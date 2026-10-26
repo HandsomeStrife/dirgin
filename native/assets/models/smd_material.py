@@ -181,6 +181,38 @@ def tri_materials(buf, NB, Wm, bc, tris):
     return [(d[0], d[1]) for d in dm]
 
 
+def group_draw_keys(buf):
+    """The game's group draw order, as {(block P, group index): sort key}.
+    FUN_005b2ef8 walks the part list (smd blocks, container order) last-to-first;
+    FUN_005b2550 draws each group at once unless bit 0 of its first header word is
+    set; those go on bucket (word & 0x3e) >> 1 (LIFO list, 32 buckets), which
+    FUN_005b26b0 draws after all parts, bucket 0 first, newest first. Checked against
+    the p000 hero dump's draw sequence (opaque S02.g3 hair first; L02.g1, cape, S02.g0,
+    then the hair alpha buckets 5/10/20/30 last). Every p000 flag-bit-1 descriptor is
+    in a deferred group; deferred groups also hold some opaque descriptors."""
+    n = R._u16(buf, 0x10); offs = [R._u32(buf, 0x14 + 4 * i) for i in range(n)]
+    parts = [o + 0x10 for o in offs if buf[o + 8:o + 11] == b'smd' and R._u32(buf, o + 0x10) == R.SM2_MAGIC]
+    keys = {}; seq = 0
+    for pi in range(len(parts) - 1, -1, -1):
+        P = parts[pi]; grparr = R._u32(buf, P + 0x20)
+        for gi in range(R._u16(buf, P + 0x0a)):
+            w = R._u32(buf, P + R._u32(buf, P + grparr + 4 * gi))
+            keys[(P, gi)] = (1, (w & 0x3e) >> 1, -seq) if w & 1 else (0, seq, 0)
+            seq += 1
+    return keys
+
+
+def tri_draw_keys(buf, gm, tris):
+    """Per triangle (decode_groups order): (group key, triangle index) - sort by it to
+    get the game's draw order. gm = decode_groups' gmeta ('name@P.gN')."""
+    keys = group_draw_keys(buf)
+    def gk(g):
+        s = gm[g][0]; P = int(s.split('@')[1].split('.')[0], 16); gi = int(s.rsplit('.g', 1)[1])
+        return keys[(P, gi)]
+    gks = {}
+    return [(gks.setdefault(t[6], gk(t[6])), i) for i, t in enumerate(tris)]
+
+
 def block_material(buf, block_off, gi=0, di=0):
     """Material byte + flags of one descriptor of the smd block at file offset
     block_off (e.g. p000's cape block 0x19f70, which decode_groups skips)."""
@@ -199,8 +231,8 @@ def block_material(buf, block_off, gi=0, di=0):
 #                     AREF 100 AFAIL RGB_ONLY (0x5364d): every texel blends by As, only
 #                     As >= 100 writes Z.                             [p000 hair p000_2: 135 of 216 tris]
 #   TEX0 TFX MODULATE, TCC 1: As = At*Av/128 (Av = 0x80 for p005).
-# Parts: FUN_005b2ef8 walks the part list last-to-first (the hero dump draws the hair
-# part first); groups and descriptors in order. No culling: the strip winding is not
+# Order: group_draw_keys (parts last-to-first, deferred groups after all parts, by
+# bucket; descriptors in order within a group). No culling: the strip winding is not
 # consistent (render_skinned), and the GS has none; the hair is single-layer cards.
 
 GS_AREF = 100
@@ -218,8 +250,8 @@ def model_scene(cont, texc, variant=0):
     tm = tri_materials(buf, NB, Wm, bc, tris)
     mats = material_table(texc, variant)
     blocks = sorted({gm[t[6]][0].split('.')[0] for t in tris}, key=lambda s: int(s.split('@')[1].split('.')[0], 16))
-    bidx = {b: i for i, b in enumerate(blocks)}
-    order = sorted(range(len(tris)), key=lambda i: (-bidx[gm[tris[i][6]][0].split('.')[0]], i))
+    dk = tri_draw_keys(buf, gm, tris)
+    order = sorted(range(len(tris)), key=lambda i: dk[i])
     atl = {}
     for m, _f in tm:
         if m != 0xff and m < len(mats) and not mats[m].get('ipu') and m not in atl:

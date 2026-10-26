@@ -2,8 +2,12 @@
 """Export sea-of-flames Vincent (p000) to the GPU renderer, bound and posed from the
 hero-frame GS dump.
 
-- Body: every skinned family (ALL by default). Each triangle gets the dump's full
-  TEX0 (texture + CLUT), chosen per TRIANGLE, never by group majority:
+- Body: every skinned family (ALL by default). Each triangle's texture + CLUT comes
+  from the game files (smd_material.py: draw-descriptor material slot; textures read
+  from 07700002.bin). The dump binding below still runs: it supplies the evidence for
+  placement and pose, and every run prints how many of its 'exact' triangles the file
+  binding agrees with (100% in hero/185126/185138). --bind-from-dump uses the old
+  dump binding for the textures too (and the --dump-camera "bind_ref"):
     1. exact   - its UV-triple is drawn verbatim in the dump;
     2. uvmap   - its UVs fall in atlas texels the dump draws, and one CLUT owns
                  most of that coverage (per-texture UV-coverage map of the dump);
@@ -14,6 +18,12 @@ hero-frame GS dump.
   Appended in model space by inverting the renderer's place_character().
 - Vertex colour = vcol/255: the shader already does the PS2 MODULATE doubling
   (texel*vcol*2, renderer_gl.c), so 128 -> 0.5 -> neutral, 255 -> ~2x.
+- Alpha: triangles whose descriptor has flag bit 1 (hair cards etc.) map to a copy of
+  their texture that keeps its alpha; the cape keeps its own. Render with -charatest
+  char_alpha_ref (GS ATE GEQUAL 100, AFAIL RGB_ONLY, blend by As). render_args carries
+  -charruns: the game's draw order (opaque groups part by part, then the deferred
+  groups by bucket: cape, hair alpha last) as triangle ranges of the mesh, which stays
+  in binding.json order with the cape last.
 - Placement: scale/yaw/feet solved from matched body vertices (dump unprojected
   through the hero camera); written to placement.json for render_scene_textured.
 
@@ -200,7 +210,7 @@ def clip_pose_cape(args, sk, cbuf, CP, trs, cape, pl, piv):
 
 def parse_args(argv):
     a = dict(dump=None, out=None, clip=None, frame=0.0, cont=CLIP_CONT, in_place=False, no_cape=False,
-             cape_flat=False, cape_cloth=False, dump_camera=None, bind_from_file=False)
+             cape_flat=False, cape_cloth=False, dump_camera=None, bind_from_file=True)
     pos = []; i = 0
     while i < len(argv):
         k = argv[i]
@@ -212,7 +222,8 @@ def parse_args(argv):
         elif k == '--cape-flat-normals': a['cape_flat'] = True; i += 1
         elif k == '--cape-cloth': a['cape_cloth'] = True; i += 1
         elif k == '--dump-camera': a['dump_camera'] = argv[i + 1]; i += 2
-        elif k == '--bind-from-file': a['bind_from_file'] = True; i += 1
+        elif k == '--bind-from-file': a['bind_from_file'] = True; i += 1        # the default
+        elif k == '--bind-from-dump': a['bind_from_file'] = False; i += 1
         elif k.startswith('--'): sys.exit(f"unknown option {k}")
         else: pos.append(k); i += 1
     if len(pos) != 2: sys.exit(__doc__)
@@ -279,8 +290,24 @@ def apply_bind_ref(tris, tri_tex0, how, path):
     return dict(n)
 
 
+def file_vs_dump_exact(buf, NB, Wm, bc, tris, tri_tex0, how):
+    """The file binding's check, printed on every run: of the triangles the dump draws
+    with exactly our UV triple ('exact'), how many get the same texture + CLUT from the
+    files (smd_material). Was 100% in hero/185126/185138."""
+    import smd_material as SM
+    import p000_glow as GL
+    mats = SM.material_table(TEXC, 0, GL.BODY_TBP - 4)
+    K = ('tbp0', 'tbw', 'psm', 'tw', 'th', 'cbp', 'cpsm')
+    ok = n = 0
+    for (m, _fl), x, h in zip(SM.tri_materials(buf, NB, Wm, bc, tris), tri_tex0, how):
+        if h != 'exact': continue
+        n += 1
+        ok += m < len(mats) and all(tex0_fields(x)[k] == mats[m]['fields'][k] for k in K)
+    return dict(agree=ok, exact=n, pct=round(100.0 * ok / max(n, 1), 2))
+
+
 def bind_from_file(buf, NB, Wm, bc, tris, tri_tex0, how):
-    """--bind-from-file: each triangle's TEX0 (texture + CLUT) from the game files
+    """Default (--bind-from-dump turns it off): each triangle's TEX0 (texture + CLUT) from the game files
     (smd_material.py: draw-descriptor material byte -> FUN_00259058's material table
     over 07700002.bin). Replaces tri_tex0 in place; `how` (the dump evidence) is kept
     for placement/pose. VRAM addresses are runtime: the table is laid out from this
@@ -351,7 +378,14 @@ def main():
     want = os.environ.get('FAM', 'ALL')
     def fam(g): return gmeta[g][0].split('@')[0]
     keep = set(range(len(gmeta))) if want == 'ALL' else {g for g in range(len(gmeta)) if want in fam(g)}
-    tris = [t for t in tris if t[6] in keep]
+    # descriptor flags + the game's draw order, from the files (smd_material.py)
+    import smd_material as SM
+    sel = [i for i, t in enumerate(tris) if t[6] in keep]
+    _tm = SM.tri_materials(buf, NB, Wm, bc, tris); _dk = SM.tri_draw_keys(buf, gmeta, tris)
+    tri_alpha = [bool(_tm[i][1] & 2) for i in sel]          # desc +4 bit 1: ABE + ATE GEQUAL 100
+    tri_key = [_dk[i][0] for i in sel]
+    cape_key = SM.group_draw_keys(buf)[(C.CAPE_BLOCK + 0x10, 0)]
+    tris = [tris[i] for i in sel]
     uvn = lambda t: [(t[3 + k][0] / 4096, t[3 + k][1] / 4096) for k in range(3)]
 
     # ---- 1. exact UV-triple binding
@@ -372,7 +406,9 @@ def main():
         if tri_tex0[i] is None and t[6] in gtbp:
             x = uvmap_lookup(cov.get(gtbp[t[6]], {}), uvn(t))
             if x is not None: tri_tex0[i] = x; how[i] = 'uvmap'
-    if BIND_REF:
+    # bind_ref only matters for the dump binding: with the file binding it changes
+    # nothing but the 'how' labels (185138: mesh/atlas/glow byte-identical either way).
+    if BIND_REF and not args['bind_from_file']:
         print("bind_ref:", apply_bind_ref(tris, tri_tex0, how, BIND_REF))
     # ---- 3. nearest dump-bound neighbour (shared vertex, same group), BFS rounds
     for _ in range(4):
@@ -391,6 +427,9 @@ def main():
         if tri_tex0[i] is None and t[6] in gmaj: tri_tex0[i] = gmaj[t[6]]; how[i] = 'group'
     hc = collections.Counter(h or 'unbound' for h in how)
     print("body binding per triangle:", dict(hc), "of", len(tris))
+    fvd = file_vs_dump_exact(buf, NB, Wm, bc, tris, tri_tex0, how)
+    print("file binding vs dump 'exact' triangles: %(agree)d/%(exact)d agree (%(pct)s%%)" % fvd
+          + ("" if fvd['agree'] == fvd['exact'] else "  WARNING: below 100%"))
     fb = None
     if args['bind_from_file']:
         fb = bind_from_file(buf, NB, Wm, bc, tris, tri_tex0, how)
@@ -430,10 +469,16 @@ def main():
         print("bind-from-file textures:", fb['stats']['textures'])
 
     # ---- atlas: every distinct runtime texture, stacked vertically
+    # Descriptor flag bit 1 (hair cards etc.) draws blended + alpha-tested with the
+    # texture's alpha; flag 0 draws of the same texture are opaque. So a flagged
+    # triangle maps to its own copy of the texture, ('A', tex0), that keeps the alpha.
+    rkey = lambda i: ('A', tri_tex0[i]) if tri_alpha[i] else tri_tex0[i]
+    tex_of = lambda k: k[1] if isinstance(k, tuple) else k
     used = []
-    for x in tri_tex0 + [cape_tex0]:
-        if x is not None and x not in used and texsrc.get(x) is not None: used.append(x)
-    imgs = {x: np.asarray(texsrc.get(x)[:, :, :3], np.uint8) for x in used}
+    for k in [rkey(i) for i in range(len(tris))] + [cape_tex0]:
+        if tex_of(k) is not None and k not in used and texsrc.get(tex_of(k)) is not None: used.append(k)
+    used = [k for k in used if not isinstance(k, tuple)] + [k for k in used if isinstance(k, tuple)]
+    imgs = {x: np.asarray(texsrc.get(tex_of(x))[:, :, :3], np.uint8) for x in used}
     Wc = max(im.shape[1] for im in imgs.values()); region = {}; rows = []; yoff = 0
     for x in used:
         im = imgs[x]; h, w = im.shape[:2]
@@ -528,10 +573,15 @@ def main():
         flat.extend((p[0], p[1], p[2], n[0], n[1], n[2], (uv[0] * rw) / Wc, (yo + uv[1] * rh) / Hc,
                      col[0] / 255.0, col[1] / 255.0, col[2] / 255.0,
                      (col[3] if len(col) > 3 else 128) / 255.0))   # GS vertex alpha: shader As = texel*va*2
-    for i, t in enumerate(tris):
-        x = tri_tex0[i]
-        if x is None or x not in region: dropped += 1; continue
+    # The mesh keeps binding.json triangle order, cape last (export_cerberus and
+    # p000_cloth_render.swap_cape read it that way). The game's draw order
+    # (smd_material.group_draw_keys) goes to the renderer as -charruns ranges.
+    events = []
+    for i in range(len(tris)):
+        t = tris[i]; x = rkey(i)
+        if tri_tex0[i] is None or x not in region: dropped += 1; continue
         cols = (t[7], t[8], t[9]) if len(t) >= 10 else ((122, 122, 122, 128),) * 3
+        events.append((tri_key[i], len(flat) // 36, 1, tri_alpha[i]))
         for k in range(3): emit(Pn[t[k]], Nn[t[k]], uvn(t)[k], cols[k], x)
     nb = len(flat) // 12
     capes = [] if args['no_cape'] else cape
@@ -540,6 +590,13 @@ def main():
     for (ws, uvs, cols), m, ns in zip(capes, cm, cn):
         for k in range(3): emit(m[k], ns[k], uvs[k], cols[k], cape_tex0)
     vcount = len(flat) // 12
+    if vcount > nb: events.append((cape_key, nb // 3, (vcount - nb) // 3, True))
+    runs = []                                    # [start tri, count, alpha] in draw order
+    for _k, s0, c, a in sorted(events, key=lambda e: e[0]):
+        if runs and runs[-1][2] == a and runs[-1][0] + runs[-1][1] == s0: runs[-1][1] += c
+        else: runs.append([s0, c, a])
+    char_runs = ','.join(f"{s0}:{c}" for s0, c, _a in runs)
+    print("draw runs:", [(s0, c, 'alpha' if a else 'opaque') for s0, c, a in runs])
     print(f"body verts {nb} (dropped tris {dropped}), cape verts {vcount - nb}; atlas {Wc}x{Hc}, {len(used)} textures")
     # header bbox = BODY bbox: render_scene_textured pivots on it, and the cape was
     # mapped into model space against that same pivot.
@@ -552,10 +609,12 @@ def main():
     # the body draws are not alpha-tested, so the body stays 255 (= opaque under any ref
     # <= 1.0 with vertex alpha 128). Stored as A*255/128 like the room decoder, so the
     # renderer's GS alpha test uses ref CAPE_AREF_GL (placement.json char_alpha_ref).
+    # The flagged body copies ('A', tex0) keep their alpha the same way (same ref).
     alpha = np.full(combined.shape[:2], 255, np.uint8)
-    yo, rh, rw = region[cape_tex0]
-    ca = np.asarray(texsrc.get(cape_tex0)[:, :, 3], np.float64)
-    alpha[yo:yo + rh, :rw] = np.clip(np.round(ca * 255 / 128), 0, 255).astype(np.uint8)
+    for k in [cape_tex0] + [k for k in used if isinstance(k, tuple)]:
+        yo, rh, rw = region[k]
+        ca = np.asarray(texsrc.get(tex_of(k))[:, :, 3], np.float64)
+        alpha[yo:yo + rh, :rw] = np.clip(np.round(ca * 255 / 128), 0, 255).astype(np.uint8)
     rgba = np.dstack([combined, alpha])
     with open(os.path.join(outdir, "vincent_p000_tex.rgba"), 'wb') as f:
         f.write(struct.pack('<II', Wc, Hc)); f.write(rgba.astype(np.uint8).tobytes())
@@ -579,8 +638,12 @@ def main():
     json.dump(dict(placement=pl, binding=dict(hc), cape=cst, pose=pose_stats, clip=clip_stats,
                    **({} if glow_stats is None else dict(glow=glow_stats)),
                    **({} if fb is None else dict(bind_from_file=fb['stats'])),
+                   binding_source='file' if fb is not None else 'dump', file_vs_dump_exact=fvd,
                    char_alpha_ref=CAPE_AREF_GL,
-                   render_args=f"-s {pl['s']:.4f} -yaw {pl['yaw']:.2f} -x {pl['x']:.2f} -y {pl['y']:.2f} -z {pl['z']:.2f}",
+                   alpha_tris=dict(body=int(sum(tri_alpha)), runs=[[s0, c, 'alpha' if a else 'opaque'] for s0, c, a in runs]),
+                   # -charruns: draw the character's triangle ranges in this order (game order)
+                   render_args=f"-s {pl['s']:.4f} -yaw {pl['yaw']:.2f} -x {pl['x']:.2f} -y {pl['y']:.2f} -z {pl['z']:.2f}"
+                               f" -charruns {char_runs}",
                    # Vincent is placed in this camera's world: render with exactly it.
                    camera_args="-fov {fov} -eye {e} -at {a} -up {u}".format(
                        fov=C.HERO_CAM['fov'], e=','.join(map(str, C.HERO_CAM['eye'])),

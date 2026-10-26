@@ -33,6 +33,9 @@
  *                         [-s scale] [-yaw deg] [-x cx] [-y feetY] [-z cz]
  *                         [-colscale f] [-neutralcol] [-flipy] [-notex] [-tag T]
  *                         [-charprop PROP.mesh PROP_TEX.rgba]  (attached prop, e.g. the gun)
+ *                         [-charruns S:C,S:C,...]  (draw the character's triangle ranges
+ *                          [S, S+C) as separate draws in this order; must cover every
+ *                          triangle once. Game draw order, export_p000_gpu2.py)
  *
  * Additive: links renderer_gl/gl_api/gfx_context/libdtex READ-ONLY, modifies none.
  */
@@ -51,6 +54,7 @@
 #endif
 
 #define MAXG 64
+#define MAXRUNS 64
 
 typedef struct { RVertex *v; size_t n; float bbmin[3], bbmax[3];
                  unsigned char *tex; int tw, th; char texname[64];
@@ -235,6 +239,7 @@ int main(int argc, char **argv) {
                                  the dump-positioned glow tris spill past our boots */
     int char_two_sided = 0;   /* -chartwosided 1|2: see rgl_scene_draw.two_sided */
     const char *propmesh = NULL, *proptex = NULL;   /* -charprop MESH TEX: attached prop (gun) */
+    const char *charruns = NULL;                     /* -charruns S:C,...: character draw order */
 
     for (int i = 1; i < argc; i++) {
         if      (!strcmp(argv[i], "-l")  && i+1<argc) listpath = argv[++i];
@@ -261,6 +266,7 @@ int main(int argc, char **argv) {
         }
         else if (!strcmp(argv[i], "-charglow") && i+2<argc) { glowmesh = argv[++i]; glowtex = argv[++i]; }
         else if (!strcmp(argv[i], "-charprop") && i+2<argc) { propmesh = argv[++i]; proptex = argv[++i]; }
+        else if (!strcmp(argv[i], "-charruns") && i+1<argc) charruns = argv[++i];
         else if (!strcmp(argv[i], "-charglowbias") && i+1<argc) glow_bias = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "-chartwosided") && i+1<argc) char_two_sided = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-ambient") && i+1<argc) {
@@ -474,7 +480,7 @@ int main(int argc, char **argv) {
     }
 
     /* draws: every env group PRELIT + its texture, then the character LIT + body */
-    rgl_scene_draw draws[MAXG + 3];
+    rgl_scene_draw draws[MAXG + 2 + MAXRUNS];
     memset(draws, 0, sizeof draws);
     for (int i = 0; i < ng; i++) {
         draws[i].verts = g[i].v; draws[i].vcount = g[i].n;
@@ -527,6 +533,40 @@ int main(int argc, char **argv) {
         printf("atest : character ref %.4f (blend, depth only where As >= ref)\n", char_aref);
     }
     int ndraws = ng + 1;
+
+    /* -charruns: split the character into triangle ranges drawn in the given order
+     * (the game's group order: opaque groups, then the deferred alpha groups and the
+     * cape). Each run is its own draw with the character's settings, so a GS ATE run's
+     * two passes stay local to it. Without the flag: one draw, as before. */
+    if (charruns) {
+        size_t ntri = cn / 3, rs[MAXRUNS], rc[MAXRUNS]; int nr = 0;
+        unsigned char *cov = (unsigned char *)calloc(ntri ? ntri : 1, 1);
+        const char *q = charruns; int bad = !cov;
+        while (!bad && *q) {
+            char *e1 = NULL, *e2 = NULL;
+            unsigned long a = strtoul(q, &e1, 10);
+            if (e1 == q || *e1 != ':') { bad = 1; break; }
+            unsigned long c = strtoul(e1 + 1, &e2, 10);
+            if (e2 == e1 + 1 || (*e2 && *e2 != ',') || nr >= MAXRUNS || c == 0 || a >= ntri || c > ntri - a) { bad = 1; break; }
+            for (size_t t = a; t < a + c; t++) { if (cov[t]) bad = 1; cov[t] = 1; }
+            rs[nr] = a; rc[nr] = c; nr++;
+            q = *e2 ? e2 + 1 : e2;
+        }
+        for (size_t t = 0; !bad && t < ntri; t++) if (!cov[t]) bad = 1;
+        free(cov);
+        if (bad || nr == 0) {
+            fprintf(stderr, "-charruns '%s': want S:C,... ranges covering each of the %zu "
+                    "character triangles exactly once (max %d runs)\n", charruns, ntri, MAXRUNS);
+            return 2;
+        }
+        rgl_scene_draw base = draws[ng];
+        for (int r = 0; r < nr; r++) {
+            draws[ng + r] = base;
+            draws[ng + r].verts = placed + 3 * rs[r]; draws[ng + r].vcount = 3 * rc[r];
+        }
+        ndraws = ng + nr;
+        printf("char  : %d draw runs (-charruns)\n", nr);
+    }
 
     /* -charglow: Vincent's additive 0x2ee8 pass (p000_glow.py), placed exactly like
      * the character (pivot = the CHARACTER mesh bbox), drawn after it, PRELIT. */
