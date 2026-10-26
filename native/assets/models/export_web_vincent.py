@@ -7,6 +7,8 @@ gitignored directory (default native/web/data/vincent/, checked with git check-i
                                                    [--clips all|NAME,NAME,...] [--sets c,h]
   verify:  python3 -I export_web_vincent.py verify <dump.bin> [--out DIR] [--glb FILE]
                                                    [--clip h_wk --frames 0,13,27]
+           A clip that isn't in vincent.json is looked up in the vincent_<pack>.json sidecars;
+           it is then skinned with vincent.glb's mesh and the pack glb's tracks.
   catalogue: python3 -I export_web_vincent.py catalogue [--out DIR]   -> DIR/motions.json
 
   --clips: default h_st,h_wk,h_rn (byte-identical to the original 3-clip export). 'all' =
@@ -509,16 +511,18 @@ def export(dump, out, mutate_parents=False, clip_spec=None, sets=DEFAULT_SETS, p
 
 
 # ---------------------------------------------------------------- verify
-def skin_glb(path, clip, frame):
-    """Skin the glb's own data at an integer clip frame (keys sit on frames), model space."""
+def skin_glb(path, clip, frame, anim_path=None):
+    """Skin the glb's own data at an integer clip frame (keys sit on frames), model space.
+    anim_path: take the clip's tracks from this glb instead (a clip pack: same joint nodes)."""
     j, acc = read_glb(path)
-    an = next(a for a in j['animations'] if a['name'] == clip)
+    ja, acca = read_glb(anim_path) if anim_path else (j, acc)
+    an = next(a for a in ja['animations'] if a['name'] == clip)
     sk = j['skins'][0]; ibm = acc(sk['inverseBindMatrices']).reshape(-1, 4, 4).transpose(0, 2, 1)
     node2j = {n: k for k, n in enumerate(sk['joints'])}
     T = {}; Q = {}; S = {}
     for ch in an['channels']:
-        s = an['samplers'][ch['sampler']]; out = acc(s['output']).astype(float)
-        tm = acc(s['input']); f = int(np.argmin(np.abs(tm - frame / FPS)))
+        s = an['samplers'][ch['sampler']]; out = acca(s['output']).astype(float)
+        tm = acca(s['input']); f = int(np.argmin(np.abs(tm - frame / FPS)))
         {'translation': T, 'rotation': Q, 'scale': S}[ch['target']['path']][node2j[ch['target']['node']]] = out[f]
     J = []
     for k in range(len(sk['joints'])):
@@ -537,12 +541,22 @@ def verify(dump, out, glb, clip, frames):
     check_ignored(out)
     chk = os.path.join(out, "_ref_check"); os.makedirs(chk, exist_ok=True)
     side = json.load(open(os.path.join(out, 'vincent.json'))); nb = side['body_triangles'] * 3
+    anim = None
+    if clip not in side['clips']:              # a pack clip: its sidecar + the pack's tracks
+        import glob
+        for pj in sorted(glob.glob(os.path.join(out, 'vincent_*.json'))):
+            pc = json.load(open(pj)).get('clips', {})
+            if clip in pc:
+                side = dict(side, clips=pc); anim = pj[:-5] + '.glb'; break
+        else:
+            sys.exit(f"{clip}: not in vincent.json or any vincent_*.json pack")
+        print(f"{clip}: pack clip, tracks from {os.path.basename(anim)}")
     ci = side['clips'][clip]; cont = NOPATH + ci['container'] if 'container' in ci else None
     res = {}
     for f in frames:
         run_ref(dump, chk, clip, f, cont)
         ref = read_mesh(os.path.join(chk, "vincent_p000.mesh"))[:, :3].astype(float)
-        X = skin_glb(glb, clip, f)
+        X = skin_glb(glb, clip, f, anim)
         if ci.get('in_place_axes') == 'xyz':   # gpu2 --in-place keeps bone 1 y: add it back
             X[:, 1] -= ci['root_motion_per_frame_glb'][f][1]   # glb y = -model y
         e = np.linalg.norm(X - ref, axis=1)

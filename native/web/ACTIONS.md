@@ -90,3 +90,7 @@ animation. The gun's own reload clip (07770580, gun bone 3 turns ~82 deg) isn't 
 - **shoot**: `h_st_a` / `_ad` / `_au` aim loops (level / down / up), `h_st_f` / `_fd` / `_fu`
   fire one-shots (15 f), the same for `h_sq_*` (crouched) and `h_wk_*` / `h_rn_*` (moving,
   use `{locomotion: true}`); `ctx.camera.setMode('aim', {...})` for the aim camera.
+  Aimed strafe and backpedal are run clips only: `h_brn_*` (back), `h_lrn_*` (left) and
+  `h_rrn_*` (right), each with `_a`/`_au`/`_ad`. There is no aimed strafe walk, so a sideways
+  walk plays the run at a lower rate. Rebuild the shoot pack with them:
+  `python3 -I native/assets/models/export_web_vincent.py export tools/gsdump/dumps/z128_hero_163235.bin --pack shoot --clips h_wk_a,h_rn_a,h_sq_a,h_st_a,h_sq_f,h_st_f,h_wk_ad,h_rn_ad,h_sq_ad,h_st_ad,h_sq_fd,h_st_fd,h_wk_rd,h_rn_rd,h_sq_rd,h_st_rd,h_swtch,h_wk_au,h_rn_au,h_sq_au,h_st_au,h_sq_fu,h_st_fu,h_fwk_rd,h_sqm_rd,h_frn_rd,h_brn_a,h_brn_au,h_brn_ad,h_lrn_a,h_lrn_au,h_lrn_ad,h_rrn_a,h_rrn_au,h_rrn_ad`

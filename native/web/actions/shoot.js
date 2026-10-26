@@ -1,11 +1,17 @@
 // Shoot action (prototype, no enemies): aim, fire, bullets, sparks, muzzle flash, gun.
 //
 // Keys: hold the right mouse button (or Q, for trackpads) to aim; left click / hold fires.
-// While aiming he faces the camera, walks with h_wk_a (Shift: h_rn_a) and blends the
-// level / up / down aim loops (h_*_a / _au / _ad) by the camera pitch, clamped to ±54°
-// (research §4, the normal camera's limit). Fire plays h_st_f / _fu / _fd blended the
-// same way (standing only: the pack has no moving fire clips), at most one shot per
-// fire-clip length (no game rate found).
+// While aiming he faces the camera and blends the level / up / down aim loops
+// (h_*_a / _au / _ad) by the camera pitch, clamped to ±54° (research §4, the normal
+// camera's limit). Moving, he blends the aimed movement sets by the move direction
+// relative to his heading: forward h_wk_a (Shift: h_rn_a), back h_brn_a, left h_lrn_a,
+// right h_rrn_a (the game only has strafe RUNS; walking sideways plays them slower).
+// Each set's direction and speed come from its own root motion; the playback rate is
+// ground speed / clip root speed, so the planted foot stays put. Backwards he moves at
+// most at h_brn's own speed (0.83 u/frame, half the run). Fire plays h_st_f / _fu / _fd
+// standing; moving, the same clips play as an ADDITIVE upper-body overlay on the gait
+// (no game has moving fire clips for any weapon; whether the game overlays is undecoded),
+// at most one shot per fire-clip length (no game rate found).
 //
 // Bullets are moving projectiles (research §4: type-6 actors sweeping previous ->
 // current position each tick). Each 60 Hz tick a bullet moves SPEED units and tests
@@ -40,6 +46,40 @@ const P = {
   turnRate: 16,                         // rad/s toward the camera yaw while aiming
   accel: 14,
 };
+
+// aimed movement sets (clip prefix), each with _a / _au / _ad pitch variants
+const CLIP = { st: 'h_st', wk: 'h_wk', rn: 'h_rn', b: 'h_brn', l: 'h_lrn', r: 'h_rrn' };
+const MOVE = ['wk', 'rn', 'b', 'l', 'r'];
+const SETS = ['st', ...MOVE];
+// phase offsets for syncing the move sets: h_wk_a plants each foot a quarter cycle later
+// than the run-type clips (j85 / j89 lowest at 0.80 / 0.30 vs 0.55 / 0.05 in h_rn_a,
+// h_lrn_a, h_rrn_a; h_brn_a 0.40 / 0.05)
+const PHASE = { wk: 0.25 };
+// fire overlay mask: the upper body = bone 2's subtree (j02..j80, vincent.json
+// joints.parent; legs are j81..j92) minus the cape-only bones (no body triangle uses them),
+// so the legs and cape keep the gait
+const CAPE_ONLY = new Set([39, 40, 41, 42, 44, 45, 46, 48, 49, 50, 72, 73, 74, 76, 77, 78, 79]);
+const upperBody = j => j >= 2 && j <= 80 && !CAPE_ONLY.has(j);
+
+// additive clip: `fire` minus `ref`'s frame 0 (the aim pose the fire clip settles on),
+// upper-body tracks only. Quaternions as ref0^-1 * q, so three.js's current * delta gives
+// the fire pose exactly when the current pose is the standing aim pose.
+function overlayClip(fire, ref) {
+  const tracks = [];
+  for (const t of fire.tracks) {
+    const m = /^j(\d+)\.(\w+)$/.exec(t.name);
+    if (!m || !upperBody(+m[1])) continue;
+    const r = ref.tracks.find(u => u.name === t.name);
+    if (!r) continue;
+    const n = t.getValueSize(), v = t.values.slice(), r0 = Array.from(r.values.slice(0, n));
+    if (m[2] === 'quaternion') {
+      const q0 = new THREE.Quaternion().fromArray(r0).invert(), q = new THREE.Quaternion();
+      for (let i = 0; i < v.length; i += 4) q.fromArray(v, i).premultiply(q0).toArray(v, i);
+    } else for (let i = 0; i < v.length; i++) v[i] -= r0[i % n];
+    const c = t.clone(); c.values = v; tracks.push(c);
+  }
+  return new THREE.AnimationClip(fire.name + '_ovl', fire.duration, tracks, THREE.AdditiveAnimationBlendMode);
+}
 
 // ------------------------------------------------------------ mouse (own listeners)
 const mouse = { right: false, left: false, leftEdge: false };
@@ -110,11 +150,13 @@ export function createAction() {
   const S = {                               // state, exposed for tests (window.__shoot)
     aiming: false, pitch: 0, blend: 0, set: 'st', shots: 0, lastShotTick: -1e9,
     cooldown: 14, firing: 0, bullets: [], marks: [], log: [], fx: 0,
+    dirW: {}, rate: 1, moved: 0,            // direction weights, lead set's rate, ground step
   };
   let view = null;                          // scene bits, found lazily
   let gunState = 'none';                    // none | loading | ok | failed
   let gun = null;
-  let actsBySet = null;                     // { st: {a,au,ad}, wk: ..., rn: ..., fire: {f,fu,fd} }
+  let actsBySet = null;                     // { st|wk|rn|b|l|r: {a,au,ad}, fire, ovl: {a,au,ad} }
+  let setInfo = null;                       // per move set: { clip, frames, speed, dur }
   let w = null;                             // eased weights
   let savedLook = null;
   const cross = typeof document !== 'undefined' ? crosshair() : null;
@@ -166,9 +208,29 @@ export function createAction() {
       return a;
     };
     actsBySet = {};
-    for (const s of ['st', 'wk', 'rn'])
-      actsBySet[s] = { a: mk(`h_${s}_a`, true), au: mk(`h_${s}_au`, true), ad: mk(`h_${s}_ad`, true) };
+    for (const s of SETS)
+      actsBySet[s] = { a: mk(`${CLIP[s]}_a`, true), au: mk(`${CLIP[s]}_au`, true), ad: mk(`${CLIP[s]}_ad`, true) };
     actsBySet.fire = { a: mk('h_st_f', false), au: mk('h_st_fu', false), ad: mk('h_st_fd', false) };
+    actsBySet.ovl = {};
+    for (const [k, f, r] of [['a', 'h_st_f', 'h_st_a'], ['au', 'h_st_fu', 'h_st_au'], ['ad', 'h_st_fd', 'h_st_ad']]) {
+      const fc = lib.get(f), rc = lib.get(r);
+      if (!fc || !rc) { actsBySet.ovl[k] = null; continue; }
+      const a = mixer.clipAction(overlayClip(fc, rc));
+      a.setLoop(THREE.LoopOnce, 1); a.clampWhenFinished = true;
+      actsBySet.ovl[k] = a;
+    }
+    // direction + speed of each move set from its own root motion. h_lrn_a has no root
+    // track (its _au/_ad and the mirror h_rrn_a move 1.665 u/frame), so take the first
+    // variant that moves.
+    setInfo = {};
+    for (const s of MOVE) {
+      const n = ['_a', '_ad', '_au'].map(x => CLIP[s] + x)
+        .find(x => actsBySet[s][x.slice(CLIP[s].length + 1)] && ctx.motions?.[x]?.speed_units_per_frame > 1e-3);
+      if (!n) continue;
+      const dur = actsBySet[s][n.slice(CLIP[s].length + 1)].getClip().duration;
+      const speed = ctx.motions[n].speed_units_per_frame;
+      setInfo[s] = { clip: n, frames: ctx.motions[n].frames, speed, dur, stride: speed * dur * 60 };  // units/cycle
+    }
     const fm = ctx.motions?.h_st_f;
     S.cooldown = fm ? fm.frames - 1 : 14;   // one shot per fire-clip length (duration = (frames-1)/60)
   }
@@ -177,14 +239,27 @@ export function createAction() {
 
   function applyWeights() {
     const b = S.blend, pw = { a: 1 - Math.abs(b), au: Math.max(b, 0), ad: Math.max(-b, 0) };
-    for (const s of ['st', 'wk', 'rn']) {
+    // every move loop follows the heaviest set's normalised phase (same foot, same time)
+    let lead = null, lw = 0;
+    for (const s of MOVE) if (actsBySet[s].a && w.set[s] > lw) { lw = w.set[s]; lead = actsBySet[s].a; }
+    let ph = 0;
+    if (lead) for (const s of MOVE) if (actsBySet[s].a === lead) ph = lead.time / lead.getClip().duration - (PHASE[s] || 0);
+    for (const s of SETS) {
       const set = actsBySet[s], ws = w.in * w.set[s] * (s === 'st' ? 1 - w.fire : 1);
       for (const k of ['a', 'au', 'ad']) if (set[k]) set[k].setEffectiveWeight(ws * pw[k]);
-      // keep the three pitch variants in phase
-      if (set.a) for (const k of ['au', 'ad']) if (set[k]) set[k].time = set.a.time;
+      // keep the three pitch variants (and the move sets) in phase
+      if (s === 'st') { if (set.a) for (const k of ['au', 'ad']) if (set[k]) set[k].time = set.a.time; }
+      else if (lead) {
+        const p = ph + (PHASE[s] || 0), f = p - Math.floor(p);
+        for (const k of ['a', 'au', 'ad']) if (set[k] && set[k] !== lead) set[k].time = f * set[k].getClip().duration;
+      }
     }
-    const f = actsBySet.fire, wf = w.in * w.set.st * w.fire;
-    for (const k of ['a', 'au', 'ad']) if (f[k]) { f[k].setEffectiveWeight(wf * pw[k]); if (f.a) f[k].time = f.a.time; }
+    // fire: full-body clips standing, the additive upper-body overlay on the move sets
+    const f = actsBySet.fire, o = actsBySet.ovl, wf = w.in * w.fire;
+    for (const k of ['a', 'au', 'ad']) {
+      if (f[k]) { f[k].setEffectiveWeight(wf * w.set.st * pw[k]); if (f.a) f[k].time = f.a.time; }
+      if (o[k]) { o[k].setEffectiveWeight(wf * (1 - w.set.st) * pw[k]); if (f.a) o[k].time = f.a.time; }
+    }
   }
 
   // ---- effects clock (bullets, marks, flash): own fixed 60 Hz
@@ -293,11 +368,9 @@ export function createAction() {
     v.flash.material.rotation = Math.random() * Math.PI;
     v.flash.visible = true; v.flashT = P.flashTicks;
     S.lastShotTick = ctx.tick;
-    // fire clip (standing only: there are no h_wk_f / h_rn_f clips)
-    if (S.set === 'st') {
-      for (const a of Object.values(actsBySet.fire)) if (a) { a.reset(); a.play(); }
-      S.firing = S.cooldown;
-    }
+    // fire clip: full body standing, upper-body overlay while moving (weights in applyWeights)
+    for (const a of [...Object.values(actsBySet.fire), ...Object.values(actsBySet.ovl)]) if (a) { a.reset(); a.play(); }
+    S.firing = S.cooldown;
   }
 
   const held = ctx => mouse.right || ctx.input?.keys?.has('KeyQ');
@@ -315,8 +388,8 @@ export function createAction() {
       colRef = ctx.col;
       if (!actsBySet) initActs(ctx);
       for (const a of allActs()) { a.reset(); a.setEffectiveWeight(0); a.play(); }
-      for (const a of Object.values(actsBySet.fire)) if (a) a.stop();
-      w = { in: 0, set: { st: 1, wk: 0, rn: 0 }, fire: 0 };
+      for (const a of [...Object.values(actsBySet.fire), ...Object.values(actsBySet.ovl)]) if (a) a.stop();
+      w = { in: 0, set: Object.fromEntries(SETS.map(s => [s, s === 'st' ? 1 : 0])), fire: 0 };
       S.aiming = true; S.set = 'st'; S.firing = 0;
       mouse.leftEdge = false;
       // aim camera + the wider pitch range
@@ -347,7 +420,33 @@ export function createAction() {
       const len = Math.hypot(inp.x, inp.z);
       const run = inp.run && !!actsBySet.rn.a;
       const sp = (n, d) => (ctx.motions[n]?.speed_units_per_frame ?? d) * c.scale;
-      const target = len > 1e-6 ? (run ? sp('h_rn_a', 1.665) : sp('h_wk_a', 0.7)) : 0;
+      const fwdSet = run ? 'rn' : 'wk';
+      // direction weights, velocity-matched: each set's own root-motion direction u (game
+      // space, current heading) and stride S (units per cycle); w ~ cos(angle) / S, so with
+      // the sets sharing one phase the blended foot velocity sum(w S u) points along the
+      // move. Pure W/A/S/D is one clip; a walk/strafe diagonal is ~62/38. out.stride =
+      // |sum(w S u)|, the blend's stride along the move (world units per cycle).
+      const dirWeights = (dx, dz) => {
+        const out = {}, l = Math.hypot(dx, dz); let tot = 0;
+        if (l < 1e-6) return out;
+        const u = {};
+        for (const s of [fwdSet, 'b', 'l', 'r']) {
+          const si = setInfo[s]; if (!si) continue;
+          const d = ctx.rootDelta(si.clip, 0, si.frames - 1), dl = Math.hypot(d.x, d.z);
+          if (dl < 1e-6) continue;
+          const cs = (dx * d.x + dz * d.z) / (l * dl);
+          if (cs > 1e-3) { out[s] = cs / si.stride; tot += out[s]; u[s] = [d.x / dl, d.z / dl]; }
+        }
+        let vx = 0, vz = 0;
+        for (const s in out) { out[s] /= tot; vx += out[s] * setInfo[s].stride * u[s][0]; vz += out[s] * setInfo[s].stride * u[s][1]; }
+        if (tot) Object.defineProperty(out, 'stride', { value: Math.hypot(vx, vz) * c.scale });
+        return out;
+      };
+      const base = run ? sp('h_rn_a', 1.665) : sp('h_wk_a', 0.7);
+      const wIn = dirWeights(inp.x, inp.z);
+      // backwards: no faster than h_brn's own speed (the game's backpedal is half a run)
+      const backCap = setInfo.b ? Math.min(base, setInfo.b.speed * c.scale) : base;
+      const target = len > 1e-6 ? base * (1 - (wIn.b || 0)) + backCap * (wIn.b || 0) : 0;
       const k = 1 - Math.exp(-P.accel * dt);
       c.vel.x += ((len > 1e-6 ? inp.x / len * target : 0) - c.vel.x) * k;
       c.vel.z += ((len > 1e-6 ? inp.z / len * target : 0) - c.vel.z) * k;
@@ -362,18 +461,28 @@ export function createAction() {
       const dh = Math.atan2(Math.sin(yaw - c.heading), Math.cos(yaw - c.heading));
       const mx = P.turnRate * dt, heading = c.heading + Math.max(-mx, Math.min(mx, dh));
 
-      // animation set by speed; walk/run play backwards when moving backwards
+      // animation: blend the move sets by the direction he actually moved (walls included)
       const moved = Math.hypot(delta.x, delta.z);
-      const fwd = delta.x * Math.sin(heading) + delta.z * Math.cos(heading);
-      const want = moved < 0.12 * sp('h_wk_a', 0.7) ? 'st' : (run ? 'rn' : 'wk');
-      S.set = want;
+      const moving = moved >= 0.12 * sp('h_wk_a', 0.7);
+      let dw = moving ? dirWeights(delta.x, delta.z) : {};
+      let reverse = false;
+      if (moving && !Object.keys(dw).length) { dw = { [fwdSet]: 1 }; reverse = true; }  // no b/l/r clips loaded
+      let lead = 'st', lw = 0;
+      for (const s in dw) if (dw[s] > lw) { lw = dw[s]; lead = s; }
+      S.set = lead; S.dirW = dw; S.moved = moved;
       const kw = 1 - Math.exp(-dt / 0.1);
-      for (const s of ['st', 'wk', 'rn']) w.set[s] += ((s === want ? 1 : 0) - w.set[s]) * kw;
+      for (const s of SETS) w.set[s] += ((s === 'st' ? (moving ? 0 : 1) : (dw[s] || 0)) - w.set[s]) * kw;
       w.in = Math.min(1, w.in + dt / 0.15);
-      if (want !== 'st') {
-        const set = actsBySet[want], base = sp(`h_${want}_a`, 0.7);
-        const rate = Math.max(0.3, Math.min(1.6, moved / base)) * (fwd < -0.2 * moved ? -1 : 1);
-        for (const a of Object.values(set)) if (a) a.setEffectiveTimeScale(rate);
+      if (moving) {
+        // cycles per second = ground speed / the blend's stride (rate 1 = the clip's own speed)
+        const fb = setInfo[lead] || { stride: (lead === 'rn' ? 1.665 : 0.7) * actsBySet[lead].a.getClip().duration * 60,
+                                      dur: actsBySet[lead].a.getClip().duration };
+        const stride = dw.stride || fb.stride * c.scale;
+        const leadDur = setInfo[lead]?.dur ?? fb.dur;
+        const r = Math.max(0.25, Math.min(2, moved * 60 * leadDur / stride));   // lead set's rate
+        const cyc = r / leadDur;
+        for (const s of MOVE) for (const a of Object.values(actsBySet[s])) if (a) a.setEffectiveTimeScale(cyc * a.getClip().duration * (reverse ? -1 : 1));
+        S.rate = cyc * (setInfo[lead]?.dur ?? 1);
       }
 
       // fire
