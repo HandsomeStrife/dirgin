@@ -40,6 +40,11 @@ typedef struct {
     uint32_t v[3];       /* indices into cid_mesh.verts                          */
     uint32_t surface;    /* per-face surface/flag word (see FORMAT.md 5); 0 = none */
     uint8_t  source;     /* cid_tri_source                                       */
+    uint16_t mask;       /* tag-2: packet surface-type mask (pkt+0x08), the bits the
+                          * game's query flags select on (FORMAT.md 5); 0 for tag-0/v2 */
+    uint8_t  subtree;    /* v>=9: sub-tree index 0..3 = payload +0x38/+0x58/+0x78/+0x98
+                          * (+0x38 segment query, +0x58 floor ray, +0x98 nearest;
+                          * see FORMAT.md 3). 0 for v2.                         */
 } cid_tri;
 
 /* A coarse axis-aligned box standing in for a tag-2 (VU-packed) collision leaf

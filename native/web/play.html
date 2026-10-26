@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dirge z128 play</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #181a20; overflow: hidden; }
+  canvas { display: block; width: 100vw; height: 100vh; touch-action: none; }
+  #hud { position: fixed; left: 8px; top: 8px; font: 12px/1.4 ui-monospace, Menlo, monospace;
+         color: #e6e6e6; background: rgba(0,0,0,.55); padding: 6px 8px; border-radius: 4px;
+         pointer-events: none; white-space: pre; }
+  #msg { position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+         font: 14px ui-monospace, Menlo, monospace; color: #ccc; pointer-events: none; }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<div id="hud"></div>
+<div id="msg">loading…</div>
+<script type="module" src="play.js"></script>
+</body>
+</html>

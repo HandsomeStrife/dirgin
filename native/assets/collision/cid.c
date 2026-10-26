@@ -59,6 +59,8 @@ typedef struct {
     vec tris;    /* cid_tri  */
     vec boxes;   /* cid_box  */
     int oom;
+    uint16_t cur_mask;   /* tag-2 packet surface-type mask (pkt+0x08); 0 otherwise */
+    uint8_t cur_subtree; /* sub-tree being walked (0..3 = +0x38/+0x58/+0x78/+0x98) */
 } builder;
 
 static uint32_t push_vert(builder *bd, float x, float y, float z) {
@@ -69,6 +71,7 @@ static uint32_t push_vert(builder *bd, float x, float y, float z) {
 static void push_tri(builder *bd, uint32_t a, uint32_t b, uint32_t c,
                      uint32_t surf, uint8_t src) {
     cid_tri t; t.v[0] = a; t.v[1] = b; t.v[2] = c; t.surface = surf; t.source = src;
+    t.subtree = bd->cur_subtree; t.mask = bd->cur_mask;
     if (!vec_push(&bd->tris, &t)) bd->oom = 1;
 }
 
@@ -264,6 +267,7 @@ static int decode_vu_packet(blob *b, builder *bd, size_t pkt, cid_mesh *out) {
     int16_t qwc   = (int16_t)rd_u16(b, pkt + 0x0e, &ok);
     uint16_t smask = rd_u16(b, pkt + 0x08, &ok);
     if (!ok || qwc <= 0) return -1;
+    bd->cur_mask = smask;
     size_t nwords_total = (size_t)qwc * 4;
     if (!in_range(b, pkt, (size_t)qwc * 16)) return -1;
 
@@ -410,6 +414,7 @@ static void parse_vu_node(blob *b, builder *bd, size_t node, cid_mesh *out) {
         uint32_t pkt = rd_u32(b, node + 0x40 + (size_t)p * 4, &ok);
         if (!ok || (size_t)pkt >= b->len) { out->n_tag2_pkts_boxed++; continue; }
         int tris = decode_vu_packet(b, bd, (size_t)pkt, out);
+        bd->cur_mask = 0;
         if (bd->oom) return;
         if (tris >= 0) { out->n_tag2_pkts_decoded++; node_tris += tris;
                          out->n_tag2_tris += tris; }
@@ -427,6 +432,7 @@ static void parse_tree(blob *b, builder *bd, cid_mesh *out) {
 
     for (int s = 0; s < 4; s++) {
         size_t sub = SUBTREE_OFF[s];
+        bd->cur_subtree = (uint8_t)s;
         int k = 1;
         int32_t  ncount = rd_i32(b, sub + 0x00, &k);
         uint32_t pool   = rd_u32(b, sub + 0x08, &k);

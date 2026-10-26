@@ -6,8 +6,12 @@ Reversed from the game's own EE code (`/srv/games/dirge-port/analysis/decomp/`,
 or collision-query function it comes from, or a byte pattern consistent across
 files. Nothing here is guessed.
 
-Coordinates are float32 world units, Y-up, right-handed — same space as the map's
-visual BMD (so the exported OBJ overlays the BMD without an axis flip).
+Coordinates are float32 world units in the same space as the map's visual BMD
+(the exported OBJ overlays the BMD without an axis flip). **−Y is up** (gravity
+is +Y): on z128 the sky dome (room_sky.mesh) spans y −1101..−356, Vincent's GS-dump placement (pivot
+= feet = max model Y, no flip) puts his feet on the deck top at y=−98.44, and
+y=0 lies 98 units below that deck. (Earlier revisions of this note said "Y-up";
+that was wrong — corrected 2026-10-26, worker 0045.)
 
 ---
 
@@ -210,7 +214,20 @@ payload `+0x20` (count) / `+0x24` (array ptr, stride 0x10)** by the index the VU
 returns. The native decoder carries the full per-polygon word on each triangle
 as `cid_tri.surface` (falling back to the packet mask when absent).
 
-**Honest gaps:** the exact bit meanings of the surface mask and the
+**Packet-mask test semantics** (`FUN_0026f8a0:51`; UNPROVEN, review 2026-10-26: this formula, applied to the mask census, would test no packets for flags 0x18e, so it is quoted wrong or the player-set filter `mask & 0x80 == 0` does not follow from it): a packet is tested only if
+`(mask & ~(callerFlags|0x100)) != 0` — the caller's flags are an **exclusion**
+set. Character probes pass `0x18e` / `0x18d` (and one caller `0x10f`), so bit
+`0x80` packets are skipped by every character probe. z128 census (sub-tree
++0x58): masks `000a 000e 010a 010e 0104 0004 0108 010c 0102 0008 0106 0002`
+(floors and walls mixed in every mask) plus `0180` — e.g. a 403×347 collision-only
+plane at y=−86, 12 units under the start deck (likely a fall/kill plane). Bit
+meanings beyond that are not enumerated.
+
+**Winding:** with normal `(v1−v0)×(v2−v0)`, walkable tops have **n.y > 0**
+(pointing +Y = down, into the floor); undersides/ceilings have n.y < 0. Checked
+under Vincent's start point (deck top −98.44 n.y=+1, deck bottom −94.5 n.y=−1).
+
+**Gaps:** the exact bit meanings of the surface mask and the
 surface-table entry fields are still not enumerated (most shipped maps have an
 empty table). v2 has no per-face flag at all.
 
@@ -223,7 +240,9 @@ empty table). v2 has no per-face flag at all.
   decoded to real triangles** (int16/int32 `/16` positions, tris+quads, per-face
   surface word), with the exact AABB box kept only as a fallback for leaves that
   yield no geometry; surface-table size.
-* Output: `cid_mesh { verts, tris(+surface,+source), boxes, bbox }`; OBJ export
+* Output: `cid_mesh { verts, tris(+surface,+source,+mask,+subtree), boxes,
+  bbox }` (`mask` = tag-2 packet surface mask, `subtree` = 0..3 for
+  +0x38/+0x58/+0x78/+0x98); OBJ export
   (`--boxes` adds any fallback AABBs) grouped by source (`inline_quad` /
   `indexed` / `vu_packed`).
 
@@ -241,3 +260,40 @@ empty table). v2 has no per-face flag at all.
    byte-diffed against v19 field-by-field.
 4. Interior (non-leaf) node fields of the v2 tree (child offsets) are skipped;
    the leaf signature scan recovers all v2 geometry regardless.
+
+## 8. Web export: DCOL v1 (`cidweb`, `cid_query.py`)
+
+`make z128web` → `out/web/z128_collision.bin` (gitignored: derived game data).
+`cidweb <out.bin> <mapid.rfd>...` merges any number of CID files (z128 = the 13
+chunk files `0680{00..0c}11.bin`; 00 and 0c are empty) and welds vertices by
+exact float bits. Little-endian; every section is 4-byte aligned, so each can
+be wrapped directly as a JS typed array.
+
+| off  | type            | field                                        |
+|------|-----------------|----------------------------------------------|
+| 0x00 | char[4]         | `"DCOL"`                                     |
+| 0x04 | u32             | version = 1                                  |
+| 0x08 | u32             | nverts                                       |
+| 0x0c | u32             | ntris                                        |
+| 0x10 | f32[3]          | bbox min (x,y,z)                             |
+| 0x1c | f32[3]          | bbox max                                     |
+| 0x28 | u32             | nfiles merged                                |
+| 0x2c | u32             | reserved (0)                                 |
+| 0x30 | f32[nverts*3]   | vertices x,y,z (game units, **−Y up**)       |
+| …    | u32[ntris*3]    | triangle vertex indices                      |
+| …    | u32[ntris]      | surface word (per-polygon S-32 word, §5)     |
+| …    | u32[ntris]      | info: bits 0–1 sub-tree (0=+0x38, 1=+0x58, 2=+0x78, 3=+0x98); bits 2–3 source (`cid_tri_source`); bits 8–15 input file index; bits 16–31 packet mask |
+
+File size = `0x30 + 12·nverts + 20·ntris`. z128: 96,131 verts, 143,920 tris,
+4,032,020 bytes.
+
+**Player set** (what `cid_query.py` uses): sub-tree 1 (+0x58, the floor-probe
+tree) and `mask & 0x80 == 0` → 139,993 tris. Floor = n.y ≥ 0.6; ground = the
+first floor at or below the feet (smallest y ≥ feet−step); walls = everything
+else, pushed out horizontally by a capsule. Sub-tree 0 (+0x38, 3,625 tris,
+tag-0 indexed, mostly flat) is the segment-query tree; not needed for walking.
+
+`python3 -I cid_query.py out/web/z128_collision.bin` runs the self-test
+(ground under the three known Vincent positions, 8-direction walk);
+`… X Z [FEET_Y]` prints the ground under a point.
+
