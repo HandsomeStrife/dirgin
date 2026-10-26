@@ -12,25 +12,48 @@ dome spans y -1101..-356, the deck Vincent stands on is at y=-98.44, y=0 is belo
 it). Same frame as the room meshes (out/z128_room_v2) and Vincent's placement
 (feet y). A web viewer that wants +Y up negates y (and z, to keep handedness).
 
-Rules (each one checked on z128, see the worker-0045 report):
-  * Player set = sub-tree 1 (payload +0x58, the tree the game's floor probe
-    FUN_002714d0 walks) minus packets whose surface mask has bit 0x80 (every
-    character probe flag set, 0x18e / 0x18d, excludes that bit: e.g. a
-    collision-only plane at y=-86 over the start point). Sub-tree 0 (+0x38) is
-    a separate small tree the segment query uses; not needed for walking.
-  * Floors are triangles whose normal (b-a)x(c-a) has y >= FLOOR_NY, i.e. the
-    stored winding makes that normal point DOWN into the floor (+Y). Checked
-    under the start point: deck top -98.44 has ny=+1, the deck's bottom face
-    -94.5 has ny=-1. Ceilings/undersides have ny <= -FLOOR_NY.
+Rules (decoded from the EE code, worker 0053; see FORMAT.md section 5):
+  * Packet test (FUN_0026f8a0, checked in the machine code at 0x26f934..60): a
+    sub-tree-1 packet is tested only if (mask & ~(flags | 0x100)) != 0. Every
+    character probe flag word is 0x180 | (0xf minus one bit), so each probe
+    selects one class bit: 0x18d -> 0x02 (the ground ray FUN_002db1f0),
+    0x18b -> 0x04, 0x187 -> 0x08, 0x18e -> 0x01 (edge probes FUN_00551e80).
+    Bits 0x80/0x100 never make a packet testable on their own.
+  * Player set = every sub-tree-1 (+0x58) packet some character probe tests
+    (mask & 0x0e != 0). Which class the player's wall probe uses is NOT
+    decoded; 0x04 holds the invisible blockers (the 0x0104 plane at the deck
+    railing, z=-1120.1), 0x0a/0x0e the visible geometry, so all three are kept.
+    Masks with no class bit (0x80, 0x180: e.g. the y=-86 plane 12 units under
+    the start deck) are not player collision. On z128 this equals the old
+    "mask & 0x80 == 0" set plus 112 far-off floor tris (masks 0x84/0x88/0x8c/0x8e).
+  * Sub-tree 0 (+0x38, tag-0 faces) is NOT used: the character physics
+    FUN_0035a440 does gather it (via FUN_0026a548) for a sphere push, but as a
+    floor it sits up to 1 unit above the visible walkway east of the start and
+    rises to 4.8 above it near x=-1252, where sub-tree 1 matches the visible
+    surface exactly (worker 0053 headless walks).
+  * The game's ray/polygon test is two-sided (FUN_0026f578 accepts either
+    edge sign), so floors are triangles with |normal.y| >= FLOOR_NY in either
+    winding. Walls are the rest.
   * Ground = the first floor at or below the feet (smallest y >= feet_y -
     STEP_UP: the feet may snap UP by at most STEP_UP; stairs rise ~3.4).
+    Under the start point that is the deck top (-98.44), not its underside
+    (-94.5).
 """
 import math, struct, sys
 from array import array
 
-FLOOR_NY = 0.6      # cos(53 deg): the 45-degree ramps are walkable
+FLOOR_NY = 0.55     # cos(56.6 deg): 45-degree ramps and the 55-degree walkway bevels (n.y 0.57) are floor
 STEP_UP = 5.0       # max rise the feet snap up onto (stairs are ~3.4)
 CELL = 32.0         # XZ grid cell size for the broad phase
+# Character probe flag words (FUN_0054fc38 table at 0x58c990, FUN_002db1f0, ...).
+PROBE_FLAGS = (0x18d, 0x18b, 0x187)
+
+
+def in_player_set(inf):
+    """info word (FORMAT.md section 8) -> is this triangle player collision?"""
+    st = inf & 3
+    m = inf >> 16
+    return st == 1 and any(m & ~(f | 0x100) & 0xffff for f in PROBE_FLAGS)
 
 
 class Collision:
@@ -54,7 +77,7 @@ class Collision:
         v = self.v
         for t in range(nt):
             inf = info[t]
-            if not include_all and ((inf & 3) != 1 or (inf >> 16) & 0x80):
+            if not include_all and not in_player_set(inf):
                 continue
             i, j, k = tri[3 * t], tri[3 * t + 1], tri[3 * t + 2]
             ax, ay, az = v[3 * i], v[3 * i + 1], v[3 * i + 2]
@@ -108,7 +131,7 @@ class Collision:
         return T[1] + u * (T[4] - T[1]) + v * (T[7] - T[1])
 
     def ground_height(self, x, z, feet_y=None, step_up=STEP_UP):
-        """First floor (normal.y >= FLOOR_NY) under (x,z), counting from
+        """First floor (|normal.y| >= FLOOR_NY) under (x,z), counting from
         feet_y - step_up downwards (-Y is up, so 'below' = larger y): the
         smallest y >= feet_y - step_up. feet_y=None: the topmost floor.
         Returns (y, normal, surface) or None if there is no floor below."""
@@ -116,7 +139,7 @@ class Collision:
         lim = None if feet_y is None else feet_y - step_up
         for i in self.cells(x, z, x, z):
             T = self.tris[i]
-            if T[10] < FLOOR_NY:
+            if abs(T[10]) < FLOOR_NY:
                 continue
             y = self.surface_y(T, x, z)
             if y is None or (lim is not None and y < lim):
@@ -171,7 +194,7 @@ class Collision:
         the step do not block; the ground query handles them) to height above
         the feet. Above = smaller y.
         It is tested as spheres of `radius` spaced <= radius apart along that
-        axis. Floors (normal.y >= FLOOR_NY) are ignored. Returns (x, z, hit)."""
+        axis. Floors (|normal.y| >= FLOOR_NY) are ignored. Returns (x, z, hit)."""
         y0 = feet_y - step_up - radius
         y1 = feet_y - height + radius
         n = max(1, int(math.ceil((y0 - y1) / radius)))
@@ -181,7 +204,7 @@ class Collision:
             moved = False
             for i in self.cells(x - radius, z - radius, x + radius, z + radius):
                 T = self.tris[i]
-                if T[10] >= FLOOR_NY:
+                if abs(T[10]) >= FLOOR_NY:
                     continue
                 for sy in ys:
                     qx, qy, qz = self.closest_on_tri(x, sy, z, T)

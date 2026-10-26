@@ -12,10 +12,16 @@ const wrapPi = a => Math.atan2(Math.sin(a), Math.cos(a));
 // ---------------------------------------------------------------- controller
 // Speeds are world units per tick (one 60 Hz game frame).
 export class PlayerController {
+  // Falling (not decoded from the game; a plain stand-in): when the floor is more
+  // than snapDown below the feet, or missing, he leaves the ground and falls with
+  // `gravity` (units/tick^2, +y is down) capped at maxFall, landing on the first
+  // floor his feet pass. killDepth below the spawn (+y) respawns him.
   constructor(col, { pos, heading = 0, walkSpeed, runSpeed, radius = 3.5, height = 19,
-                     accel = 14, turnRate = 11 } = {}) {
+                     accel = 14, turnRate = 11, snapDown = 4, gravity = 0.05, maxFall = 6,
+                     killDepth = 500 } = {}) {
     this.col = col;
-    this.opts = { radius, height };
+    this.opts = { radius, height, maxDrop: snapDown };
+    this.gravity = gravity; this.maxFall = maxFall; this.killDepth = killDepth;
     this.walkSpeed = walkSpeed; this.runSpeed = runSpeed;
     this.accel = accel;                           // 1/s: velocity eases toward the target
     this.turnRate = turnRate;                     // rad/s: max turn speed of the body
@@ -31,6 +37,7 @@ export class PlayerController {
     this.vel = { x: 0, z: 0 };                    // intended horizontal velocity (units/tick)
     this.speed = 0;                               // measured ground speed (units/tick), smoothed
     this.onGround = true; this.hitWall = false; this.stuck = false;
+    this.vy = 0;                                  // vertical speed while falling (units/tick, +y down)
     this.ticks = 0;
   }
 
@@ -49,12 +56,19 @@ export class PlayerController {
     if (target === 0 && Math.hypot(this.vel.x, this.vel.z) < 0.01) this.vel.x = this.vel.z = 0;
 
     let moved = 0;
-    if (this.vel.x || this.vel.z) {
+    if (!this.onGround) {
+      moved = this.fall();
+    } else if (this.vel.x || this.vel.z) {
       const r = this.col.move(this.pos, { x: this.vel.x, z: this.vel.z }, this.opts);
-      this.stuck = r.x === this.pos.x && r.z === this.pos.z;
-      moved = Math.hypot(r.x - this.pos.x, r.z - this.pos.z);
-      this.pos = { x: r.x, y: r.y, z: r.z };
-      this.onGround = r.onGround; this.hitWall = r.hitWall;
+      if (!r.onGround) {                          // walked off an edge: start falling
+        this.onGround = false; this.vy = 0;
+        moved = this.fall();
+      } else {
+        this.stuck = r.x === this.pos.x && r.z === this.pos.z;
+        moved = Math.hypot(r.x - this.pos.x, r.z - this.pos.z);
+        this.pos = { x: r.x, y: r.y, z: r.z };
+        this.onGround = true; this.hitWall = r.hitWall;
+      }
       // pressing into a wall: don't keep building velocity into it
       if (r.hitWall && moved < 0.5 * Math.hypot(this.vel.x, this.vel.z)) {
         const f = moved / Math.max(1e-6, Math.hypot(this.vel.x, this.vel.z));
@@ -62,6 +76,9 @@ export class PlayerController {
       }
     } else {
       this.hitWall = false; this.stuck = false;
+      // standing still: the floor can still be gone (spawned in the air)
+      const g = this.col.groundY(this.pos.x, this.pos.z, this.pos.y);
+      if (g === null || g - this.pos.y > this.opts.maxDrop) { this.onGround = false; this.vy = 0; moved = this.fall(); }
     }
     // measured ground speed, lightly smoothed so wall scrapes don't flicker the clip
     this.speed += (moved - this.speed) * (1 - Math.exp(-20 * TICK));
@@ -75,6 +92,23 @@ export class PlayerController {
       this.heading = wrapPi(this.heading + Math.max(-max, Math.min(max, d)));
     }
     this.ticks++;
+  }
+
+  // One airborne tick: horizontal move pushed out of walls, then gravity; land on
+  // the first floor at or below the feet before this tick. Returns the horizontal distance.
+  fall() {
+    const { radius, height } = this.opts, p = this.pos;
+    let nx = p.x + this.vel.x, nz = p.z + this.vel.z, hit = false;
+    if (this.col.capsulePush) [nx, nz, hit] = this.col.capsulePush(nx, p.y, nz, radius, height);
+    this.vy = Math.min(this.vy + this.gravity, this.maxFall);
+    const g = this.col.groundY(nx, nz, p.y, 0);   // no step up while falling
+    let y = p.y + this.vy;
+    if (g !== null && y >= g) { y = g; this.onGround = true; this.vy = 0; }
+    const moved = Math.hypot(nx - p.x, nz - p.z);
+    this.pos = { x: nx, y, z: nz };
+    this.hitWall = hit; this.stuck = false;
+    if (y > this.spawn.y + this.killDepth) this.reset();
+    return moved;
   }
 
   // render-time pose between the last two ticks

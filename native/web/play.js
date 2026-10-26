@@ -7,6 +7,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { TICK, PlayerController, SpeedAnimator, FollowCamera } from './player.js';
+import { initReport } from './report.js';
 
 const params = new URLSearchParams(location.search);
 const hud = document.getElementById('hud');
@@ -15,6 +16,30 @@ if (params.get('hud') === '0') hud.style.display = 'none';
 
 const SPAWN = { x: -1395.63, z: -1110.51 };
 const ROOT_PER_FRAME = { walk: 0.525, run: 1.665 };   // clip root motion, glb units per 60 Hz frame
+// The glb's origin is not at his soles: export_web_vincent.py centres the root on the
+// bind-pose body (feet at model y = 12.13), but the in-place clips put the feet near
+// model y = 0, so every clip draws him ~11.67 world units above the origin (worker 0053).
+// measureSole() finds the lowest skinned vertex in h_st frame 0 at load and the body is
+// shifted by that much, so his soles sit on the controller's feet. Measured: h_st
+// -11.670 (constant), h_wk -11.58..-11.68 (planted foot), h_rn -11.56 lowest.
+let FEET_OFFSET = 0;
+
+// Lowest point (largest y, -Y up) of the skinned body relative to body.position, in
+// world units, for the pose the mixer currently holds.
+function measureSole(vin, root) {
+  root.updateMatrixWorld(true);
+  const v = new THREE.Vector3();
+  let maxY = -Infinity;
+  for (const m of vin.prims) {
+    if (!m.isSkinnedMesh) continue;
+    const n = m.geometry.attributes.position.count;
+    for (let i = 0; i < n; i++) {
+      m.getVertexPosition(i, v); v.applyMatrix4(m.matrixWorld);
+      if (v.y > maxY) maxY = v.y;
+    }
+  }
+  return maxY - vin.body.position.y;
+}
 
 // ------------------------------------------------------------ room (from main.js)
 const VS = `
@@ -117,9 +142,10 @@ async function loadRoom() {
     tx.needsUpdate = true;
     textures[id] = tx;
   }
-  const attrs = {};
+  const attrs = {}, floats = {};
   for (const [id, m] of meshes) {
-    const ib = new THREE.InterleavedBuffer(new Float32Array(bufs[m.file]), 12);
+    floats[id] = new Float32Array(bufs[m.file]);   // the Report ray cast reads these
+    const ib = new THREE.InterleavedBuffer(floats[id], 12);
     attrs[id] = {
       position: new THREE.InterleavedBufferAttribute(ib, 3, 0),
       uv: new THREE.InterleavedBufferAttribute(ib, 2, 6),
@@ -139,10 +165,11 @@ async function loadRoom() {
       const mesh = new THREE.Mesh(g, makeMaterial(scene, tex, d, mode));
       mesh.frustumCulled = false; mesh.matrixAutoUpdate = false;
       mesh.name = d.name + (mode ? `#ate${mode}` : '');
+      mesh.userData = { draw: scene.draws.indexOf(d), mode };   // index into scene.draws, as in main.js (report.js)
       root.add(mesh);
     }
   }
-  return { scene, root, lo, hi };
+  return { scene, root, lo, hi, floats };
 }
 
 // ------------------------------------------------------------ Vincent
@@ -201,7 +228,7 @@ async function loadCol() {
 
 // ------------------------------------------------------------ main
 async function main() {
-  const [{ scene, root, lo, hi }, { col, name: colName }] = await Promise.all([loadRoom(), loadCol()]);
+  const [{ scene, root, lo, hi, floats }, { col, name: colName }] = await Promise.all([loadRoom(), loadCol()]);
   const vin = await loadVincent(scene.char.s || 1);
   msg.style.display = 'none';
   root.add(vin.body);
@@ -236,6 +263,10 @@ async function main() {
     walkSpeed: rootSpeed.walk, runSpeed: rootSpeed.run, radius: 3.5, height: 19,
   });
   const anim = new SpeedAnimator(vin.mixRoot, vin.clips, rootSpeed, { fade: 0.2 });
+  anim.mixer.update(0);                            // h_st frame 0
+  const sole = measureSole(vin, root);
+  FEET_OFFSET = Number.isFinite(sole) && Math.abs(sole) < 40 ? -sole : 0;
+  if (!Number.isFinite(sole) || Math.abs(sole) >= 40) console.warn('sole measurement failed:', sole);
   const follow = new FollowCamera(camera, col, { dist: 52, pitch: 0.3, targetHeight: 15 });
   follow.yaw = heading0;
 
@@ -253,9 +284,13 @@ async function main() {
 
   // ---- input
   const keys = new Set();
+  let frozen = false;                              // report mode: no input, no simulation
+  const typing = e => /^(INPUT|TEXTAREA)$/.test(e.target.tagName);
   addEventListener('keydown', e => {
+    if (typing(e) || frozen) return;
     keys.add(e.code);
     if (e.code === 'KeyH') { ctrl.reset(); follow.yaw = heading0; follow.pitch = 0.3; detached = null; }
+    if (e.code === 'KeyR') { e.preventDefault(); report.open(); }
     if (e.code === 'Space' || e.code.startsWith('Arrow')) e.preventDefault();
   });
   addEventListener('keyup', e => keys.delete(e.code));
@@ -269,13 +304,13 @@ async function main() {
   addEventListener('mousemove', e => {
     if (document.pointerLockElement !== canvas) return;
     if (skipMove) { skipMove = false; return; }
-    follow.look(clampMv(e.movementX), clampMv(e.movementY));
+    if (!frozen) follow.look(clampMv(e.movementX), clampMv(e.movementY));
   });
   let drag = null;
   canvas.addEventListener('pointerdown', e => { if (!document.pointerLockElement) drag = [e.clientX, e.clientY]; });
   addEventListener('pointerup', () => { drag = null; });
   addEventListener('pointermove', e => {
-    if (!drag || document.pointerLockElement) return;
+    if (!drag || document.pointerLockElement || frozen) return;
     follow.look(e.clientX - drag[0], e.clientY - drag[1]); drag = [e.clientX, e.clientY];
   });
   addEventListener('resize', () => {
@@ -293,13 +328,55 @@ async function main() {
     return { x, z, run: keys.has('ShiftLeft') || keys.has('ShiftRight') };
   }
 
+  // ---- Report button (report.js, shared with the main viewer)
+  const toastEl = document.getElementById('toast');
+  let toastT = 0;
+  function toast(text, ms = 3000) {
+    toastEl.textContent = text; toastEl.style.display = 'block';
+    clearTimeout(toastT); toastT = setTimeout(() => { toastEl.style.display = 'none'; }, ms);
+  }
+  const r4 = v => +v.toFixed(4);
+  // camera in main.js's ?cam= convention: dir = (sin y cos p, -sin p, cos y cos p), degrees
+  function camView() {
+    const d = camera.getWorldDirection(new THREE.Vector3());
+    const yaw = Math.atan2(d.x, d.z) * 180 / Math.PI, pitch = Math.asin(Math.max(-1, Math.min(1, -d.y))) * 180 / Math.PI;
+    const cam = [...camera.position.toArray().map(v => v.toFixed(2)), yaw.toFixed(3), pitch.toFixed(3)].join(',');
+    const link = new URL(location.href);
+    link.search = ''; link.searchParams.set('cam', cam);
+    return { eye: camera.position.toArray().map(r4), dir: d.toArray().map(r4), up: camera.up.toArray().map(r4),
+             yaw: +yaw.toFixed(3), pitch: +pitch.toFixed(3), fov: camera.fov, aspect: +camera.aspect.toFixed(5),
+             near: r4(camera.near), far: +camera.far.toFixed(2), cam,
+             link: link.toString().replace(/%2C/gi, ','), detached: !!detached };
+  }
+  function playerState() {
+    const p = ctrl.pos;
+    const g = col.groundHit ? col.groundHit(p.x, p.z, p.y) : null;
+    return {
+      feet: [p.x, p.y, p.z].map(r4), heading_deg: +(ctrl.heading * 180 / Math.PI).toFixed(2),
+      onGround: ctrl.onGround, vy: r4(ctrl.vy || 0), hitWall: ctrl.hitWall,
+      speed_per_tick: r4(ctrl.speed), clip: anim.current,
+      clipName: { idle: 'h_st', walk: 'h_wk', run: 'h_rn' }[anim.current], rate: r4(anim.rate),
+      clipTime: r4(anim.actions[anim.current].time), feetOffset: FEET_OFFSET,
+      ground: g && { y: r4(g.y), feetError: r4(g.y - p.y), tri: g.tri, subtree: g.subtree,
+                     mask: g.mask === undefined ? null : '0x' + g.mask.toString(16).padStart(4, '0'),
+                     normal: g.normal.map(r4), surface: g.surface },
+      collision: colName, spawn: [ctrl.spawn.x, ctrl.spawn.y, ctrl.spawn.z].map(r4),
+    };
+  }
+  const report = initReport({
+    renderer, camera, root, scene, attrs: floats, toast, view: camView,
+    setFrozen(f) { frozen = f; keys.clear(); drag = null; if (!f) { clock.getDelta(); acc = 0; } },
+    extraMeta: () => ({ page: 'play', player: playerState() }),
+  });
+  document.getElementById('btn-report').addEventListener('click', e => { e.stopPropagation(); report.open(); });
+
   // ---- loop: fixed 60 Hz sim, interpolated render
   const clock = new THREE.Clock();
   let acc = 0, frames = 0, fpsAcc = 0, fps = 0;
   const stats = { ticks: 0, groundErrMax: 0, colName };
   function frame() {
     requestAnimationFrame(frame);
-    const dt = Math.min(clock.getDelta(), 0.25);
+    const dt = frozen ? 0 : Math.min(clock.getDelta(), 0.25);
     acc += dt;
     let n = 0;
     while (acc >= TICK && n < 8) {
@@ -312,7 +389,7 @@ async function main() {
     }
     if (n === 8) acc = 0;                          // fell far behind (tab hidden): drop time
     const pose = ctrl.lerp(acc / TICK);
-    vin.body.position.set(pose.x, pose.y, pose.z);
+    vin.body.position.set(pose.x, pose.y + FEET_OFFSET, pose.z);
     vin.body.rotation.y = bodyYaw(pose.heading);
     anim.update(ctrl.speed, dt);
 
@@ -332,9 +409,10 @@ async function main() {
       `clip ${anim.current} (${{ idle: 'h_st', walk: 'h_wk', run: 'h_rn' }[anim.current]}) x${anim.rate.toFixed(2)}` +
       `   speed ${(ctrl.speed * 60).toFixed(1)} u/s\n` +
       `onGround ${ctrl.onGround}${ctrl.hitWall ? '  WALL' : ''}${follow.blocked ? '  cam pulled in' : ''}\n` +
-      `click: mouse look (drag works too)   WASD move   Shift run   H respawn`;
+      `click: mouse look (drag works too)   WASD move   Shift run   H respawn   R report`;
   }
-  window.__play = { ctrl, anim, follow, col, stats, camera, renderer, root, vin, spawnY: gy, rootSpeed };
+  window.__play = { ctrl, anim, follow, col, stats, camera, renderer, root, vin, spawnY: gy, rootSpeed,
+                    playerState, camView, report, keys };
   requestAnimationFrame(frame);
 }
 

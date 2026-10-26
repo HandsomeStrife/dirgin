@@ -5,15 +5,29 @@
 //
 //   const col = await loadCollision('data/z128_collision.bin');
 //   col.groundY(x, z, feetY)   -> y of the first floor at or below the feet, or null
+//   col.groundHit(x, z, feetY) -> {y, tri, normal, surface, subtree, mask} | null
 //   col.move(pos, delta, opts) -> {x, y, z, onGround, hitWall}
 //   col.segment(a, b)          -> {t, point, tri, normal, surface} | null
 //
 // The rules and the float maths follow cid_query.py line for line (all maths
 // in doubles, triangles visited in the same order), so results match it exactly.
 
-export const FLOOR_NY = 0.6;   // cos(53 deg): the 45-degree ramps are walkable
+export const FLOOR_NY = 0.55;  // cos(56.6 deg): 45-degree ramps and the 55-degree walkway bevels (n.y 0.57) are floor
 export const STEP_UP = 5.0;    // max rise the feet snap up onto (stairs are ~3.4)
 export const CELL = 32.0;      // XZ grid cell size for the broad phase
+// Character probe flag words (FUN_0054fc38 table, FUN_002db1f0 ground ray).
+export const PROBE_FLAGS = [0x18d, 0x18b, 0x187];
+
+// info word (FORMAT.md section 8) -> is this triangle player collision?
+// Every sub-tree-1 packet that some character probe tests: FUN_0026f8a0 tests a
+// packet only if (mask & ~(flags | 0x100)) != 0. Sub-tree 0 is not used (it floats
+// above the visible walkway). See cid_query.py for the decode.
+export function inPlayerSet(inf) {
+  if ((inf & 3) !== 1) return false;
+  const m = inf >>> 16;
+  for (const f of PROBE_FLAGS) if ((m & ~(f | 0x100) & 0xffff) !== 0) return true;
+  return false;
+}
 
 const K = 12;                  // per triangle: a, b, c (9), unit normal (3)
 
@@ -44,15 +58,16 @@ export class Collision {
     if (o !== buf.byteLength) throw new Error('size mismatch');
     // (DCOL is little-endian; every browser we target is too.)
 
-    // Player set: sub-tree 1 and (mask & 0x80) == 0. Drop degenerate triangles.
+    // Player set (inPlayerSet). Drop degenerate triangles.
     const includeAll = !!options.includeAll;
     const T = new Float64Array(nt * K);
     const S = new Uint32Array(nt);     // surface word
     const src = new Uint32Array(nt);   // index of the triangle in the file
+    const inf2 = new Uint32Array(nt);  // its info word (sub-tree, source, file, packet mask)
     let n = 0;
     for (let t = 0; t < nt; t++) {
       const inf = info[t];
-      if (!includeAll && ((inf & 3) !== 1 || ((inf >>> 16) & 0x80))) continue;
+      if (!includeAll && !inPlayerSet(inf)) continue;
       const i = tri[3 * t] * 3, j = tri[3 * t + 1] * 3, k = tri[3 * t + 2] * 3;
       const ax = v[i], ay = v[i + 1], az = v[i + 2];
       const bx = v[j], by = v[j + 1], bz = v[j + 2];
@@ -67,13 +82,14 @@ export class Collision {
       T[p + 3] = bx; T[p + 4] = by; T[p + 5] = bz;
       T[p + 6] = cx; T[p + 7] = cy; T[p + 8] = cz;
       T[p + 9] = nx / ln; T[p + 10] = ny / ln; T[p + 11] = nz / ln;
-      S[n] = surf[t]; src[n] = t;
+      S[n] = surf[t]; src[n] = t; inf2[n] = inf;
       n++;
     }
     this.ntris = n;
     this.T = T.subarray(0, n * K);
     this.S = S.subarray(0, n);
     this.src = src.subarray(0, n);
+    this.info = inf2.subarray(0, n);
 
     // Uniform XZ grid (dense, CSR): each triangle goes in every cell its XZ
     // bbox touches, in triangle order, like the Python dict of lists.
@@ -155,7 +171,7 @@ export class Collision {
     return T[p + 1] + u * (T[p + 4] - T[p + 1]) + v * (T[p + 7] - T[p + 1]);
   }
 
-  // First floor (n.y >= FLOOR_NY) under (x,z), counting from feetY - stepUp
+  // First floor (|n.y| >= FLOOR_NY, either winding: the game's ray is two-sided) under (x,z), counting from feetY - stepUp
   // downwards (+y): the smallest y >= feetY - stepUp. feetY null/undefined:
   // the topmost floor. Returns {y, tri, normal, surface} or null.
   groundHit(x, z, feetY, stepUp = STEP_UP) {
@@ -165,14 +181,16 @@ export class Collision {
     let best = null, bi = -1;
     for (let q = 0; q < m; q++) {
       const i = list[q];
-      if (T[i * K + 10] < FLOOR_NY) continue;
+      if (Math.abs(T[i * K + 10]) < FLOOR_NY) continue;
       const y = this._surfaceY(i, x, z);
       if (y === null || (lim !== null && y < lim)) continue;
       if (best === null || y < best) { best = y; bi = i; }
     }
     if (best === null) return null;
     const p = bi * K;
-    return { y: best, tri: this.src[bi], normal: [T[p + 9], T[p + 10], T[p + 11]], surface: this.S[bi] };
+    const inf = this.info[bi];
+    return { y: best, tri: this.src[bi], normal: [T[p + 9], T[p + 10], T[p + 11]], surface: this.S[bi],
+             subtree: inf & 3, mask: inf >>> 16 };
   }
 
   groundY(x, z, feetY, stepUp = STEP_UP) {
@@ -198,7 +216,7 @@ export class Collision {
       const m = this._cells(x - radius, z - radius, x + radius, z + radius);
       for (let q = 0; q < m; q++) {
         const i = list[q], p = i * K;
-        if (T[p + 10] >= FLOOR_NY) continue;
+        if (Math.abs(T[p + 10]) >= FLOOR_NY) continue;
         for (let s = 0; s < ys.length; s++) {
           const sy = ys[s];
           closestOnTri(x, sy, z, T, p);

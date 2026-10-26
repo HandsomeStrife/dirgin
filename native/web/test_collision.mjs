@@ -46,8 +46,9 @@ for (let i = 0; i < 400; i++) {
 for (let i = 0; i < 300; i++)                        // dense near the start
   ground.push([X0 + (rnd() - 0.5) * 400, Z0 + (rnd() - 0.5) * 400, lerp(-130, -60, rnd())]);
 for (const [, x, z, fy] of SPOTS) { ground.push([x, z, fy]); ground.push([x, z, null]); }
-// Slopes near the floor threshold (0.45 <= n.y < 0.75): centroids, feet just above.
-// Picked from the file itself (the 0x58 tree, mask-free), not from the module under test.
+// Slopes near the floor threshold (0.45 <= |n.y| < 0.75, both windings): centroids,
+// feet just above. Picked from the file itself with an inline copy of the player-set
+// rule (sub-tree 1 with a class bit in 0x0e), not from the module under test.
 {
   const nv = dv.getUint32(8, true), nt = dv.getUint32(12, true);
   const V = new Float32Array(buf.buffer.slice(buf.byteOffset + 0x30, buf.byteOffset + 0x30 + nv * 12));
@@ -55,13 +56,13 @@ for (const [, x, z, fy] of SPOTS) { ground.push([x, z, fy]); ground.push([x, z, 
   const F = new Uint32Array(buf.buffer.slice(buf.byteOffset + 0x30 + nv * 12 + nt * 16, buf.byteOffset + 0x30 + nv * 12 + nt * 20));
   const picks = [];
   for (let t = 0; t < nt; t++) {
-    if ((F[t] & 3) !== 1 || ((F[t] >>> 16) & 0x80)) continue;
+    if ((F[t] & 3) !== 1 || !((F[t] >>> 16) & 0x0e)) continue;
     const a = I[3 * t] * 3, b = I[3 * t + 1] * 3, c = I[3 * t + 2] * 3;
     const ux = V[b] - V[a], uy = V[b + 1] - V[a + 1], uz = V[b + 2] - V[a + 2];
     const wx = V[c] - V[a], wy = V[c + 1] - V[a + 1], wz = V[c + 2] - V[a + 2];
     const nx = uy * wz - uz * wy, ny = uz * wx - ux * wz, nz = ux * wy - uy * wx;
     const l = Math.hypot(nx, ny, nz);
-    if (l > 1e-9 && ny / l >= 0.45 && ny / l < 0.75)
+    if (l > 1e-9 && Math.abs(ny / l) >= 0.45 && Math.abs(ny / l) < 0.75)
       picks.push([(V[a] + V[b] + V[c]) / 3, (V[a + 2] + V[b + 2] + V[c + 2]) / 3, (V[a + 1] + V[b + 1] + V[c + 1]) / 3 - 2]);
   }
   for (let i = 0; i < 300 && picks.length; i++) ground.push(picks[Math.floor(rnd() * picks.length)]);
@@ -154,7 +155,7 @@ const py = JSON.parse(pr.stdout);
 const pyMs = performance.now() - t0;
 
 // ---------------------------------------------------------------- compare
-const bad = { ground: 0, push: 0, selfwalk: 0, walks: 0, segs: 0 };
+const bad = { ground: 0, push: 0, selfwalk: 0, walks: 0, segs: 0, abs: 0 };
 let maxErr = 0;
 const close = (a, b) => {
   if (a === null || b === null) return a === b;
@@ -205,6 +206,31 @@ segs.forEach(([a, b], i) => {
   if (!ok) note('segs', `${JSON.stringify([a, b])} js ${JSON.stringify(j)} py ${JSON.stringify(p)}`);
 });
 
+// ---------------------------------------------------------------- absolute checks
+// Behaviour against the game data, not against the Python (which shares the rules).
+// Fall-through spots (worker 0053; found by a flood fill from the start: the old
+// one-sided rule with FLOOR_NY 0.6 dropped him to oldY): the ground must stay within
+// maxDrop units below the feet.
+const ABS = [
+  ['walkway rim (55-degree bevel top)', -1272, -1110, -93.8, -69.89, 1],
+  ['walkway rim (reverse-wound face)', -1331, -1106, -93.5, -74.00, 1],
+  ['stairs at x -1430, z -670 (next tread is 1.5 down)', -1430, -670, -94.2, -90.00, 2.5],
+  ['stairs at x -1428, z -694 (next tread is 1.6 down)', -1428, -694, -96.9, -91.99, 2.5],
+];
+for (const [name, x, z, fy, oldY, maxDrop] of ABS) {
+  const g = col.groundY(x, z, fy);
+  if (g === null || g - fy > maxDrop) note('abs', `${name}: ground ${g} under feet ${fy} (old rule fell to ${oldY})`);
+}
+for (const [name, x, z, fy] of SPOTS) {                // Vincent's dumped feet vs the ground
+  const g = col.groundY(x, z, fy);
+  if (g === null || Math.abs(g - fy) >= 0.4) note('abs', `${name}: feet ${fy} ground ${g}`);
+}
+{                                                      // the invisible railing plane (mask 0x0104) stops him
+  let pos = { x: X0, y: FY0, z: Z0 };
+  for (let s = 0; s < 30; s++) pos = col.move(pos, { x: 0, z: -1 });
+  if (pos.z < Z0 - 10 || !pos.onGround) note('abs', `walk toward -z went to z ${pos.z.toFixed(2)} (railing at -1120.1)`);
+}
+
 // ---------------------------------------------------------------- timing
 const time = (fn, n) => { for (let i = 0; i < 2000; i++) fn(i); const s = performance.now(); for (let i = 0; i < n; i++) fn(i); return (performance.now() - s) / n * 1000; };
 const gq = ground.filter(g => g[2] !== null);
@@ -222,7 +248,7 @@ const nbad = Object.values(bad).reduce((a, b) => a + b, 0);
 const hits = py.ground.filter(g => g !== null).length;
 console.log(`module ${path.relative(root, modPath)}`);
 console.log(`player-set tris js ${col.ntris} py ${py.ntris}; cells js ${col.ncells} py ${py.ncells}; build ${loadMs.toFixed(0)} ms (py run ${(pyMs / 1000).toFixed(1)} s)`);
-console.log(`checks ${total}: groundY ${ground.length} (${hits} with a floor), capsule ${pushes.length}, move ${moveCalls} (self-test walk + ${walks.length} random walks), segment ${segs.length}`);
+console.log(`checks ${total} + ${ABS.length + SPOTS.length + 1} absolute: groundY ${ground.length} (${hits} with a floor), capsule ${pushes.length}, move ${moveCalls} (self-test walk + ${walks.length} random walks), segment ${segs.length}`);
 console.log(`self-test walk travelled: ${selfTravel.join(' ')}`);
 console.log(`mismatches ${nbad}  ${JSON.stringify(bad)}  max |js-py| over matched values ${maxErr.toExponential(2)}`);
 for (const e of examples) console.log('  ' + e);

@@ -214,18 +214,41 @@ payload `+0x20` (count) / `+0x24` (array ptr, stride 0x10)** by the index the VU
 returns. The native decoder carries the full per-polygon word on each triangle
 as `cid_tri.surface` (falling back to the packet mask when absent).
 
-**Packet-mask test semantics** (`FUN_0026f8a0:51`; UNPROVEN, review 2026-10-26: this formula, applied to the mask census, would test no packets for flags 0x18e, so it is quoted wrong or the player-set filter `mask & 0x80 == 0` does not follow from it): a packet is tested only if
-`(mask & ~(callerFlags|0x100)) != 0` — the caller's flags are an **exclusion**
-set. Character probes pass `0x18e` / `0x18d` (and one caller `0x10f`), so bit
-`0x80` packets are skipped by every character probe. z128 census (sub-tree
-+0x58): masks `000a 000e 010a 010e 0104 0004 0108 010c 0102 0008 0106 0002`
-(floors and walls mixed in every mask) plus `0180` — e.g. a 403×347 collision-only
-plane at y=−86, 12 units under the start deck (likely a fall/kill plane). Bit
-meanings beyond that are not enumerated.
+**Packet-mask test** (decoded, worker 0053, 2026-10-26; machine code
+`0x26f934..0x26f960`: `nor t5,zero,v1` / `lh v0,8(a1)` / `and` / `beqz` skip): a
+packet is tested only if `(mask & ~(callerFlags|0x100)) != 0`, so the caller's
+flags are an exclusion set. `FUN_0026a320` passes `a2` (the flags) through
+unchanged to `FUN_00271408`. Every character probe flag word is
+`0x180 | (0xf minus one bit)`, so each probe selects exactly one **class bit**
+of the mask:
 
-**Winding:** with normal `(v1−v0)×(v2−v0)`, walkable tops have **n.y > 0**
+| flags   | tests packets with | callers |
+|---------|--------------------|---------|
+| `0x18d` | bit `0x02`         | ground ray `FUN_002db1f0` (segment y−1 → y+100, returns the hit y), `FUN_002d68f0`, `FUN_003590c8`; `FUN_0054fc38` table indices 0,7,10,12,13 |
+| `0x18b` | bit `0x04`         | `FUN_0054fc38` index 6 |
+| `0x187` | bit `0x08`         | `FUN_0054fc38` indices 1,2,3,8 |
+| `0x18e` | bit `0x01`         | edge probes `FUN_00551e80`/`FUN_00552088`, `FUN_00346fc0`, `FUN_003470d8`; indices 4,5,9 |
+| `0x10f` | bit `0x80`         | `FUN_00264ee0` |
+| `0`     | anything but `0x100` alone | index 11 |
+
+(`FUN_0054fc38` is a virtual method, vtable entry at `0x58cb5c`; its flag table is
+14 words at `0x58c990`.) So bit `0x80` does not exclude a packet: `0x0184` is
+tested by `0x18b`. Masks with no bit in `0x0f` (`0x0080`, `0x0180`, such as the
+403×347 plane at y=−86, 12 units under the start deck) are never tested by a
+character probe. z128 class census (sub-tree +0x58, by area): `0x0a` (bits 1+3)
+and `0x0e` are the visible geometry; `0x04` alone is 88% walls, including the
+invisible blocker plane at the deck railing (`0x0104`, z=−1120.1, y −109..+10);
+`0x80` alone is 97% floors. Which index the player's wall probe uses is NOT
+decoded (it is behind the virtual call).
+
+**Winding:** with normal `(v1−v0)×(v2−v0)`, most walkable tops have **n.y > 0**
 (pointing +Y = down, into the floor); undersides/ceilings have n.y < 0. Checked
 under Vincent's start point (deck top −98.44 n.y=+1, deck bottom −94.5 n.y=−1).
+The winding is NOT consistent: the stairs at x≈−1430, z −705..−647 and parts of
+the walkway rim east of the start are wound the other way. The game does not
+care: the tag-0 ray/polygon test `FUN_0026f578` accepts the hit when all edge
+signs agree in either direction (two-sided), and the ground ray takes the first
+hit along the ray.
 
 **Gaps:** the exact bit meanings of the surface mask and the
 surface-table entry fields are still not enumerated (most shipped maps have an
@@ -287,11 +310,22 @@ be wrapped directly as a JS typed array.
 File size = `0x30 + 12·nverts + 20·ntris`. z128: 96,131 verts, 143,920 tris,
 4,032,020 bytes.
 
-**Player set** (what `cid_query.py` uses): sub-tree 1 (+0x58, the floor-probe
-tree) and `mask & 0x80 == 0` → 139,993 tris. Floor = n.y ≥ 0.6; ground = the
-first floor at or below the feet (smallest y ≥ feet−step); walls = everything
-else, pushed out horizontally by a capsule. Sub-tree 0 (+0x38, 3,625 tris,
-tag-0 indexed, mostly flat) is the segment-query tree; not needed for walking.
+**Player set** (what `cid_query.py` and `collision.js` use, worker 0053):
+sub-tree 1 (+0x58) packets that some character probe tests, i.e.
+`mask & ~(f|0x100) != 0` for f in `0x18d, 0x18b, 0x187` (= `mask & 0x0e != 0`)
+→ 140,105 tris on z128. That is the earlier `mask & 0x80 == 0` set plus 112
+far-off floor tris (masks 0x84/0x88/0x8c/0x8e). Floor = **|n.y| ≥ 0.55** in either
+winding (two-sided, like the game; 0.55 takes the 45° ramps and the 55° walkway
+bevels, n.y 0.57); ground = the first floor at or below the feet (smallest
+y ≥ feet−step); walls = everything else, pushed out horizontally by a capsule.
+
+Sub-tree 0 (+0x38, 3,625 tris, tag-0 indexed, mostly flat) is NOT used. The
+character physics `FUN_0035a440` does collect it (`FUN_0026a548` → `FUN_00271668`
+→ `FUN_00270938(+0x38, …, 2)`) and pushes a body sphere out of its faces, and
+under the start point its deck (−98.64) matches the dumped feet slightly better
+(0.02–0.13 vs 0.22–0.33). But as a floor it sits 1 unit above the visible
+walkway east of the start and rises to 4.8 above it near x=−1252, where
+sub-tree 1 matches the visible surface exactly. Its gameplay role is open.
 
 `python3 -I cid_query.py out/web/z128_collision.bin` runs the self-test
 (ground under the three known Vincent positions, 8-direction walk);

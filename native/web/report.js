@@ -49,7 +49,9 @@ function el(tag, attrs = {}, text) {
 }
 
 export function initReport(ctx) {
-  // ctx: { renderer, camera, root, scene, attrs (mesh id -> Float32Array), view(), setFrozen(bool), toast(msg) }
+  // ctx: { renderer, camera, root, scene, attrs (mesh id -> Float32Array), view(), setFrozen(bool), toast(msg),
+  //        extraMeta() (optional: extra top-level meta.json fields, e.g. the play page's player state) }
+  // Only root children with userData.draw are pickable; draws without attrs are skipped by the ray cast.
   const { renderer, camera, root, scene } = ctx;
   const canvas = renderer.domElement;
 
@@ -59,6 +61,7 @@ export function initReport(ctx) {
     pickRoot = new THREE.Scene();
     for (const m of root.children) {
       const { draw, mode } = m.userData;
+      if (!Number.isInteger(draw)) continue;     // not a room draw (e.g. the play page's skinned Vincent)
       if (mode === 2) continue;                 // blended remainder: never writes depth
       const mat = new THREE.RawShaderMaterial({
         glslVersion: THREE.GLSL3, vertexShader: PICK_VS, fragmentShader: PICK_FS,
@@ -146,6 +149,7 @@ export function initReport(ctx) {
           tv = new THREE.Vector3(), qv = new THREE.Vector3(), a = new THREE.Vector3();
     scene.draws.forEach((dr, di) => {
       const f = ctx.attrs[dr.mesh];
+      if (!f) return;                           // draw not loaded on this page
       const t0 = dr.first / 3, t1 = (dr.first + dr.count) / 3;
       for (let t = t0; t < t1; t++) {
         const b = t * 36;
@@ -311,6 +315,7 @@ export function initReport(ctx) {
                  depth_bits: gl.getParameter(gl.DEPTH_BITS), max_texture: gl.getParameter(gl.MAX_TEXTURE_SIZE),
                  antialias: gl.getContextAttributes().antialias },
         picks,
+        ...(ctx.extraMeta ? ctx.extraMeta() : {}),
       };
       status.textContent = 'uploading…';
       const body = JSON.stringify({ meta, marked_png: await toBlobB64(marked), plain_png: await toBlobB64(plain) });
