@@ -1,0 +1,319 @@
+// Ladder action (play.html): E at a ladder's bottom or top trigger gets on, W / S climb
+// in 4.5-unit rungs, climbing past the top or bottom gets off, Space jumps off.
+// Data: data/z128_ladders.json (native/assets/models/export_web_ladders.py, stage
+// section 8 types 1/2 + the class-0x01 ladder faces). Values: notes/actions-research.md
+// section 3 (FUN_0059a5d0, FUN_00599f10, FUN_00346fc0, FUN_003470d8).
+//
+// Positions follow the clips: each phase moves from a start to an end point, and the
+// clip's own root-motion curve (sidecar root_motion_per_frame_glb, read via ctx.motions)
+// says how far along he is at each frame. The end points come from the game rules
+// (5.6 out from the face, 4.5 per rung, feet on col.groundY after getting off), so the
+// curve's shape is the clip's and its length is the game's. Game space, -Y up.
+export const KEY = 'KeyE';
+export const HELP = 'E ladder (W/S climb, Space jump off)';
+
+const DATA_URL = new URL('../data/z128_ladders.json', import.meta.url);
+const SNAP = 5.6;         // game: character origin this far out from the face (Vincent, FUN_0059a5d0)
+const BODY_FWD = 5.5;     // c_ld_u's constant bone-1 offset toward the ladder (glb units). The
+                          // in-place export dropped it, so the feet go SNAP - BODY_FWD * scale
+                          // (~0.3) from the face; that puts the hands and feet on the rungs.
+const RUNG = 4.5;         // units per climb step (FUN_00599f10); z128's ladder mesh has its
+                          // rungs exactly 4.5 apart, so this is world units, not clip * scale
+const MOUNT_RISE = 6.1;   // first rung above the bottom trigger floor: c_ld_u's 6 + the game's 0.1
+const STEP_TICKS = 14;    // (16 - 2) ticks per step; the 16-frame clip plays at 15/14
+const TOP_PROBE = 20.25;  // top exit: no face this far above the feet (FUN_00346fc0)
+const BOTTOM_EXIT = 6;    // c_ld_del/der drop (glb units); less than a rung + this left: get off
+const RAY = 7;            // trigger ray along the facing (FUN_00544200)
+const GRAVITY = 0.07;     // u/tick^2 (jump research section 1), used for the jump-off fall
+const MAX_FALL = 6;
+
+// Test aid: play.html?ladder=N puts him at ladder N's bottom once, on load (z128's start
+// deck doesn't connect to the ladder floor on foot in the current collision).
+let warpTo = (() => { try { const v = new URLSearchParams(location.search).get('ladder'); return v === null ? null : +v; } catch { return null; } })();
+
+const wrapPi = a => Math.atan2(Math.sin(a), Math.cos(a));
+const lerp = (a, b, t) => a + (b - a) * t;
+
+let ladders = null;       // loaded once, shared by every createAction()
+let loading = null;
+function load() {
+  if (!loading) loading = fetch(DATA_URL).then(r => r.ok ? r.json() : Promise.reject(new Error(r.status)))
+    .then(d => { ladders = d.ladders.map(prep); return ladders; })
+    .catch(e => { console.warn('ladder data not loaded:', e.message); ladders = []; });
+  return loading;
+}
+
+// world-space helpers for one ladder
+function prep(L) {
+  const F = { x: L.facing[0], z: L.facing[2] };
+  const fl = Math.hypot(F.x, F.z); F.x /= fl; F.z /= fl;
+  const fp = L.face.point;
+  const n = { x: -F.x, z: -F.z };               // face normal, toward the climber
+  const d = n.x * fp[0] + n.z * fp[2];          // plane n.p = d (horizontal part)
+  // climbing spot (set per action from the scale, see setClimb): the face centre line, out along n
+  const climb = { x: fp[0], z: fp[2] };
+  const base = L.bottomY - MOUNT_RISE;          // rung 0 feet height; rung k = base - RUNG * k
+  const faceTop = L.face.y ? L.face.y[0] : L.topY;   // smallest y = highest point
+  const faceBottom = L.face.y ? L.face.y[1] : L.bottomY;
+  return { ...L, F, n, d, climb, base, faceTop, faceBottom };
+}
+
+// is p inside trigger box b (local coordinates via its axes), with a little y slack
+function inBox(b, p) {
+  const o = b.origin, ax = b.axes;
+  const v = [p.x - o[0], p.y - o[1], p.z - o[2]];
+  const l = ax.map(a => (v[0] * a[0] + v[1] * a[1] + v[2] * a[2]) / (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]));
+  return l[0] >= b.min[0] && l[0] <= b.max[0] && l[2] >= b.min[2] && l[2] <= b.max[2] &&
+         l[1] >= b.min[1] - 3 && l[1] <= b.max[1] + 3;
+}
+
+// the game's test: a short ray along the facing reaches the box, and he faces its +z
+function triggers(b, pos, heading) {
+  const dx = Math.sin(heading), dz = Math.cos(heading);
+  const az = b.axes[2];
+  if (dx * az[0] + dz * az[2] < 0.5) return false;   // within 60 deg of the box's +z
+  for (let s = 0; s <= RAY; s += 1)
+    if (inBox(b, { x: pos.x + dx * s, y: pos.y - 2, z: pos.z + dz * s })) return true;
+  return false;
+}
+
+// clip root-motion curve, raw glb values at fractional frame f
+function curve(ctx, clip, f) {
+  const m = ctx.motions[clip];
+  const r = m && m.root_motion_per_frame_glb;
+  if (!r || !r.length) return [0, 0, 0];
+  const n = r.length, c = Math.max(0, Math.min(n - 1, f)), i = Math.min(Math.floor(c), Math.max(0, n - 2)), t = c - i;
+  if (n === 1) return r[0];
+  return [0, 1, 2].map(k => r[i][k] + (r[i + 1][k] - r[i][k]) * t);
+}
+// how far along axis k (0..1) the clip is at frame f; linear in time when it doesn't move on k
+function frac(ctx, clip, f, k) {
+  const m = ctx.motions[clip], n = m ? m.root_motion_per_frame_glb.length : 2;
+  const a = curve(ctx, clip, 0)[k], b = curve(ctx, clip, n - 1)[k];
+  if (Math.abs(b - a) < 1e-3) return Math.max(0, Math.min(1, f / (n - 1)));
+  return (curve(ctx, clip, f)[k] - a) / (b - a);
+}
+const frames = (ctx, clip) => (ctx.motions[clip] ? ctx.motions[clip].frames : 16);
+
+export function ladderAction() {
+  load();
+  let L = null;           // the ladder in use
+  let ph = null;          // phase: { kind, clip, t, len, rate, from, to, hFrac, vFrac, ... }
+  let hand = 'l';         // which hand the idle is on ('l' -> c_ld_lid)
+  let done = false;
+  let log = [];           // per-rung positions, for tests (window.__play.ctrl.active.log)
+
+  function play(ctx, clip, { loop = false, rate = 1, fade = 0.12 } = {}) {
+    if (ctx.anim && ctx.anim.has(clip)) ctx.anim.play(clip, { loop, rate, fade });
+  }
+
+  // start a move phase from the current feet to `to` over clip `clip`
+  function move(ctx, kind, clip, to, { len, rate = 1, hAxis = 1, vAxis = 1, hHalf = false, heading, from } = {}) {
+    const p = from || ctx.ctrl.pos;
+    const n = frames(ctx, clip);
+    ph = { kind, clip, t: 0, len: len ?? n - 1, rate, from: { ...p }, to,
+           hAxis, vAxis, hHalf, h0: ctx.ctrl.heading, h1: heading ?? ctx.ctrl.heading };
+    play(ctx, clip, { rate });
+  }
+
+  function idle(ctx) {
+    ph = { kind: 'idle', t: 0 };
+    play(ctx, hand === 'l' ? 'c_ld_lid' : 'c_ld_rid', { loop: true, fade: 0.1 });
+  }
+
+  function climbPos(y) { return { x: L.climb.x, y, z: L.climb.z }; }
+  // nearest rung-grid feet height to y
+  function rungY(y) { return L.base - RUNG * Math.round((L.base - y) / RUNG); }
+  function setClimb(ctx) {
+    const s = ctx.ctrl.scale || 1, fwd = ctx.motions.c_ld_u ? curve(ctx, 'c_ld_u', 0)[2] : BODY_FWD;
+    const off = SNAP - fwd * s, fp = L.face.point;
+    L.offset = off;
+    L.climb = { x: fp[0] + L.n.x * off, z: fp[2] + L.n.z * off };
+  }
+
+  // decide what W / S / Space do from the rung he is on
+  // at = where he is (the end of the step just finished, or the current feet)
+  function next(ctx, at = ctx.ctrl.pos) {
+    const keys = ctx.input.keys || new Set(), pressed = ctx.input.pressed || new Set();
+    const y = at.y, from = { ...at };
+    if (pressed.has('Space') && ctx.anim?.has('c_ld_jp')) return jumpOff(ctx, from);
+    const up = keys.has('KeyW') || keys.has('ArrowUp');
+    const down = keys.has('KeyS') || keys.has('ArrowDown');
+    if (up && !down) {
+      if (y - TOP_PROBE < L.faceTop) {          // no face 20.25 above the feet: over the top
+        const clip = hand === 'l' ? 'c_ld_uel' : 'c_ld_uer';
+        const land = topLanding(ctx);
+        move(ctx, 'exitTop', clip, land, { hAxis: 2, vAxis: 1, from });
+        return;
+      }
+      const clip = hand === 'l' ? 'c_ld_umr' : 'c_ld_uml';
+      move(ctx, 'up', clip, climbPos(y - RUNG), { len: STEP_TICKS, rate: (frames(ctx, clip) - 1) / STEP_TICKS, from });
+      return;
+    }
+    if (down && !up) {
+      const floor = bottomFloor(ctx);
+      if (floor - y - RUNG < BOTTOM_EXIT - 0.5) {   // the next rung would be below the last one
+        const clip = hand === 'l' ? 'c_ld_der' : 'c_ld_del';
+        // c_ld_del/der step back 5.5 (glb) from the ladder and drop to the floor
+        const back = -curve(ctx, clip, frames(ctx, clip) - 1)[2] * (ctx.ctrl.scale || 1);
+        const x = L.climb.x + L.n.x * back, z = L.climb.z + L.n.z * back;
+        const g = ctx.col.groundY(x, z, L.bottomY - 8);
+        move(ctx, 'exitBottom', clip, { x, y: g ?? floor, z }, { hAxis: 2, vAxis: 1, from });
+        return;
+      }
+      const clip = hand === 'l' ? 'c_ld_dmr' : 'c_ld_dml';
+      move(ctx, 'down', clip, climbPos(y + RUNG), { len: STEP_TICKS, rate: (frames(ctx, clip) - 1) / STEP_TICKS, from });
+      return;
+    }
+    if (ph?.kind !== 'idle') idle(ctx);
+  }
+
+  function bottomFloor(ctx) {
+    const g = ctx.col.groundY(L.climb.x, L.climb.z, L.bottomY - 8);
+    return g ?? L.bottomY;
+  }
+
+  // top floor: c_ld_uel/uer's own forward step (3.5 glb) from the climb spot; the trigger
+  // origin only if there is no floor near the top there
+  function topLanding(ctx) {
+    const clip = 'c_ld_uel', s = ctx.ctrl.scale || 1;
+    const fwd = curve(ctx, clip, frames(ctx, clip) - 1)[2] * s;
+    const lx = L.climb.x + L.F.x * fwd, lz = L.climb.z + L.F.z * fwd;
+    const lg = ctx.col.groundY(lx, lz, L.topY - 8);
+    if (lg !== null && Math.abs(lg - L.topY) < 3) return { x: lx, y: lg, z: lz };
+    const o = L.top.origin;
+    const along = (o[0] - L.climb.x) * L.F.x + (o[2] - L.climb.z) * L.F.z;
+    const x = L.climb.x + L.F.x * along, z = L.climb.z + L.F.z * along;
+    const g = ctx.col.groundY(x, z, L.topY - 8);
+    return { x, y: g ?? L.topY, z };
+  }
+
+  function jumpOff(ctx, p) {
+    const clip = 'c_ld_jp';
+    const end = curve(ctx, clip, frames(ctx, clip) - 1), s = ctx.ctrl.scale || 1;
+    // jp: up 3.5 and back 10 (glb), straight off the ladder
+    const to = { x: p.x + L.n.x * -end[2] * s, y: p.y - end[1] * s, z: p.z + L.n.z * -end[2] * s };
+    move(ctx, 'jump', clip, to, { hAxis: 2, vAxis: 1, from: p });
+  }
+
+  // one tick of the current move phase -> target feet position
+  function advance(ctx) {
+    ph.t++;
+    const f = Math.min(ph.t * ph.rate, frames(ctx, ph.clip) - 1);
+    const u = Math.min(1, ph.t / ph.len);
+    let hf = ph.hHalf ? Math.min(1, ph.t / (ph.len / 2)) : frac(ctx, ph.clip, f, ph.hAxis);
+    let vf = frac(ctx, ph.clip, f, ph.vAxis);
+    if (u >= 1) { hf = 1; vf = 1; }
+    const a = ph.from, b = ph.to;
+    return {
+      pos: { x: lerp(a.x, b.x, hf), y: lerp(a.y, b.y, vf), z: lerp(a.z, b.z, hf) },
+      heading: ph.h0 + wrapPi(ph.h1 - ph.h0) * Math.min(1, ph.hHalf ? hf : u * 2),
+      end: u >= 1,
+    };
+  }
+
+  function result(ctx, pos, extra = {}) {
+    const c = ctx.ctrl.pos;
+    return { delta: { x: pos.x - c.x, y: pos.y - c.y, z: pos.z - c.z }, ...extra };
+  }
+
+  function entry(ctx) {
+    if (!ladders || !ctx.anim) return null;
+    const p = ctx.ctrl.pos, h = ctx.ctrl.heading;
+    for (const l of ladders) {
+      if (triggers(l.bottom, p, h)) return { l, from: 'bottom' };
+      if (triggers(l.top, p, h)) return { l, from: 'top' };
+    }
+    return null;
+  }
+
+  let pending = null;
+  return {
+    name: 'ladder',
+    get log() { return log; },
+    get phase() { return ph && ph.kind; },
+    get ladder() { return L && L.id; },
+    canEnter(ctx) {
+      if (warpTo !== null && ladders) {
+        const l = ladders.find(x => x.id === warpTo); warpTo = null;
+        if (l) { pending = { l, from: 'warp' }; return true; }
+      }
+      if (!ctx.input.pressed?.has(KEY) || !ctx.ctrl.onGround) return false;
+      if (!ctx.anim?.has('c_ld_u') || !ctx.anim.has('c_ld_d')) return false;
+      pending = entry(ctx);
+      return !!pending;
+    },
+    enter(ctx) {
+      L = pending.l; done = false; log = []; hand = 'l';
+      setClimb(ctx);
+      const p = ctx.ctrl.pos;
+      if (pending.from === 'warp') {
+        const o = L.bottom.origin, x = o[0] - L.F.x * 2, z = o[2] - L.F.z * 2;
+        const g = ctx.col.groundY(x, z, L.bottomY - 8);
+        ph = { kind: 'warp', to: { x, y: g ?? L.bottomY, z } };
+        return null;
+      }
+      if (pending.from === 'bottom') {
+        // c_ld_u: slide onto the climb spot over the first half, rise 6 (glb) on the clip curve
+        // onto rung 0 of the ladder's own grid, whatever floor bump he stood on
+        move(ctx, 'mountBottom', 'c_ld_u', climbPos(L.base), { hHalf: true, heading: L.heading });
+      } else {
+        // c_ld_d: turn to face the ladder, back over the edge and drop 18 (glb)
+        const drop = curve(ctx, 'c_ld_d', 0)[1] - curve(ctx, 'c_ld_d', frames(ctx, 'c_ld_d') - 1)[1];
+        move(ctx, 'mountTop', 'c_ld_d', climbPos(rungY(p.y + drop)), { hAxis: 1, vAxis: 1, heading: L.heading });
+      }
+      log.push({ phase: ph.kind, tick: ctx.tick, feet: [p.x, p.y, p.z] });
+      return null;                                  // move() already started the clip
+    },
+    update(dt, ctx) {
+      if (!L || !ph) return { done: true };
+      if (ph.kind === 'warp') return result(ctx, ph.to, { heading: L.heading, onGround: true, vy: 0, done: true });
+      if (ph.kind === 'fall') {                   // after the jump-off: fall to the floor
+        const p = ctx.ctrl.pos;
+        let nx = p.x + ph.vx, nz = p.z + ph.vz;
+        if (ctx.col.move) {                      // airborne body keeps walking the navmesh (FORMAT.md §3d)
+          const r = ctx.col.move(p, { x: ph.vx, z: ph.vz }, { air: true }); nx = r.x; nz = r.z;
+        } else if (ctx.col.capsulePush) [nx, nz] = ctx.col.capsulePush(nx, p.y, nz, ctx.ctrl.opts.radius, ctx.ctrl.opts.height);
+        ph.vy = Math.min(ph.vy + GRAVITY, MAX_FALL);
+        const g = ctx.col.groundY(nx, nz, p.y, 0);
+        let y = p.y + ph.vy;
+        if (g !== null && y >= g) {
+          log.push({ phase: 'landed', tick: ctx.tick, feet: [nx, g, nz] });
+          return result(ctx, { x: nx, y: g, z: nz }, { onGround: true, vy: 0, done: true });
+        }
+        if (++ph.t > 600) return result(ctx, { x: nx, y, z: nz }, { onGround: false, vy: ph.vy, done: true });
+        return result(ctx, { x: nx, y, z: nz }, { onGround: false });
+      }
+      if (ph.kind === 'idle') {
+        next(ctx);
+        if (ph.kind === 'idle') return result(ctx, climbPos(ctx.ctrl.pos.y), { onGround: false });
+      }
+      const s = advance(ctx);
+      const res = result(ctx, s.pos, { heading: s.heading, onGround: false });
+      if (!s.end) return res;
+      const k = ph.kind;
+      log.push({ phase: k, tick: ctx.tick, clip: ph.clip, feet: [s.pos.x, s.pos.y, s.pos.z] });
+      if (k === 'exitTop' || k === 'exitBottom') {
+        res.onGround = true; res.vy = 0; res.done = true;
+        return res;
+      }
+      if (k === 'jump') {
+        const back = { x: L.n.x * 0.6, z: L.n.z * 0.6 };
+        ph = { kind: 'fall', t: 0, vx: back.x, vz: back.z, vy: 0 };
+        play(ctx, 'c_ld_fa0', { fade: 0.08 });
+        return res;
+      }
+      if (k === 'up' || k === 'down') hand = ph.clip.endsWith('l') ? 'l' : 'r';
+      ph = null;
+      // chain the next step at once when the key is still held (FUN_00599f10), else idle
+      next(ctx, s.pos);
+      return res;
+    },
+    exit(ctx) {
+      ph = null; L = null; pending = null;
+      ctx.anim?.release(0.2);
+    },
+  };
+}
+
+export function createAction() { return ladderAction(); }
