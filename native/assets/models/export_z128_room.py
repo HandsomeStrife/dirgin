@@ -169,8 +169,8 @@ ENV_CHUNK = '06800012'
 
 # Texture binding read from the game files (--bind file, the default; worker 0051, 2026-10-26).
 # Each chain's draw-object header holds the texture slot at +0x98 into the BMD's texture
-# table (header +0x10); the entry's low byte is the FileCode's last byte (bmd_chains.
-# chain_headers has the decode). Checked against the GS dumps with UV triple + vertex colour
+# table (header +0x10); the entry is the FileCode's last byte, and one above 0xff is left
+# unbound with a warning (none in z128; bmd_chains.chain_headers has the decode). Checked against the GS dumps with UV triple + vertex colour
 # within 12 + all three vertices within 2 world units (dump vertices unprojected with each
 # dump's fitted camera): 720 of 762 dump-seen packets get the dump's texture; 41 of the 42
 # others are animation frames (below). All 30 BIND_OVERRIDE entries agree with it after
@@ -197,10 +197,36 @@ HIDDEN_GROUPS = {0, 19, 25, 56, 57}
 
 
 def tri_key(pk, t):
-    """Position (1/16 unit, the V3-16 grid) + UV (1/4096) of a triangle, order-free."""
-    return tuple(sorted((round(pk['verts'][j][0] * 16), round(pk['verts'][j][1] * 16),
+    """Position (1/16 unit, the V3-16 grid) + UV (1/4096) of a triangle, order-free, plus the
+    packet's ABE flag: a blended overlay is never a duplicate of an opaque triangle (as in
+    room_overlap.py, blended triangles are never dropped against opaque ones)."""
+    return (bool(pk['abe']),) + tuple(sorted((round(pk['verts'][j][0] * 16), round(pk['verts'][j][1] * 16),
                          round(pk['verts'][j][2] * 16), round(pk['uv'][j][0] * 4096),
                          round(pk['uv'][j][1] * 4096)) for j in t))
+
+
+# Depth-tie marking (worker 0054, 2026-10-26; report 20261026T171311Z-04b2 "floor flickering").
+# A later chunk's triangle that lies on the same plane as part of an earlier chunk's surface
+# (room_overlap.PlaneIndex.overlaps, 16 samples) but is not wholly covered (so it is not
+# dropped) z-fights with it: e.g. 06800c12 pkts 16/17, a coarse 160-unit flat-grey (42) copy
+# of 06800112's 40-unit ff24 floor tiles, and 06800312 pkt 2576 (ABE ff31 quad over 06800112
+# pkt 1372). The game draws the earlier chunk there: 0 of 06800c12's in-view triangles appear
+# in the hero/185126/185138 dumps. GS depth is PSMZ24, ZTST GEQUAL, Z written for nearly all
+# room draws (a 0.07-unit decal layer is ~80 Z steps at 120 units, so the decals are not the
+# problem). Such triangles go to '<key>@under' groups, flagged in room.list column 5; the web
+# viewer draws those with a polygon offset so the earlier chunk wins the tie. The offset is a
+# few depth ULPs, so a layer that is really in front (even 0.07 units) still shows. ABE
+# triangles are only marked against earlier ABE ones (a decal over an earlier opaque floor
+# stays on top). --no-underlay turns it off.
+UNDER_SUFFIX = '@under'
+
+
+def group_fc(key):
+    """FileCode (or 'unbound') of a group key, without the @atest / @under suffixes."""
+    for suf in (UNDER_SUFFIX, ATEST_SUFFIX):
+        if key.endswith(suf):
+            key = key[:-len(suf)]
+    return key
 
 
 def build_flat_kept(packets, idxs, kept):
@@ -235,13 +261,18 @@ def main():
                     'even when their chain agrees on one FileCode (--bind pf only)')
     ap.add_argument('--bind', choices=('file', 'pf'), default='file', help='file (default): '
                     'texture slot from each chain header (see LEVEL_TEX); pf: the old per-packet '
-                    'binding from --pf + BIND_OVERRIDE + chain fill')
+                    'binding from --pf + BIND_OVERRIDE + chain fill. The pre-0051 output is '
+                    '--bind pf --show-hidden-groups --keep-duplicates --keep-covered --no-underlay')
     ap.add_argument('--no-hero-frame', action='store_true', help='draw flipbook textures at the '
                     'frame the table names, not the hero-dump frame (HERO_FRAME)')
     ap.add_argument('--show-hidden-groups', action='store_true', help='keep chains whose '
                     'visibility group the game hides in this state (HIDDEN_GROUPS)')
-    ap.add_argument('--keep-duplicates', action='store_true', help='keep every copy of a triangle '
-                    'that several chunks/packets store at the same position and UVs')
+    ap.add_argument('--keep-duplicates', action='store_true', help='keep every exact copy of a '
+                    'triangle that several chunks/packets store at the same position, UVs and ABE flag')
+    ap.add_argument('--keep-covered', action='store_true', help='keep opaque triangles that lie '
+                    'wholly inside coplanar opaque triangles of earlier chunks (room_overlap.py)')
+    ap.add_argument('--no-underlay', action='store_true', help='do not mark triangles that '
+                    'partly share a plane with an earlier chunk (UNDER_SUFFIX groups, list col 5)')
     a = ap.parse_args()
 
     cids = [os.path.basename(p)[3:11]
@@ -253,6 +284,7 @@ def main():
     ntri_chunk = defaultdict(int)
     overrides_applied = set()
     seen_tris = set(); seen_tris_fc = {}; cover = PlaneIndex()          # dedupe keys, global across chunks (chunk order, packet order)
+    cover_abe = PlaneIndex()                                            # earlier chunks' kept ABE tris (underlay test only)
     stats = defaultdict(int); dup_xtex = defaultdict(int); ovr_check = {}
     hidden_by = defaultdict(int)
     chain_filled = {}; chain_mixed = []; chain_single = {}; chain_skipped = []
@@ -342,9 +374,9 @@ def main():
                     final[i] = fcs[0]; chain_filled['%s/%d' % (cid, i)] = fcs[0]
                     if len(anchors) == 1:
                         chain_single['%s/%d' % (cid, i)] = '%s/%d' % (cid, anchors[0])
-        kept = {}
+        kept = {}; under = {}
         for i in sorted(final):
-            ks = []
+            ks = []; us = []
             for t in packet_tris(packets[i]):
                 key = tri_key(packets[i], t)
                 if key in seen_tris and not a.keep_duplicates:
@@ -353,23 +385,32 @@ def main():
                         dup_xtex[(seen_tris_fc.get(key), final[i])] += 1
                     continue
                 V = packets[i]['verts']
-                if (not a.keep_duplicates and not packets[i]['abe']
+                if (not a.keep_covered and not packets[i]['abe']
                         and cover.covered(V[t[0]], V[t[1]], V[t[2]])):
                     stats['covered_tris_dropped'] += 1; continue
-                seen_tris.add(key); seen_tris_fc.setdefault(key, final[i]); ks.append(t)
-            kept[i] = ks
-        for i in sorted(final):      # this chunk's opaque triangles cover later chunks only
-            if not packets[i]['abe']:
-                V = packets[i]['verts']
-                for t in kept[i]:
-                    cover.add(V[t[0]], V[t[1]], V[t[2]])
+                if final[i]:         # an unbound copy never blocks a later bound one
+                    seen_tris.add(key); seen_tris_fc.setdefault(key, final[i])
+                if not a.no_underlay and (
+                        cover_abe.overlaps(V[t[0]], V[t[1]], V[t[2]]) or
+                        (not packets[i]['abe'] and cover.overlaps(V[t[0]], V[t[1]], V[t[2]]))):
+                    us.append(t); stats['underlay_tris'] += 1
+                else:
+                    ks.append(t)
+            kept[i] = ks; under[i] = us
+        for i in sorted(final):      # this chunk's triangles cover / tie with later chunks only
+            if not final[i]:         # unbound tris never cover or underlay a later copy: the
+                continue             # textured copy must win (main.js already pushes unbound back)
+            idx = cover_abe if packets[i]['abe'] else cover
+            V = packets[i]['verts']
+            for t in kept[i] + under[i]:
+                idx.add(V[t[0]], V[t[1]], V[t[2]])
         for i in sorted(final):
             fc = final[i]
             if fc in ALPHA_TEST and packets[i]['abe']:
                 fc += ATEST_SUFFIX
             groups[fc if fc else 'unbound'].append(i)
-        for key, idxs in groups.items():
-            flat, ntri = build_flat_kept(packets, idxs, kept)
+        for key, idxs in list(groups.items()) + [(k + UNDER_SUFFIX, v) for k, v in groups.items()]:
+            flat, ntri = build_flat_kept(packets, idxs, under if key.endswith(UNDER_SUFFIX) else kept)
             if ntri == 0:
                 continue
             flat_by[key].extend(flat); ntri_by[key] += ntri; npk_by[key] += len(idxs)
@@ -377,11 +418,16 @@ def main():
             if any(packets[i]['abe'] for i in idxs):
                 abe_by[key] = True
 
-    order = sorted([k for k in flat_by if k != 'unbound' and not k.endswith(ATEST_SUFFIX)],
-                   key=lambda k: -ntri_by[k])
+    order = sorted([k for k in flat_by if k != 'unbound' and not k.endswith(ATEST_SUFFIX)
+                    and not k.endswith(UNDER_SUFFIX)], key=lambda k: -ntri_by[k])
     if 'unbound' in flat_by:
         order.append('unbound')
     atest = sorted([k for k in flat_by if k.endswith(ATEST_SUFFIX)], key=lambda k: -ntri_by[k])
+    # underlay groups go last in their pass (opaque before the sky, ATE after it), so the
+    # base groups keep their indices and order; draw order does not decide their ties anyway
+    under_keys = sorted([k for k in flat_by if k.endswith(UNDER_SUFFIX)], key=lambda k: -ntri_by[k])
+    order += [k for k in under_keys if not k[:-len(UNDER_SUFFIX)].endswith(ATEST_SUFFIX)]
+    atest += [k for k in under_keys if k[:-len(UNDER_SUFFIX)].endswith(ATEST_SUFFIX)]
     for fc in sorted(ALPHA_TEST):
         if fc + ATEST_SUFFIX not in flat_by:
             print('warning: ALPHA_TEST %s matched no blended (ABE) packet; entry does nothing '
@@ -399,9 +445,11 @@ def main():
     manifest['hidden_groups'] = {'groups': sorted(HIDDEN_GROUPS), 'applied': not a.show_hidden_groups,
                                  'tris_by_group': {str(k): v for k, v in sorted(hidden_by.items())}}
     manifest['duplicates'] = {'dropped_tris': stats['dup_tris_dropped'], 'applied': not a.keep_duplicates,
-                              'rule': 'exact position (1/16) + UV (1/4096) repeat; first copy in '
-                                      'chunk then packet order kept',
+                              'rule': 'exact position (1/16) + UV (1/4096) + ABE flag repeat; first '
+                                      'bound copy in chunk then packet order kept',
                               'covered_tris_dropped': stats['covered_tris_dropped'],
+                              'covered_applied': not a.keep_covered,
+                              'underlay_tris': stats['underlay_tris'], 'underlay_applied': not a.no_underlay,
                               'cover_rule': 'opaque tri inside opaque coplanar tris of earlier '
                                             'chunks (room_overlap.py)',
                               'texture_differs': {'%s -> %s' % k: v for k, v in sorted(dup_xtex.items(), key=lambda kv: -kv[1])}}
@@ -411,7 +459,7 @@ def main():
     total = bound = 0
     def add_group(gi, key):
         nonlocal total, bound
-        fc = key[:-len(ATEST_SUFFIX)] if key.endswith(ATEST_SUFFIX) else key
+        fc = group_fc(key); base = key[:-len(UNDER_SUFFIX)] if key.endswith(UNDER_SUFFIX) else key
         mesh_name, bbmin, bbmax = emit_group(flat_by[key], ntri_by[key], a.out, gi)
         cont = png = None
         if fc != 'unbound':
@@ -419,7 +467,9 @@ def main():
         g = {'mesh': mesh_name, 'filecode': (None if fc == 'unbound' else fc),
              'packets': npk_by[key], 'tris': ntri_by[key], 'texture': png,
              'texture_container': cont, 'abe': abe_by[key]}
-        if key.endswith(ATEST_SUFFIX):
+        if key.endswith(UNDER_SUFFIX):
+            g['underlay'] = True
+        if base.endswith(ATEST_SUFFIX):
             aref, why = ALPHA_TEST[fc]
             g['alpha_ref'] = round((aref - 0.5) / 128, 5); g['alpha_test_reason'] = why
         manifest['groups'].append(g)
@@ -495,13 +545,16 @@ def main():
             if a.sky:
                 f.write('@nofog %s\n' % a.sky)
         for g in manifest['groups']:
-            f.write('%s\t%s\t%d\t%g\n' % (g['mesh'], g['texture_container'] or 'NONE',
-                                          1 if g['abe'] else 0, g.get('alpha_ref', -1)))
+            # col 5 (only on underlay groups): 1 = depth-tie loser, see UNDER_SUFFIX. The native
+            # renderer reads 4 columns and draws these like any other group.
+            f.write('%s\t%s\t%d\t%g%s\n' % (g['mesh'], g['texture_container'] or 'NONE',
+                                          1 if g['abe'] else 0, g.get('alpha_ref', -1),
+                                          '\t1' if g.get('underlay') else ''))
     nb = len({g['filecode'] for g in manifest['groups'] if g['filecode'] and not g.get('sky')})
     print('binding %s: %s; hidden groups %s: %d packets; duplicates dropped: %d tris (%d with '
-          'another texture), %d covered by earlier chunks' % (a.bind, dict(stats),
+          'another texture), %d covered by earlier chunks; %d marked underlay' % (a.bind, dict(stats),
           'off' if a.show_hidden_groups else 'on', stats['hidden_packets'], stats['dup_tris_dropped'],
-          sum(dup_xtex.values()), stats['covered_tris_dropped']))
+          sum(dup_xtex.values()), stats['covered_tris_dropped'], stats['underlay_tris']))
     print('chain fill: %s, %d packets filled (%d on a single anchor); %d mixed chains with '
           'unbound packets left alone; %d chains skipped (override not applied)'
           % ('on' if not a.no_chain_fill else 'OFF', len(chain_filled), len(chain_single),

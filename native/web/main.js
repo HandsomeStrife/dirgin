@@ -6,6 +6,7 @@
 // URL params: hud=0 hides the overlay, aa=1 turns on MSAA, dpr=N pins pixel ratio,
 // cam=ex,ey,ez,yaw,pitch starts at that view ("copy view" writes it). yaw/pitch are
 // degrees about world up (-Y): yaw = atan2(dir.x, dir.z), pitch = asin(dir . up).
+// zprio=0 / zunder=0 turn off the polygon offsets on untextured / underlay room draws.
 import * as THREE from 'three';
 import { initReport } from './report.js';
 
@@ -75,6 +76,14 @@ function makeMaterial(scene, tex, draw, mode) {
     // The unbound group (no texture, flat vertex colour) shares planes with textured
     // faces; at equal depth they z-fight (pale staircase on walls). Push it back a
     // little so the textured face always wins a tie. zprio=0 turns this off.
+    m.polygonOffset = true; m.polygonOffsetFactor = 1; m.polygonOffsetUnits = 4;
+  }
+  if (draw.under && params.get('zunder') !== '0') {
+    // Underlay group (room.list col 5, export_z128_room.py UNDER_SUFFIX): a later chunk's
+    // copy of a surface an earlier chunk already has on the same plane (e.g. 06800c12's
+    // coarse floor over 06800112's tiles). The game draws the earlier chunk there, so this
+    // copy loses the tie. A few depth steps only: anything really in front still shows.
+    // zunder=0 turns this off.
     m.polygonOffset = true; m.polygonOffsetFactor = 1; m.polygonOffsetUnits = 4;
   }
   if (mode === 0) {

@@ -310,7 +310,7 @@ int main(int argc, char **argv) {
     char nofog[MAXG][256]; int nnofog = 0; int lineno = 0, bad_directive = 0;
     float rmin[3] = { 1e30f, 1e30f, 1e30f }, rmax[3] = { -1e30f, -1e30f, -1e30f };
     char line[2048];
-    while (ng < MAXG && fgets(line, sizeof line, lf)) {
+    while (fgets(line, sizeof line, lf)) {
         lineno++;
         const char *ln = line;
         while (*ln == ' ' || *ln == '\t') ln++;
@@ -360,6 +360,12 @@ int main(int argc, char **argv) {
         char meshf[1024] = {0}, texf[1024] = {0}, areff[64] = {0}; int abe = 0; float aref = -1.0f;
         if (sscanf(line, "%1023s\t%1023s\t%d\t%63s", meshf, texf, &abe, areff) < 1) continue;
         if (meshf[0] == 0 || meshf[0] == '#') continue;
+        if (ng == MAXG) {
+            /* only real group lines count: directives, comments and blank lines after the
+             * 256th group are fine (they used to trip this check) */
+            fprintf(stderr, "%s:%d: more than %d groups; raise MAXG\n", listpath, lineno, MAXG);
+            fclose(lf); return 2;
+        }
         /* col 4: absent or -1 = opaque, else a ref in [0,1]. Anything else (garbled,
          * NaN, out of range, e.g. '0,75') is drawn opaque, but says so. */
         if (areff[0]) {
@@ -391,12 +397,6 @@ int main(int argc, char **argv) {
             if (bbmx[k] > rmax[k]) rmax[k] = bbmx[k];
         }
         ng++;
-    }
-    while (ng == MAXG && fgets(line, sizeof line, lf) && strspn(line, " \t\r\n") == strlen(line)) {}
-    if (ng == MAXG && !feof(lf)) {
-        /* the loop stops at MAXG: a longer list used to lose its tail silently */
-        fprintf(stderr, "%s: more than %d groups; raise MAXG\n", listpath, MAXG);
-        fclose(lf); return 2;
     }
     fclose(lf);
     if (bad_directive) {

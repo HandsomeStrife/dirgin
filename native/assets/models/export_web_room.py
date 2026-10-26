@@ -31,7 +31,9 @@ SCHEMA (scene.json, version 1)
   textures {id: {file, w, h}}
   meshes   {id: {file, vcount}}
   draws    [ {name, kind 'room'|'char', mesh, first, count (vertices), tex|null,
-              aref (-1 = opaque, else GS ATE two-pass ref 0..1), fog bool} ]  in draw order
+              aref (-1 = opaque, else GS ATE two-pass ref 0..1), fog bool,
+              under bool (optional; room.list col 5 = 1: loses depth ties, drawn with a
+              polygon offset; see export_z128_room.py UNDER_SUFFIX)} ]  in draw order
   char     {mesh, s, yaw, x, y, z, pivot, runs:[[start_tri,count],...], aref, bbox}
 """
 import argparse, json, os, re, shutil, struct, subprocess, sys, tempfile
@@ -102,7 +104,8 @@ def parse_list(path):
             if len(c) > 3 and c[3]:
                 x = float(c[3])
                 aref = x if 0.0 <= x <= 1.0 else -1.0
-            groups.append(dict(mesh=c[0], tex=c[1] if len(c) > 1 else "NONE", aref=aref))
+            under = len(c) > 4 and c[4].strip() == "1"      # col 5: export_z128_room UNDER_SUFFIX
+            groups.append(dict(mesh=c[0], tex=c[1] if len(c) > 1 else "NONE", aref=aref, under=under))
     return fog, nofog, groups
 
 
@@ -140,9 +143,21 @@ def main():
     if subprocess.run(["git", "-C", ROOT, "check-ignore", "-q", probe]).returncode != 0:
         raise SystemExit(f"refusing: {out} is not gitignored (game-derived data)")
 
-    for f in os.listdir(out):                         # stale files from an older export
-        if f.endswith((".bin", ".rgba")) or f == "scene.json":
-            os.remove(os.path.join(out, f))
+    # Stale files from the previous export: only what its scene.json lists (+ scene.json).
+    # Other files here belong to other tools (z128_collision.bin, vincent/ for play.html).
+    old = os.path.join(out, "scene.json")
+    if os.path.exists(old):
+        try:
+            prev = json.load(open(old))
+            names = [m["file"] for m in list(prev.get("meshes", {}).values()) + list(prev.get("textures", {}).values())]
+        except (ValueError, KeyError, TypeError, AttributeError) as x:
+            raise SystemExit(f"{old}: unreadable ({x}); remove the stale export by hand")
+        for f in names:
+            if isinstance(f, str) and f == os.path.basename(f) and f.endswith((".bin", ".rgba")):
+                p_ = os.path.join(out, f)
+                if os.path.isfile(p_):
+                    os.remove(p_)
+        os.remove(old)
 
     fog, nofog, groups = parse_list(a.room)
     ldir = os.path.dirname(os.path.abspath(a.room))
@@ -165,8 +180,11 @@ def main():
             if tid not in textures:
                 add_tex(tid, largest_image(g["tex"], cache))
         aref = g["aref"] if tid else -1.0
-        draws.append(dict(name=g["mesh"], kind="room", mesh=mid, first=0, count=len(v),
-                          tex=tid, aref=aref, fog=fog is not None and g["mesh"] not in nofog))
+        d = dict(name=g["mesh"], kind="room", mesh=mid, first=0, count=len(v),
+                 tex=tid, aref=aref, fog=fog is not None and g["mesh"] not in nofog)
+        if g["under"]:
+            d["under"] = True
+        draws.append(d)
 
     pl = json.load(open(os.path.join(a.char, "placement.json")))
     ra, ca = args_dict(pl["render_args"]), args_dict(pl["camera_args"])

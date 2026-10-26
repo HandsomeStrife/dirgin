@@ -97,7 +97,9 @@ def chain_headers(buf, pay, warn=None):
       +0x98 s16 texture slot (-1 = none), +0x9a s16, +0x9c (runtime: BMD header +0x10 table),
       +0xa4 self pointer, +0xa9 second-pass mode, +0xaa visibility group, +0xab 2nd slot.
     - FUN_0026ce60 binds TEX = table[+0x98], the table at BMD header +0x10 holding
-      u16 +0x0c entries; each entry's low byte is the FileCode's last byte (<level>ffNN).
+      u16 +0x0c u32 entries; an entry is the FileCode's last byte (<level>ffNN): all 448 z128
+      entries are 0..0x89. `entry` is returned as stored; export_z128_room.py warns on a value
+      above 0xff and leaves that chain unbound rather than guess which bits are the byte.
     - FUN_0026ccc8 skips a chain when FUN_00269450(+0xaa) is true: bit (+0xaa) of the global
       128-bit mask DAT_004e8710 (= DAT_004e86f0 | DAT_004e8700). Ids >= 0x80 always draw.
     - FUN_00265bf0: +0xa9 == 1 or 2 resends the chain with ALPHA 0x58 (Cs*Ad + Cd) and
