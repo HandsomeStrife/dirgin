@@ -1,5 +1,7 @@
 # Handoff — sea-of-flames scene (updated 2026-10-24)
 
+**Rule (Dan, 2026-10-26): faithful port, not a remake. Decode and translate the game's own logic; no invented behaviour; mark stand-ins `// GUESS:`. See /CLAUDE.md.**
+
 Read this first instead of re-deriving. Review images: notes/review/ (README explains each).
 
 ## Scene basis (settled)
