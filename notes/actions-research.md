@@ -112,3 +112,69 @@ Use the side the bottom trigger box is on (rec 35: west of x = −1106, facing +
 - Weapon stats: the fire path from FUN_00574d30 / FUN_00574f40 / FUN_0056b530 to the type-6
   spawn; the parts data.
 - FUN_00562d30 (ladder jump-off) speeds; c_wjp / c_bj triggers.
+
+## 5. Weapon data (worker 0064, 2026-10-26)
+
+Research only, no code changed. Sources: analysis/decomp/*.c, the ELF (PT_LOAD reader),
+`data/bgd/bgd.bin` (KEL id 0x03100031, header "bgd020") and the z128 stage file
+06800001.bin. Units: 1 tick = 1/60 s (§0). Confidence D / L / G as above.
+
+### 5.1 Cerberus default handgun (the values to use)
+
+| item | value | where | conf |
+|---|---|---|---|
+| fire mode | **semi-auto**: one shot per R1 press (W+4 bit 0 clear; when set, holding fires) | FUN_003320c0 (id 9 held vs pressed by W+4 & 1) | D |
+| first-shot delay | 0 ticks (W+0x42) | FUN_00574a80 sets timer = W+0x42 | D |
+| fire interval | **38 ticks** (0.63 s) between shots (W+0x44 = 30 + 8) | FUN_00579570 state 1→2, timer = W+0x44 | D |
+| bullet speed | **100 u/tick** (6000 u/s) = W+0x2c / 6 (W+0x2c = 600) | FUN_00552dd8 (+0x12c), FUN_00556068 moves `start + dir·age·v`; the lead-aim maths in FUN_00577480 uses W+0x2c×10 u/s | D |
+| range | **565 u** = W+0x18 × 10 + 15 (W+0x18 = 55); bullet stops at that distance. +20 instead of +15 when FUN_00321e20 is true (a weapon-flag/difficulty test) | FUN_00552dd8 (+0x15c, constants 0x46ed6c/70 = 15/20), FUN_00556068 | D / G for which constant |
+| spread | **none in the shot**: each bullet flies from the muzzle to the aim point (char+0x2b0); no rand call in the fire path. W+0x1c/0x20/0x24/0x28 (composed 1.0 / 0.5 / 0.1 / 0.7) are spread-like but no reader was found | FUN_00577480, FUN_00552dd8 | D (no random spread) / G (those fields) |
+| pellets | 1 (W+0x16) | FUN_00577480 loop | D |
+| damage | 85 (W+0x40); W+0x4c is a % bonus (0 here) | FUN_00552dd8 → bullet+0x134; FUN_0031c3f8 | D (value) / L (meaning) |
+| magazine | **9** (W+0x48); loaded rounds sit in the slot record R+0x30, so the cap is R+0x94 = W+0x48 | FUN_0031a1f8, FUN_00319f80 | D |
+| reload | **80 ticks** (1.33 s) (W+0x46); refill = min(reserve, 9); allowed when loaded < 9 and reserve > 0. Button id 0xa (R2) → FUN_00574f40 → state 7 | FUN_00579570 state 7, FUN_00319f80 | D (timer) / L (R2 by 0057's pad table) |
+| scope FOV | **25°** (W+0x34; parts give the minimum, default 25 when no part sets one; the rifle scope part gives 6). Base FOV 65 | FUN_0031c3f8; FUN_0032a708 compares camera+0x50 (FOV) with W+0x34 in camera mode 4 | L |
+| gunshot sound | `bsj_051` for class 1 (class 2: bsj_053, class 3: bsj_052; W+4 bit 3: bsj_061), played at the muzzle | FUN_0033d118 → FUN_0033cc48; dry-fire click is bsj_015/017 through the same call, so these are sound cues | D |
+| muzzle point | marker 15 (gun, bone 56); fallback local (0, 16, 10) | FUN_00341ec8 | D |
+| muzzle flash | **not found** (two attempts). FUN_00335338 after the shot looks like a noise/alert broadcast, not an effect | — | — |
+| camera kick | class 1: FUN_0032a320(0.75, 0.01) per shot (table at 0x46eee0, pairs per class) | FUN_00577480 | D (call) / G (meaning: amplitude, time) |
+| air shots | firing in mid-air gives a small upward hop: height 5 × (W+0x42 + W+0x44 + 2)/60 = 3.3 u (cap 12), at most **3 per jump** for class 1 (per-class caps at 0x46ee90: 0, 3, 12, 2, 0, 3) | FUN_00577d40 → FUN_00357168 (−sqrt(2gh) take-off), counter char+0x270 | L |
+
+### 5.2 Buttons (logical ids; physical keys from 0057's pad table)
+- **Fire = id 9 (R1)**. There is no hold-to-aim button: the shot always goes to the
+  reticle's aim point. **Materia (magic) shot = id 0x1f (L1)** (FUN_00574c10 → state 5,
+  FUN_00577e68). Pressing R1 and L1 together → FUN_005728d8 (beast/limit transform, "bsj_094"). D (code) / L (physical keys; the
+  control type swaps 9 and 0x1f).
+- **R3 (id 0x11) toggles the zoom camera**: FUN_0032a420(cam, 2) on, FUN_0032a390(cam, 0)
+  off; camera mode 4 takes its FOV from W+0x34. Offset of the zoom camera not traced. L.
+- For the port: RMB/Q "aim" ≈ the R3 zoom (FOV 65 → 25); LMB = R1.
+
+### 5.3 Where the numbers live (layout; no raw tables copied)
+- **Weapon stats W** (0x78 B) = the sum of up to 6 installed part records, built by
+  FUN_0031c3f8 into the runtime weapon-slot record R (0xcc B, list via FUN_0031a990) at
+  R+0x4c. Offsets used: +4 flags (bit 0 auto, bit 3 alt sound, 0x10000/0x20000 special),
+  +0x10 top nibble = materia type, +0x14 bits 0–1 materia level / bits 2–4 **weapon class**
+  (1 handgun, 2 automatic, 3 rifle; set by the slot-0 part) / bits 5–6 (set by the slot-1 part),
+  +0x16 pellets, +0x18 range/10, +0x2c speed/10, +0x34 FOV (min), +0x3c homing deg,
+  +0x40 damage, +0x42 first delay, +0x44 interval, +0x46 reload, +0x48 magazine,
+  +0x4a hit value (→ bullet+0x153), +0x4c damage %, +0x4e interval-reduction %,
+  +0x50..+0x62 % modifiers for the floats. Floor rules: pellets ≥ 1, magazine ≥ 1, range field ≤ 1000.
+- **Part records**: bgd.bin section 5 (250 × 0x78, same layout as W). bgd.bin has a section
+  table at +0x24 (16 B: offset, count, stride), as in the stage files. Items: section 0
+  (0x18 B: +0 item id, +4 section-5 index, +0xc kind; 3 = weapon part), found through
+  section 3 (category = item id high 16 bits, start, count). Part slot = section-5 record
+  +0x12 & 0xf; item category 0x6f3N = slot N.
+- **Default loadout**: bgd section 13 (5 × 0x34; first 3 used = the 3 weapon slots), 6
+  entries of 8 B, +4 = index into section 12 (8 B, +0 item id); entry 5 is the ammo item.
+  Read by FUN_0031b690. **Handgun slot = parts #20 (item 0x6f300000) + #52 (0x6f310000), ammo
+  0x62300000.** Sections 6/7 are a second set (parts 0x7030…), probably another mode: G.
+- **Enemy weapons** are separate: stage file section 24 (z128: 28 × 0x104; the first 0x78 B
+  are copied into W by FUN_0031a2f0, chosen by R+0x32).
+- **Materia shots** use bgd section 11 (23 × 0x6c bullet records), picked by (materia
+  type 1–6, level 1–3) through bytes at section 4 (+0x313 / +0x343). Cost byte +6 comes off
+  weapon+0x24 (MP). Not needed for the handgun.
+
+### 5.4 Leads not followed
+- Muzzle flash effect: try the fire motion h_st_f's event track, or FUN_003359d8(…, 0x42c00).
+- How the aim point char+0x2b0 is built (any reticle bloom/spread; likely reads W+0x1c..0x28).
+- Zoom-camera offset (camera modes 2 and 4 in FUN_0032ace0).

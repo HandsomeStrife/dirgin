@@ -127,17 +127,33 @@ class Collision:
         if magic != b'DCOL' or ver != 2:
             raise ValueError('not a DCOL v2 file (rebuild: make -C native/assets/collision z128web)')
         o = 0x30
+        if len(b) < o + nv * 12 + nt * 20 + 8:
+            raise ValueError('DCOL: size mismatch (file shorter than its header says)')
         self.v = array('f'); self.v.frombytes(b[o:o + nv * 12]); o += nv * 12
         tri = array('I'); tri.frombytes(b[o:o + nt * 12]); o += nt * 12
         surf = array('I'); surf.frombytes(b[o:o + nt * 4]); o += nt * 4
         info = array('I'); info.frombytes(b[o:o + nt * 4]); o += nt * 4
         npoly, _ = struct.unpack_from('<II', b, o); o += 8
+        if o + npoly * 40 != len(b):
+            raise ValueError('DCOL: size mismatch')
         pw = array('I'); pw.frombytes(b[o:o + npoly * 40]); o += npoly * 40
-        if o != len(b):
-            raise ValueError('size mismatch')
         if sys.byteorder != 'little':
             for a in (self.v, tri, surf, info, pw):
                 a.byteswap()
+        # A corrupt file fails here with a clear error, not an IndexError or NaN later.
+        for t in range(nt * 3):
+            if tri[t] >= nv:
+                raise ValueError('DCOL: triangle %d vertex index %d >= %d' % (t // 3, tri[t], nv))
+        for q in range(npoly):
+            w, pnv = 10 * q, pw[10 * q] & 0xffff
+            if pnv < 3 or pnv > 4:
+                raise ValueError('DCOL: walk polygon %d has %d vertices (3 or 4)' % (q, pnv))
+            for a in range(pnv):
+                if pw[w + 2 + a] >= nv:
+                    raise ValueError('DCOL: walk polygon %d vertex index %d >= %d' % (q, pw[w + 2 + a], nv))
+                nb = pw[w + 6 + a]
+                if nb != 0xffffffff and nb >= npoly:
+                    raise ValueError('DCOL: walk polygon %d neighbour %d >= %d' % (q, nb, npoly))
         self.block80 = block80
         v = self.v
         # ---- triangle set (capsule_push, segment_hit)
@@ -219,14 +235,21 @@ class Collision:
                 return False
         return True
 
-    def find_poly(self, x, z, y_top, y_bot):
+    def is_wall(self, P):
+        """A polygon the walker never enters (nav_move's neighbour rules):
+        0x04/0x40/0x100, and 0x80 for block80 bodies. 0x10 drops are entered."""
+        return bool(P.flags & F_WALLS) or (self.block80 and bool(P.flags & F_NPC))
+
+    def find_poly(self, x, z, y_top, y_bot, all_flags=False):
         """First walk polygon hit by the vertical segment (x, y_top, z) ->
         (x, y_bot, z), y_top < y_bot (-Y up): the smallest y >= y_top.
-        Returns (poly index, y) or None. y_top None: no upper limit."""
+        Returns (poly index, y) or None. y_top None: no upper limit.
+        Skips polygons that are walls for this body unless all_flags (locate:
+        the game's own search, FUN_0026f750, tests no flags)."""
         best = None
         for i in self.cells(x, z, x, z, self.pgrid):
             P = self.polys[i]
-            if not P.ok or abs(P.plane[1]) < 1e-6:
+            if not P.ok or abs(P.plane[1]) < 1e-6 or (not all_flags and self.is_wall(P)):
                 continue
             pl = P.plane
             y = -(pl[0] * x + pl[2] * z + pl[3]) / pl[1]
@@ -241,11 +264,12 @@ class Collision:
     def nearest_poly(self, x, y, z, max_drop):
         """The polygon a walking body at feet (x,y,z) is on: the game keeps it
         (body+0x110); a stateless caller takes the polygon nearest the feet
-        between SEARCH_UP above and max_drop below. (poly, y) or None."""
+        between SEARCH_UP above and max_drop below. (poly, y) or None.
+        Skips polygons that are walls for this body."""
         best = None
         for i in self.cells(x, z, x, z, self.pgrid):
             P = self.polys[i]
-            if not P.ok or abs(P.plane[1]) < 1e-6:
+            if not P.ok or abs(P.plane[1]) < 1e-6 or self.is_wall(P):
                 continue
             pl = P.plane
             py = -(pl[0] * x + pl[2] * z + pl[3]) / pl[1]
@@ -260,8 +284,11 @@ class Collision:
 
     def locate(self, x, y, z):
         """The polygon the body at feet (x,y,z) stands on or is above
-        (FUN_0035cbc8: from SEARCH_UP above to SEARCH_DOWN below)."""
-        return self.find_poly(x, z, y - SEARCH_UP, y + SEARCH_DOWN)
+        (FUN_0035cbc8(out, hit, point, 0): the segment from SEARCH_UP above the
+        point (DAT_004a2178 = (0, -7.5, 0)) to SEARCH_DOWN (200.0) below it, over
+        the tag-0 faces of every loaded file (FUN_0026a668); the smallest-t hit
+        wins and no flag is tested)."""
+        return self.find_poly(x, z, y - SEARCH_UP, y + SEARCH_DOWN, True)
 
     def _clamp(self, P, x, y, z):
         """FUN_0035d788: closest point on the polygon's edges."""
@@ -372,7 +399,13 @@ class Collision:
             # boundary edge
             x, y, z = ex, ey, ez
             mx, my, mz = cx - ex, cy - ey, cz - ez
-            if P.flags & F_CHUNK:                       # FUN_00359f38 at the end point
+            # 0x02 on the current polygon (0x358c60..0x358c8c): FUN_00359f38(body,
+            # &done, end) with end = pass start + move (the stack slot built at
+            # 0x358350), so the search is at the end point c. A different polygon
+            # found: the body is put at the hit point on it and the pass loop ends
+            # (done = 1); the rest of the move is not wall-tested. More than
+            # DROP_FALL lower than the crossing point: ground states start a fall.
+            if P.flags & F_CHUNK:
                 f = self.locate(cx, cy, cz)
                 if f is not None and f[0] != pi:
                     fy = f[1]
@@ -417,14 +450,16 @@ class Collision:
         Ground: off the mesh (no polygon from SEARCH_UP above to max_drop below:
         stay, on_ground False, the caller falls), or a drop -> on_ground False
         at the drop point. air=True: walk the ground point only (the jump / fall
-        horizontal step); y is unchanged, on_ground False, and the height of
+        horizontal step; off the mesh it stays put too); y is unchanged,
+        on_ground False, and the height of
         the polygon under the new point is ground_y(). radius/height: unused
         (the polygons are the area the body's centre may use)."""
         f = (self.find_poly(x, z, y - SEARCH_UP, y + SEARCH_DOWN) if air
              else self.nearest_poly(x, y, z, max_drop))
         if f is None:
-            if air:
-                return x + dx, y, z + dz, False, False
+            # Airborne too: FUN_00357d48 skips the whole walk when the body has
+            # no polygon (body+0x110 == 0), and an airborne body keeps the one
+            # it took off from, so the game's body never moves off the mesh.
             return x, y, z, False, False
         pi, gy = f
         nx, ny, nz, _p, hit, fall = self.nav_move(pi, x, gy, z, dx, dz, air)

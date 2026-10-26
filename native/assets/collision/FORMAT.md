@@ -276,10 +276,17 @@ Flags (on the neighbour unless noted):
 |------|------|------|
 | 0x80 | a wall for bodies with flag +0xac 0x200 (char+0x45c; set by `FUN_00559748` from a controller's +0x28 bit 2, not resolved for the player) | 146 polygons, incl. a stair series every 18 units from y -106 to -16 |
 | 0x10 | ground states (`FUN_00357798`): the neighbour's shared edge plane (`FUN_0035d0e0`) with n.y < 0 (pointing up) -> enter and start falling (`FUN_00357148`); else a wall. Entering 0x10 from a polygon without it first casts a short probe for raised 0x10 polygons (`FUN_0035cca0`, `FUN_0035cef0`; not ported) | 131: the ladders (ladder 35 is polygon 25, x -1106..-1109.7, joining the landings at y -90.6 and -146: a wall from below, a drop from above) |
-| 0x02 | on the CURRENT polygon, at a boundary edge: `FUN_00359f38` looks for another polygon under the end point (`FUN_0035cbc8`: 7.5 above to 200 below, every loaded file); found -> move onto it; more than 3 lower -> fall. Crossing between chunk files (args inferred: the decompiler lost them) | 22 |
+| 0x02 | on the CURRENT polygon, at a boundary edge (0x358c60): `FUN_00359f38(body, &done, end)`, `end` = pass start + move (stack slot built at 0x358350; worker 0062 read the MIPS, the decompiler lost the arguments). `FUN_0035cbc8(out, hit, end, 0)` casts from 7.5 above (`DAT_004a2178` = (0,-7.5,0)) to 200 below over the tag-0 faces of every loaded file (`FUN_0026a668` -> `FUN_0026f750`: smallest t, **no flag test**). A polygon other than the current one: the body goes to the hit point on it, `done` = 1 ends the pass loop (the rest of the move is not wall-tested); more than 3 lower than the crossing point -> fall (states 1/3: `FUN_00356fd8`; state 2: nothing). None: the edge is a wall | 22: 10 seam pairs across chunk files (seam drop 0-1) plus 1669 and 2459 one polygon behind a seam |
 | 0x100 | ground states: polygon search 8.5 below the end point (`FUN_00359f38`) | none |
 | 0x04 | ground states: shared-edge n.y < 0 -> `FUN_00357628` (state 1), else wall | none |
 | 0x40 | a wall unless body flag +0xac bit 3 | none |
+
+**No polygon** (body+0x110 == 0): `FUN_00357d48` skips the walk entirely, so the
+body does not move horizontally. The ports do the same for an airborne move off the
+mesh; the game's airborne body never has no polygon (it keeps the take-off one).
+The ports' polygon searches (`find_poly`/`nearest_poly`) skip polygons the walker
+refuses to enter (0x04/0x40/0x100, 0x80 for block80); `locate` (= `FUN_0035cbc8`)
+does not.
 
 In the fall state (2) the body's ground point keeps walking the mesh (with no
 0x10/0x100/0x04 rules), the visual y follows the arc, and it lands when the y

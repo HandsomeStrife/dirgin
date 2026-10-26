@@ -18,7 +18,8 @@
 // neighbours. A boundary edge is a wall (slide along it, 1% pushed back in).
 // Flags: 0x80 walkable unless options.block80; 0x10 one-way drop (fall if the
 // shared edge's outward normal points up, else wall); 0x02 boundary edges look
-// for a polygon in another file; 0x04/0x40/0x100 (absent in z128) walls. No
+// for a polygon in another file; 0x04/0x40/0x100 (absent in z128) walls; the
+// polygon searches skip polygons that are walls for the body. No
 // slope limit, step height, ledge or headroom rule: the polygons are the
 // walkable area. The triangle set (capsulePush, segment) = sub-tree-1 packets
 // the character probes test (mask & 0xfe7e) + sub-tree-0 tag-1 primitives.
@@ -142,13 +143,27 @@ export class Collision {
       throw new Error('not a DCOL v2 file (rebuild: make -C native/assets/collision z128web)');
     const nv = dv.getUint32(8, true), nt = dv.getUint32(12, true);
     let o = 0x30;
+    const pOff = o + nv * 12 + nt * 20;                      // npoly word
+    if (pOff + 8 > buf.byteLength) throw new Error('DCOL: size mismatch (file shorter than its header says)');
     const v = new Float32Array(buf, o, nv * 3); o += nv * 12;
     const tri = new Uint32Array(buf, o, nt * 3); o += nt * 12;
     const surf = new Uint32Array(buf, o, nt); o += nt * 4;
     const info = new Uint32Array(buf, o, nt); o += nt * 4;
     const npoly = dv.getUint32(o, true); o += 8;
+    if (o + npoly * 40 !== buf.byteLength) throw new Error('DCOL: size mismatch');
     const pw = new Uint32Array(buf, o, npoly * 10); o += npoly * 40;
-    if (o !== buf.byteLength) throw new Error('size mismatch');
+    // A corrupt file fails here with a clear error, not a TypeError or NaN later.
+    for (let t = 0; t < nt * 3; t++)
+      if (tri[t] >= nv) throw new Error(`DCOL: triangle ${Math.floor(t / 3)} vertex index ${tri[t]} >= ${nv}`);
+    for (let q = 0; q < npoly; q++) {
+      const w = q * 10, pnv = pw[w] & 0xffff;
+      if (pnv < 3 || pnv > 4) throw new Error(`DCOL: walk polygon ${q} has ${pnv} vertices (3 or 4)`);
+      for (let a = 0; a < pnv; a++) {
+        if (pw[w + 2 + a] >= nv) throw new Error(`DCOL: walk polygon ${q} vertex index ${pw[w + 2 + a]} >= ${nv}`);
+        const nb = pw[w + 6 + a];
+        if (nb !== 0xffffffff && nb >= npoly) throw new Error(`DCOL: walk polygon ${q} neighbour ${nb} >= ${npoly}`);
+      }
+    }
     // (DCOL is little-endian; every browser we target is too.)
     this.block80 = !!options.block80;
 
@@ -237,14 +252,20 @@ export class Collision {
     return true;
   }
 
+  // A polygon the walker never enters (navMove's neighbour rules): 0x04/0x40/0x100,
+  // and 0x80 for block80 bodies. 0x10 (drop) polygons are entered, so they count.
+  _isWall(P) { return (P.flags & F_WALLS) !== 0 || (this.block80 && (P.flags & F_NPC) !== 0); }
+
   // First walk polygon hit by the vertical segment yTop -> yBot (yTop < yBot,
   // -Y up): the smallest y >= yTop. Returns [poly, y] or null. yTop null: no limit.
-  findPoly(x, z, yTop, yBot) {
+  // Skips polygons that are walls for this body unless all = true (locate: the
+  // game's own search, FUN_0026f750, tests no flags).
+  findPoly(x, z, yTop, yBot, all = false) {
     const g = this.pgrid, m = gridCells(g, x, z, x, z), list = g.list;
     let bi = -1, by = 0;
     for (let q = 0; q < m; q++) {
       const i = list[q], P = this.polys[i];
-      if (!P.ok || Math.abs(P.plane[1]) < 1e-6) continue;
+      if (!P.ok || Math.abs(P.plane[1]) < 1e-6 || (!all && this._isWall(P))) continue;
       const pl = P.plane;
       const y = -(pl[0] * x + pl[2] * z + pl[3]) / pl[1];
       if ((yTop !== null && y < yTop) || y > yBot) continue;
@@ -255,13 +276,13 @@ export class Collision {
   }
 
   // The polygon a walking body at the feet is on: nearest the feet between
-  // SEARCH_UP above and maxDrop below (cid_query.py nearest_poly).
+  // SEARCH_UP above and maxDrop below (cid_query.py nearest_poly). Skips walls.
   nearestPoly(x, y, z, maxDrop) {
     const g = this.pgrid, m = gridCells(g, x, z, x, z), list = g.list;
     let bi = -1, by = 0, bd = 0;
     for (let q = 0; q < m; q++) {
       const i = list[q], P = this.polys[i];
-      if (!P.ok || Math.abs(P.plane[1]) < 1e-6) continue;
+      if (!P.ok || Math.abs(P.plane[1]) < 1e-6 || this._isWall(P)) continue;
       const pl = P.plane;
       const py = -(pl[0] * x + pl[2] * z + pl[3]) / pl[1];
       if (py < y - SEARCH_UP || py > y + maxDrop) continue;
@@ -272,8 +293,11 @@ export class Collision {
     return bi < 0 ? null : [bi, by];
   }
 
-  // FUN_0035cbc8: from SEARCH_UP above to SEARCH_DOWN below.
-  locate(x, y, z) { return this.findPoly(x, z, y - SEARCH_UP, y + SEARCH_DOWN); }
+  // FUN_0035cbc8(out, hit, point, 0): the segment from SEARCH_UP above the point
+  // (DAT_004a2178 = (0, -7.5, 0)) to SEARCH_DOWN (200.0) below it, over the
+  // tag-0 faces of every loaded file (FUN_0026a668); the smallest-t hit wins and
+  // no flag is tested.
+  locate(x, y, z) { return this.findPoly(x, z, y - SEARCH_UP, y + SEARCH_DOWN, true); }
 
   // FUN_0035d788: closest point on the polygon's edges.
   _clamp(P, x, y, z) {
@@ -370,7 +394,13 @@ export class Collision {
       // boundary edge
       x = ex; y = ey; z = ez;
       mx = cx - ex; my = cy - ey; mz = cz - ez;
-      if (P.flags & F_CHUNK) {                                    // FUN_00359f38 at the end point
+      // 0x02 on the current polygon (0x358c60..0x358c8c): FUN_00359f38(body, &done,
+      // end) with end = pass start + move (the stack slot built at 0x358350), so
+      // the search is at the end point c. A different polygon found: the body is
+      // put at the hit point on it and the pass loop ends (done = 1); the rest of
+      // the move is not wall-tested. More than DROP_FALL lower than the crossing
+      // point: ground states start a fall (FUN_00357148).
+      if (P.flags & F_CHUNK) {
         const f = this.locate(cx, cy, cz);
         if (f !== null && f[0] !== pi) {
           const fy = f[1];
@@ -417,14 +447,16 @@ export class Collision {
   // pos {x,y,z} = feet; delta {x,z} = horizontal move this tick (cid_query.py move).
   // Off the mesh (no polygon from SEARCH_UP above to maxDrop below): stay,
   // onGround false (the caller falls). A drop: onGround false at the drop point.
-  // opts.air: walk the ground point only; y unchanged, onGround false.
+  // opts.air: walk the ground point only; y unchanged, onGround false. Airborne
+  // and off the mesh: stay too. FUN_00357d48 skips the whole walk when the body
+  // has no polygon (body+0x110 == 0), and an airborne body keeps the polygon it
+  // took off from, so the game's body never moves off the mesh.
   // opts.radius/height: unused (the polygons are the area the body's centre may use).
   move(pos, delta, opts = {}) {
     const maxDrop = opts.maxDrop ?? 40, air = !!opts.air;
     const f = air ? this.findPoly(pos.x, pos.z, pos.y - SEARCH_UP, pos.y + SEARCH_DOWN)
                   : this.nearestPoly(pos.x, pos.y, pos.z, maxDrop);
     if (f === null) {
-      if (air) return { x: pos.x + delta.x, y: pos.y, z: pos.z + delta.z, onGround: false, hitWall: false };
       return { x: pos.x, y: pos.y, z: pos.z, onGround: false, hitWall: false };
     }
     const r = this.navMove(f[0], pos.x, f[1], pos.z, delta.x, delta.z, air);

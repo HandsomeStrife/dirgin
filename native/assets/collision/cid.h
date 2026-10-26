@@ -80,6 +80,8 @@ typedef struct {
     cid_poly *polys;     int npolys;    /* sub-tree-0 tag-0 walk mesh (FORMAT.md 3d) */
     int n_poly_links;        /* neighbour pointers resolved to a polygon          */
     int n_poly_dangling;     /* non-zero neighbour pointers matching no polygon   */
+    int n_poly_dup_off;      /* polygons sharing a record offset with an earlier one
+                                (a pointer to it resolves to the lowest index)   */
 
     cid_vec3 *verts;     int nverts;
     cid_tri  *tris;      int ntris;

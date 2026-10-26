@@ -57,6 +57,9 @@ int main(int argc, char **argv) {
                     argv[i + 2], ms[i].nboxes);
         tot_v += (size_t)ms[i].nverts; tot_t += (size_t)ms[i].ntris;
         tot_p += (size_t)ms[i].npolys;
+        if (ms[i].n_poly_dup_off)
+            fprintf(stderr, "warn: %s: %d walk-mesh records reached twice (pointers take the first)\n",
+                    argv[i + 2], ms[i].n_poly_dup_off);
         if (ms[i].n_poly_dangling)
             fprintf(stderr, "warn: %s: %d walk-mesh neighbour pointers match no polygon (left as walls)\n",
                     argv[i + 2], ms[i].n_poly_dangling);

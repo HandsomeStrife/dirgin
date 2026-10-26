@@ -627,11 +627,15 @@ static void finalize_bbox(cid_mesh *m) {
 
 /* Neighbour pointers (payload offsets of face records) -> polygon indices.
  * Polygons are appended in file order, so their offsets are already sorted
- * within a node but not across nodes: sort a copy of (off, index). */
+ * within a node but not across nodes: sort a copy of (off, index). If two
+ * nodes share a record (the same offset twice), a pointer to it resolves to
+ * the lowest polygon index: the sort breaks ties on the index and the lookup
+ * takes the first match (qsort is not stable and bsearch may return any). */
 typedef struct { uint32_t off; int32_t i; } poly_key;
 static int poly_key_cmp(const void *a, const void *b) {
-    uint32_t x = ((const poly_key *)a)->off, y = ((const poly_key *)b)->off;
-    return x < y ? -1 : x > y;
+    const poly_key *x = a, *y = b;
+    if (x->off != y->off) return x->off < y->off ? -1 : 1;
+    return x->i < y->i ? -1 : x->i > y->i;
 }
 static void resolve_poly_links(cid_mesh *m) {
     if (m->npolys <= 0) return;
@@ -639,14 +643,20 @@ static void resolve_poly_links(cid_mesh *m) {
     if (!k) return;                       /* links stay -1: fails toward walls */
     for (int i = 0; i < m->npolys; i++) { k[i].off = m->polys[i].off; k[i].i = i; }
     qsort(k, (size_t)m->npolys, sizeof *k, poly_key_cmp);
+    for (int i = 1; i < m->npolys; i++)
+        if (k[i].off == k[i - 1].off) m->n_poly_dup_off++;
     for (int i = 0; i < m->npolys; i++) {
         cid_poly *p = &m->polys[i];
         for (int j = 0; j < p->nv; j++) {
-            if (!p->raw_nbr[j]) continue;
-            poly_key q = { p->raw_nbr[j], 0 };
-            poly_key *h = bsearch(&q, k, (size_t)m->npolys, sizeof *k, poly_key_cmp);
-            if (h) { p->nbr[j] = h->i; m->n_poly_links++; }
-            else   m->n_poly_dangling++;
+            uint32_t want = p->raw_nbr[j];
+            if (!want) continue;
+            size_t lo = 0, hi = (size_t)m->npolys;      /* first key with off >= want */
+            while (lo < hi) {
+                size_t mid = lo + (hi - lo) / 2;
+                if (k[mid].off < want) lo = mid + 1; else hi = mid;
+            }
+            if (lo < (size_t)m->npolys && k[lo].off == want) { p->nbr[j] = k[lo].i; m->n_poly_links++; }
+            else m->n_poly_dangling++;
         }
     }
     free(k);
