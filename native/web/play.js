@@ -1,16 +1,18 @@
 // Dirge z128, playable: Vincent (data/vincent/vincent.glb) walking the room with
 // third-person controls, a follow camera and collision (collision.js, or the stub).
 //
-// The room loading and shader are copied from main.js (kept separate on purpose).
+// The room comes from room.js (main.js's loader and shader, with its z-fight fixes).
 // Game space, -Y up. URL params: hud=0, aa=1, dpr=N, col=stub (force the stub),
 // cam=ex,ey,ez,yaw,pitch (detached camera at that view; H re-attaches it),
 // actions=0 (no action modules), packs=a,b (clip packs to load; default jump,ladder,shoot,
-// packs= loads none). Packs load in the background after start (vincent_<pack>.glb).
+// packs= loads none), zprio=0 / zunder=0 (room.js depth-tie offsets off). Packs load in
+// the background after start (vincent_<pack>.glb).
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { TICK, PlayerController, SpeedAnimator, FollowCamera } from './player.js';
 import { loadActions } from './actions/index.js';
 import { initReport } from './report.js';
+import { loadRoom } from './room.js';
 
 const params = new URLSearchParams(location.search);
 const hud = document.getElementById('hud');
@@ -45,138 +47,74 @@ function measureSole(vin, root) {
   return maxY - vin.body.position.y;
 }
 
-// ------------------------------------------------------------ room (from main.js)
-const VS = `
-precision highp float;
-in vec3 position;
-in vec2 uv;
-in vec4 color;
-uniform mat4 modelViewMatrix, projectionMatrix;
-uniform bool uFog;
-uniform float uFogA, uFogB, uFogMin;
-out vec2 vUV;
-out vec4 vCol;
-out float vFogW, vW;
-void main() {
-  vec4 clip = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-  float f = uFog ? clamp(uFogA * clip.w + uFogB, uFogMin, 1.0) : 1.0;
-  vUV = uv; vCol = color; vFogW = f * clip.w; vW = clip.w;
-  gl_Position = clip;
-}`;
-
-const FS = `
-precision highp float;
-in vec2 vUV;
-in vec4 vCol;
-in float vFogW, vW;
-uniform sampler2D uTex;
-uniform bool uTexOn, uFog, uOutAlpha;
-uniform vec3 uFogColor;
-uniform float uARef;
-uniform int uAMode;
-out vec4 fragColor;
-void main() {
-  vec4 c = vCol;
-  if (uTexOn) {
-    vec4 t = texture(uTex, vUV);
-    c.rgb = min(t.rgb * vCol.rgb * 2.0, 1.0);
-    c.a   = min(t.a   * vCol.a   * 2.0, 1.0);
-  }
-  if (uAMode == 1 && c.a <  uARef) discard;
-  if (uAMode == 2 && c.a >= uARef) discard;
-  if (uFog) c.rgb = mix(uFogColor, c.rgb, vFogW / vW);
-  fragColor = vec4(c.rgb, uOutAlpha ? c.a : 1.0);
-}`;
-
-function makeMaterial(scene, tex, draw, mode) {
-  const fog = scene.fog;
-  const m = new THREE.RawShaderMaterial({
-    glslVersion: THREE.GLSL3, vertexShader: VS, fragmentShader: FS,
-    side: THREE.DoubleSide, depthFunc: THREE.LessDepth,
-    uniforms: {
-      uTex: { value: tex }, uTexOn: { value: !!tex },
-      uFog: { value: !!(fog && draw.fog) },
-      uFogA: { value: fog ? -1 / (fog.far - fog.near) : 0 },
-      uFogB: { value: fog ? fog.far / (fog.far - fog.near) : 0 },
-      uFogMin: { value: fog ? fog.min : 0 },
-      uFogColor: { value: new THREE.Vector3(...(fog ? fog.color : [0, 0, 0])) },
-      uARef: { value: draw.aref }, uAMode: { value: mode }, uOutAlpha: { value: mode !== 0 },
-    },
-  });
-  if (mode === 0) {
-    m.blending = THREE.NoBlending;
-  } else {
-    m.blending = THREE.CustomBlending;
-    m.blendEquation = THREE.AddEquation;
-    m.blendSrc = THREE.SrcAlphaFactor; m.blendDst = THREE.OneMinusSrcAlphaFactor;
-    m.blendSrcAlpha = THREE.ZeroFactor; m.blendDstAlpha = THREE.OneFactor;
-    m.depthWrite = mode === 1;
-  }
-  return m;
-}
-
-async function fetchBuf(url) {
-  const r = await fetch(url);
-  if (!r.ok) throw new Error(`${url}: HTTP ${r.status}`);
-  return r.arrayBuffer();
-}
-
-async function loadRoom() {
-  const scene = await (await fetch('data/scene.json')).json();
-  // the static posed Vincent in scene.json is replaced by the animated glb
-  const draws = scene.draws.filter(d => d.kind !== 'char');
-  const used = new Set(draws.map(d => d.mesh));
-  const texUsed = new Set(draws.map(d => d.tex).filter(Boolean));
-  const meshes = Object.entries(scene.meshes).filter(([id]) => used.has(id));
-  const texs = Object.entries(scene.textures).filter(([id]) => texUsed.has(id));
-  const files = [...meshes.map(e => e[1]), ...texs.map(e => e[1])];
-  let done = 0;
-  const bufs = {};
-  await Promise.all(files.map(async f => {
-    bufs[f.file] = await fetchBuf('data/' + f.file);
-    msg.textContent = `loading room ${++done}/${files.length}`;
-  }));
-
-  const textures = {};
-  for (const [id, t] of texs) {
-    const tx = new THREE.DataTexture(new Uint8Array(bufs[t.file]), t.w, t.h, THREE.RGBAFormat);
-    tx.wrapS = tx.wrapT = THREE.RepeatWrapping;
-    tx.magFilter = THREE.LinearFilter; tx.minFilter = THREE.LinearMipmapLinearFilter;
-    tx.generateMipmaps = true; tx.flipY = false; tx.colorSpace = THREE.NoColorSpace;
-    tx.needsUpdate = true;
-    textures[id] = tx;
-  }
-  const attrs = {}, floats = {};
-  for (const [id, m] of meshes) {
-    floats[id] = new Float32Array(bufs[m.file]);   // the Report ray cast reads these
-    const ib = new THREE.InterleavedBuffer(floats[id], 12);
-    attrs[id] = {
-      position: new THREE.InterleavedBufferAttribute(ib, 3, 0),
-      uv: new THREE.InterleavedBufferAttribute(ib, 2, 6),
-      color: new THREE.InterleavedBufferAttribute(ib, 4, 8),
-    };
-  }
-
-  const root = new THREE.Scene();
-  const lo = new THREE.Vector3(...scene.bbox.min), hi = new THREE.Vector3(...scene.bbox.max);
-  for (const d of draws) {
-    const a = attrs[d.mesh];
-    const g = new THREE.BufferGeometry();
-    for (const k of ['position', 'uv', 'color']) g.setAttribute(k, a[k]);
-    g.setDrawRange(d.first, d.count);
-    const tex = d.tex ? textures[d.tex] : null;
-    for (const mode of (d.aref >= 0 && tex ? [1, 2] : [0])) {
-      const mesh = new THREE.Mesh(g, makeMaterial(scene, tex, d, mode));
-      mesh.frustumCulled = false; mesh.matrixAutoUpdate = false;
-      mesh.name = d.name + (mode ? `#ate${mode}` : '');
-      mesh.userData = { draw: scene.draws.indexOf(d), mode };   // index into scene.draws, as in main.js (report.js)
-      root.add(mesh);
-    }
-  }
-  return { scene, root, lo, hi, floats };
-}
+// ------------------------------------------------------------ room (room.js)
+// the static posed Vincent in scene.json is replaced by the animated glb
+const loadRoomPlay = () => loadRoom({
+  skip: d => d.kind === 'char',
+  onProgress: (n, t) => { msg.textContent = `loading room ${n}/${t}`; },
+});
 
 // ------------------------------------------------------------ Vincent
+// The game draws Vincent's flag-bit-1 groups (hair cards, some cloth edges; material
+// 'alpha') with ABE (Cs-Cd)*As+Cd and ATE GEQUAL ref, AFAIL = RGB_ONLY: EVERY fragment
+// blends by its alpha, and only those with As >= ref write depth (HANDOFF "Uncaptured-model
+// render"; render_scene_textured -charatest does the same). Two passes per primitive, as
+// room.js does for the room: pass 1 keeps a >= ref (blend + depth write), pass 2 keeps
+// a < ref (blend, no depth write). The game draws the groups in one fixed order (glb
+// primitive extras.drawOrder, opaque and alpha runs interleaved). The renderer runs with
+// sortObjects = false, which ignores renderOrder and draws every `transparent` material
+// after all opaque ones, so these stay non-transparent and the meshes are put in
+// drawOrder in the scene graph instead.
+const CHAR_AREF = 0.77734;                         // placement.json char_alpha_ref (glb alphaCutoff)
+function gsBlend(m) {
+  m.transparent = false;
+  m.blending = THREE.CustomBlending;
+  m.blendEquation = THREE.AddEquation;
+  m.blendSrc = THREE.SrcAlphaFactor; m.blendDst = THREE.OneMinusSrcAlphaFactor;
+  m.blendSrcAlpha = THREE.ZeroFactor; m.blendDstAlpha = THREE.OneFactor;
+}
+function gsAlphaPasses(prims) {
+  // glb primitive extras.drawOrder: GLTFLoader puts primitive extras on the geometry
+  const order = (o, i) => {
+    const d = o.geometry.userData?.drawOrder ?? o.userData?.drawOrder;
+    return Number.isFinite(d) ? d : i;
+  };
+  const below = new Map();                         // pass-1 material -> pass-2 material
+  const afail = [];
+  for (const o of prims) {
+    const m = o.material;
+    if (!(m.name === 'alpha' || m.alphaTest > 0)) continue;
+    const ref = m.alphaTest > 0 ? m.alphaTest : CHAR_AREF;
+    m.alphaTest = ref; m.depthWrite = true; gsBlend(m);
+    let m2 = below.get(m);
+    if (!m2) {
+      m2 = m.clone(); m2.alphaTest = ref; m2.depthWrite = false; gsBlend(m2);
+      m2.onBeforeCompile = sh => {
+        sh.fragmentShader = sh.fragmentShader.replace('#include <alphatest_fragment>',
+          'if ( diffuseColor.a >= alphaTest ) discard;   // GS AFAIL pass: keep a < ref');
+      };
+      m2.customProgramCacheKey = () => 'gs-afail';
+      below.set(m, m2);
+    }
+    const o2 = new THREE.SkinnedMesh(o.geometry, m2);
+    o2.bind(o.skeleton, o.bindMatrix);
+    o2.frustumCulled = false; o2.name = (o.name || 'prim') + '#afail';
+    o2.userData = { ...o.userData, afail: true };
+    afail.push([o, o2]);
+  }
+  // scene-graph order = draw order: each parent's primitives by drawOrder, pass 2
+  // right after its pass 1 (other children, e.g. joint nodes, keep their places)
+  const idx = new Map(prims.map((o, i) => [o, order(o, i)]));
+  for (const parent of new Set(prims.map(o => o.parent))) {
+    const kids = parent.children.filter(c => idx.has(c)).sort((a, b) => idx.get(a) - idx.get(b));
+    const seq = kids.flatMap(c => [c, ...afail.filter(([o]) => o === c).map(([, o2]) => o2)]);
+    let k = 0;
+    parent.children = parent.children.flatMap(c => (idx.has(c) ? (k++ === 0 ? seq : []) : [c]));
+    for (const c of seq) c.parent = parent;
+  }
+  return afail.map(([, o2]) => o2);
+}
+
 async function loadVincent(scale) {
   msg.textContent = 'loading vincent…';
   const gltf = await new GLTFLoader().loadAsync('data/vincent/vincent.glb');
@@ -188,14 +126,8 @@ async function loadVincent(scale) {
     const m = o.material;
     if (m.map) { m.map.colorSpace = THREE.NoColorSpace; m.map.needsUpdate = true; }  // raw texel, like the room
     m.side = THREE.DoubleSide;
-    if (m.name === 'alpha' || m.alphaTest > 0) {
-      m.transparent = true; m.alphaTest = 0.77734; m.depthWrite = true;
-    }
   });
-  prims.forEach((o, i) => {
-    const ex = o.userData || {};
-    o.renderOrder = 1000 + (Number.isFinite(ex.drawOrder) ? ex.drawOrder : i);
-  });
+  const afail = gsAlphaPasses(prims);
   // gltf.scene is Y-up (root node 0 flips the game's -Y-up model). Flip back with
   // Rx(pi) so it sits in game space; glb +Z forward becomes game -Z.
   const flip = new THREE.Group();
@@ -209,7 +141,7 @@ async function loadVincent(scale) {
     if (!c) throw new Error(`vincent.glb has no clip ${n}`);
     return c;
   };
-  return { body, mixRoot: gltf.scene, clips: { idle: clip('h_st'), walk: clip('h_wk'), run: clip('h_rn') }, prims };
+  return { body, mixRoot: gltf.scene, clips: { idle: clip('h_st'), walk: clip('h_wk'), run: clip('h_rn') }, prims, afail };
 }
 
 // clip sidecars: vincent.json + each pack's json -> { clip name: entry }
@@ -219,16 +151,69 @@ async function loadMotions(name) {
   return (await r.json()).clips || {};
 }
 
+// SHA-1 hex of an ASCII string (crypto.subtle needs a secure context; the page is plain http).
+function sha1Hex(str) {
+  const b = Array.from(str, c => c.charCodeAt(0) & 0xff), ml = b.length * 8;
+  b.push(0x80); while (b.length % 64 !== 56) b.push(0);
+  for (let i = 7; i >= 0; i--) b.push(i >= 4 ? 0 : (ml >>> (i * 8)) & 0xff);
+  let h0 = 0x67452301, h1 = 0xefcdab89, h2 = 0x98badcfe, h3 = 0x10325476, h4 = 0xc3d2e1f0;
+  const w = new Array(80), rol = (x, n) => (x << n) | (x >>> (32 - n));
+  for (let o = 0; o < b.length; o += 64) {
+    for (let i = 0; i < 16; i++) w[i] = (b[o + 4 * i] << 24) | (b[o + 4 * i + 1] << 16) | (b[o + 4 * i + 2] << 8) | b[o + 4 * i + 3];
+    for (let i = 16; i < 80; i++) w[i] = rol(w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16], 1);
+    let a = h0, bb = h1, c = h2, d = h3, e = h4;
+    for (let i = 0; i < 80; i++) {
+      const [f, k] = i < 20 ? [(bb & c) | (~bb & d), 0x5a827999] : i < 40 ? [bb ^ c ^ d, 0x6ed9eba1]
+        : i < 60 ? [(bb & c) | (bb & d) | (c & d), 0x8f1bbcdc] : [bb ^ c ^ d, 0xca62c1d6];
+      const t = (rol(a, 5) + f + e + k + w[i]) | 0;
+      e = d; d = c; c = rol(bb, 30); bb = a; a = t;
+    }
+    h0 = (h0 + a) | 0; h1 = (h1 + bb) | 0; h2 = (h2 + c) | 0; h3 = (h3 + d) | 0; h4 = (h4 + e) | 0;
+  }
+  return [h0, h1, h2, h3, h4].map(x => (x >>> 0).toString(16).padStart(8, '0')).join('');
+}
+
+// The main rig's skeleton signature, in export_web_vincent.py's parent_sha1 form:
+// sha1 of the parent list as compact JSON ([-1,0,1,...]). null if vincent.json has none.
+async function rigSignature() {
+  const r = await fetch('data/vincent/vincent.json');
+  if (!r.ok) throw new Error(`vincent.json: HTTP ${r.status}`);
+  const parent = (await r.json()).joints?.parent;
+  if (!Array.isArray(parent)) return null;
+  return { bone_count: parent.length, parent_sha1: sha1Hex(JSON.stringify(parent.map(x => Math.trunc(x)))) };
+}
+
+// Why a pack can't be used with this rig, or null. A pack built for another skeleton
+// would bind its tracks by joint name onto the wrong bones, so a mismatch skips it.
+// A pack without the fields (exported before they existed) or a rig we couldn't read
+// can't be checked: those load with a warning, as before the check.
+function packMismatch(name, side, rig) {
+  if (!rig) { console.warn(`clip pack ${name}: main rig signature unavailable, loaded unchecked`); return null; }
+  if (side.bone_count == null || side.parent_sha1 == null) {
+    console.warn(`clip pack ${name}: no bone_count/parent_sha1 (old export), loaded unchecked`); return null;
+  }
+  if (side.bone_count !== rig.bone_count) return `bone_count ${side.bone_count} != rig ${rig.bone_count}`;
+  if (side.parent_sha1 !== rig.parent_sha1) return `parent_sha1 ${side.parent_sha1} != rig ${rig.parent_sha1}`;
+  return null;
+}
+
 // Animation-only clip packs (export_web_vincent.py --pack). Their tracks use the same
-// joint node names as vincent.glb, so the main mixer binds them directly.
+// joint node names as vincent.glb, so the main mixer binds them directly; each pack's
+// bone_count / parent_sha1 must match vincent.json's skeleton (packMismatch).
 async function loadPacks(names, anim, motions) {
   const loader = new GLTFLoader();
   const got = [];
+  const rig = await rigSignature().catch(e => { console.warn('rig signature:', e.message); return null; });
   await Promise.all(names.map(async n => {
     try {
-      const [g, m] = await Promise.all([loader.loadAsync(`data/vincent/vincent_${n}.glb`), loadMotions(`vincent_${n}`)]);
+      const r = await fetch(`data/vincent/vincent_${n}.json`);
+      if (!r.ok) throw new Error(`vincent_${n}.json: HTTP ${r.status}`);
+      const side = await r.json();
+      const bad = packMismatch(n, side, rig);
+      if (bad) { console.warn(`clip pack ${n} skipped (built for another skeleton): ${bad}`); return; }
+      const g = await loader.loadAsync(`data/vincent/vincent_${n}.glb`);
       anim.addClips(g.animations);
-      Object.assign(motions, m);
+      Object.assign(motions, side.clips || {});
       got.push(`${n} (${g.animations.length})`);
     } catch (e) {
       console.warn(`clip pack ${n} not loaded:`, e.message);
@@ -257,7 +242,7 @@ async function loadCol() {
 
 // ------------------------------------------------------------ main
 async function main() {
-  const [{ scene, root, lo, hi, floats }, { col, name: colName }] = await Promise.all([loadRoom(), loadCol()]);
+  const [{ scene, root, lo, hi, floats }, { col, name: colName }] = await Promise.all([loadRoomPlay(), loadCol()]);
   const vin = await loadVincent(scene.char.s || 1);
   msg.style.display = 'none';
   root.add(vin.body);
