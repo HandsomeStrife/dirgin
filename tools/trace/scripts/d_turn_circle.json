@@ -1,0 +1,2 @@
+{"name": "d_turn_circle", "frames": 280, "doc": "right stick right 1.2 s (turn in place), then walk with half stick up + right stick right",
+ "events": [{"from": 10, "to": 70, "rx": 1.0}, {"from": 100, "to": 275, "ly": -0.5, "rx": 0.5}]}

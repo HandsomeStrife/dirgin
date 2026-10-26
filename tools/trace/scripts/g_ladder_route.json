@@ -1,0 +1,2 @@
+{"name": "g_ladder_route", "frames": 300, "log_from": 10, "doc": "route probe toward the ladder: run with the stick pointing at world +x for the start camera (right row (0.615,-0.788), forward (0.788,0.615))",
+ "events": [{"from": 10, "to": 300, "lx": 0.615, "ly": -0.788}]}

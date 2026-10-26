@@ -1,0 +1,186 @@
+"""What the trace hook logs each frame, where it lives, and why we believe it.
+
+Bases are resolved from the save state's EE memory the way the game resolves them
+(resolve_bases), then each field is an absolute address copied per frame by the hook.
+Confidence: D = decoded (code read, meaning clear), L = likely (code read, meaning
+inferred), G = guess (layout seen in memory only). README.md has the same table.
+"""
+import struct
+
+G_GAME = 0x46E290      # DAT_0046e290: game/world manager; +4 step, +0x40 camera, +0x44 view
+G_OBJTAB = 0x46E880    # DAT_0046e880: object table owner (FUN_0053bb08)
+STEP = 0x4EEB24        # DAT_004eeb24: logic step in ticks (FUN_00322f88)
+DT = 0x4EEB28          # DAT_004eeb28: step in seconds = step / 60 (FUN_00322f88)
+FLAGS = 0x46E298       # DAT_0046e298: script flags (FUN_00326298)
+
+
+def u32(mem, a):
+    return struct.unpack_from("<I", mem, a & 0x1FFFFFF)[0]
+
+
+def resolve_bases(mem):
+    """Player P: FUN_0053bb08(DAT_0046e880) -> entry *(M+0x18) of the table at M+0x1164
+    (FUN_0053e040) -> vtable+0x94 (here 0x579ae8, `move v0,a0`) -> FUN_00333150 calls
+    vtable+0x9c (0x579b18, `move v0,a0`). Both getters return `this`, checked below."""
+    m = u32(mem, G_OBJTAB)
+    idx = u32(mem, m + 0x18)
+    obj = u32(mem, u32(mem, m + 0x1164) + 4 * idx)
+    vt = u32(mem, obj + 0x18)
+    for slot, adj in ((0x94, 0x90), (0x9C, 0x98)):
+        fn = u32(mem, vt + slot)
+        if (struct.unpack_from("<h", mem, vt + adj)[0] != 0 or u32(mem, fn) != 0x03E00008
+                or u32(mem, fn + 4) != 0x0080102D):        # jr ra; daddu v0,a0,zero
+            raise RuntimeError("player getter at vtable+%#x is not `return this`" % slot)
+    P = obj
+    C = u32(mem, P + 0xE8)
+    CAM = u32(mem, u32(mem, G_GAME) + 0x40)
+    MP = u32(mem, C + 0x7C8)
+    MP2 = u32(mem, MP + 0x3E8)
+    if u32(mem, CAM + 0x54) != P:
+        raise RuntimeError("camera +0x54 is not the player")
+    return dict(P=P, C=C, CAM=CAM, MP=MP, MP2=MP2, **find_cape(mem))
+
+
+CAPE_N = 82            # cloth vertices in Vincent's cape block (p000_cloth.py)
+CAPE_VERTS = (62, 63, 64, 73)   # free (unpinned) hem vertices, picked from the group list
+
+
+def find_cape(mem):
+    """Vincent's cape mesh block ("SM2", +0xe = 82 cloth vertices, +0x10 = 1 group).
+    Found by signature, NOT through the game's pointer chain (the draw path reaches it as
+    *(model+0x10)[i] in FUN_005b2ef8; that model pointer isn't traced yet). Runtime buffer
+    +0x1c: velocity[n], position[n] at +n*16, target[n] at +n*32 (FUN_005b0d30 ->
+    FUN_005b0b38(group, vel, pos, target)). Group +0 gravity, +8 damping."""
+    hits = []
+    for a in range(0x100000, 0x1FFF000, 16):
+        if mem[a:a + 4] == b"SM2\0" and struct.unpack_from("<hh", mem, a + 0xE) == (CAPE_N, 1):
+            hits.append(a)
+    if len(hits) != 1:
+        raise RuntimeError("expected one cape block, found %d" % len(hits))
+    blk = hits[0]
+    grp = u32(mem, u32(mem, blk + 0x24))
+    if abs(struct.unpack_from("<f", mem, grp)[0] - 0.2) > 1e-6:
+        raise RuntimeError("cape group gravity is not 0.2")
+    return dict(CAPE=blk, CAPEBUF=u32(mem, blk + 0x1C))
+
+
+# (name, base, offset, type, conf, source). Types: f32 / u32 / i32 / vec4 / mat4 / name8 /
+# bytes:N. Every entry is copied as whole words; offsets are 4-aligned.
+FIELDS = [
+    ("step", None, STEP, "f32", "D", "FUN_00322f88 writes DAT_004eeb24 = vblank step x 1.2 (PAL), cap 5"),
+    ("dt", None, DT, "f32", "D", "FUN_00322f88: DAT_004eeb28 = step x 0.016666668"),
+    ("pad_held", None, 0x4E0FD8, "u32", "D", "FUN_00254638: lo16 = held (FUN_002584b0, pad+0x20), hi16 = pressed (pad+0x24); last frame's"),
+    ("lstick", None, 0x4E0FE8, "bytes:8", "D", "FUN_00254638 -> FUN_00258218: left stick x,y floats, dead zone 0x30, scale 1/81; last frame's"),
+    ("script_flags", None, FLAGS, "u32", "D", "FUN_00326298 tests DAT_0046e298 bits; bit 13 = physics-body walk (FUN_0034db80)"),
+    ("p_state", "P", 0x100, "bytes:16", "D", "FUN_00333150: P+0x104 = player state byte (8 jump, 10 ladder...); P+0x100 u64 flag bits"),
+    ("p_airshots", "P", 0x270, "u32", "D", "FUN_00575768 clears byte P+0x270 on take-off (air-shot counter)"),
+    ("p_flags", "P", 0x29C, "bytes:16", "L", "FUN_00333150 tests P+0x2a8 bits 1/4; P+0x29c pointer"),
+    ("matrix", "C", 0x00, "mat4", "D", "FUN_0034c388 writes row 3 (+0x30) = position from body+0x00; rows 0-2 = orientation (row 2 = facing, FUN_00575768 reads C+0x20)"),
+    ("move_dir", "C", 0x90, "vec4", "D", "FUN_0034c388 writes the normalised move direction to C+0x90"),
+    ("want_dir_speed", "C", 0xC0, "vec4", "D", "FUN_0034c388 mode 0xc: step = C+0xc0 (xyz dir) x C+0xcc (units/tick)"),
+    ("mflags", "C", 0x1C0, "u32", "D", "C+0x1c0 bit 0x200 = on ground (FUN_003543b8, FUN_00575768), 0x2000/0x4000/0x400000 tested in FUN_0034c388"),
+    ("mflags2", "C", 0x1C4, "u32", "D", "FUN_0034db80 sets bit 1, clears bit 4"),
+    ("move_mode", "C", 0x1C8, "u32", "D", "FUN_0034db80 writes; FUN_0034c388 switches on it (10 walk, 0xb air, 0xc physics body, 0x10)"),
+    ("mode_t", "C", 0x1CC, "f32", "L", "FUN_0034db80 zeroes; FUN_0034c388 path-follow time"),
+    ("ground_speed", "C", 0x1D8, "f32", "D", "FUN_0034c388: C+0x1d8 = distance moved x 60 / step (units/s)"),
+    ("body_pos", "C", 0x3B0, "vec4", "D", "FUN_0034c388: body = C+0x3b0, FUN_003590c8(body); C+0x30 copied from it"),
+    ("body_10", "C", 0x3C0, "vec4", "L", "FUN_00357d48: body+0x10 vs body+0x00 y within 3.5 (previous/ground point)"),
+    ("body_80", "C", 0x430, "vec4", "L", "FUN_0034c388 tests |C+0x430| == 0 (body+0x80; velocity-like)"),
+    ("walk_poly", "C", 0x4C0, "u32", "D", "FUN_00357d48: body+0x110 = current walk-mesh polygon (handoff walk-mesh entry)"),
+    ("anim_flags", "C", 0x564, "bytes:8", "D", "FUN_00344608/FUN_00340bb8 motion flags C+0x564; C+0x568"),
+    ("motion", "C", 0x570, "name8", "D", "FUN_003449a0: C+0x570 = current motion (8-char clip name)"),
+    ("motion_flags", "C", 0x580, "bytes:16", "D", "FUN_003449a0: C+0x580 = play flags, C+0x588 = -1; C+0x591 blend frames (FUN_00340bb8)"),
+    ("mp_head", "MP", 0x440, "bytes:16", "D", "FUN_005a91c8: MP+0x440 flags, +0x448 head layer, +0x449 layer count"),
+    ("mp_rate", "MP", 0x400, "bytes:16", "D", "FUN_005aa5b8 passes f32 MP+0x40c as the rate to FUN_005aa2a8 (frame += rate x weight/128 x DAT_004fc7e8); MP+0x408 = 1.0 when no blend"),
+    ("mp_cloth", "MP", 0x430, "bytes:16", "D", "cloth settle window: MP+0x434 total, MP+0x438 remaining (FUN_005a95f0 arms, FUN_005aa5b8 decrements once per frame, FUN_005b1128 reads)"),
+    ("cloth_k", None, 0x5B3B50, "f32", "D", "DAT_005b3b50 = (1 - rem/total)^2 or 1.0 (FUN_005b1128); FUN_005b2550 passes it to the cloth step FUN_005b0d30"),
+    ("mp_layers", "MP", 0x200, "layers", "L", "FUN_005a91c8: 8 layers x 0x30 at MP+0x200: +0 clip, +8 partner clip, +0x18 frame (zeroed at start), +0x1d blend frames, +0x1e flags, +0x1f weight byte, +0x24 blend length"),
+    ("mp2_head", "MP2", 0x440, "bytes:16", "L", "child motion player MP+0x3e8 (FUN_005a91c8 recurses into MP+1000..)"),
+    ("mp2_layers", "MP2", 0x200, "layers", "L", "same layout as mp_layers"),
+    ("cape_vel", "CAPEBUF", ("cape", 0), "cape", "L", "FUN_005b0b38: velocity of cape vertices 62,63,64,73 (v.y += gravity once per call; v = dpos x damping 0.1)"),
+    ("cape_pos", "CAPEBUF", ("cape", 1), "cape", "L", "FUN_005b0b38/FUN_005b09f8/FUN_005b0c50: simulated position (world)"),
+    ("cape_target", "CAPEBUF", ("cape", 2), "cape", "L", "FUN_005b0c50 pulls pos toward this skinned (keyed) target by max(k, blend)"),
+    ("cam_matrix", "CAM", 0x60, "mat4", "L", "FUN_0032ace0: CAM+0x90 = eye (w set to 1.0 at the end), CAM+0x80 = forward (yaw from FUN_00260f00); rows +0x60 right, +0x70 up"),
+    ("cam_a0", "CAM", 0xA0, "vec4", "G", "point with w=1 next to the eye (target?)"),
+    ("cam_fov_pitch_yaw", "CAM", 0x170, "vec4", "L", "FUN_0032ace0: +0x170 divided by DAT_0046e3f0 (base FOV 65) -> FOV deg; +0x174 pitch (clamped +-54 deg); +0x178 yaw"),
+]
+
+LAYER_BYTES = 8 * 0x30
+
+
+def size_of(t):
+    if t in ("f32", "u32", "i32"):
+        return 4
+    if t in ("vec4", "name8"):
+        return 16 if t == "vec4" else 8
+    if t == "mat4":
+        return 64
+    if t == "layers":
+        return LAYER_BYTES
+    if t == "cape":
+        return 16 * len(CAPE_VERTS)
+    if t.startswith("bytes:"):
+        return int(t[6:])
+    raise ValueError(t)
+
+
+def field_table(bases):
+    out = []
+    for name, base, off, t, _c, _s in FIELDS:
+        if t == "cape":
+            arr = bases[base] + off[1] * CAPE_N * 16
+            out.extend((arr + 16 * k, 4) for k in CAPE_VERTS)
+            continue
+        addr = off if base is None else bases[base] + off
+        out.append((addr, size_of(t) // 4))
+    return out
+
+
+def _name(b):
+    return b.split(b"\0", 1)[0].decode("latin-1")
+
+
+def decode_layers(b):
+    out = []
+    for i in range(8):
+        r = b[i * 0x30:(i + 1) * 0x30]
+        out.append(dict(clip=_name(r[0:8]), partner=_name(r[8:16]),
+                        f10=struct.unpack_from("<f", r, 0x10)[0],
+                        f14=struct.unpack_from("<f", r, 0x14)[0],
+                        frame=struct.unpack_from("<f", r, 0x18)[0],
+                        b1c=r[0x1C], blend_frames=r[0x1D], lflags=r[0x1E], weight=r[0x1F],
+                        u20=struct.unpack_from("<I", r, 0x20)[0],
+                        blend_len=struct.unpack_from("<f", r, 0x24)[0],
+                        tail=r[0x28:0x30].hex()))
+    return out
+
+
+def decode_record(rec):
+    """rec: bytes of one log record -> dict."""
+    idx, w0, w1 = struct.unpack_from("<III", rec, 0)
+    pad = struct.pack("<II", w0, w1)
+    out = dict(frame=idx, pad_in=dict(buttons=(pad[2] << 8 | pad[3]) ^ 0xFFFF,
+                                      rx=pad[4], ry=pad[5], lx=pad[6], ly=pad[7], mode=pad[1]))
+    p = 12
+    for name, _b, _o, t, _c, _s in FIELDS:
+        n = size_of(t)
+        b = rec[p:p + n]
+        p += n
+        if t == "f32":
+            v = struct.unpack("<f", b)[0]
+        elif t in ("u32", "i32"):
+            v = struct.unpack("<I" if t == "u32" else "<i", b)[0]
+        elif t == "vec4":
+            v = list(struct.unpack("<4f", b))
+        elif t == "mat4":
+            v = [list(struct.unpack_from("<4f", b, 16 * r)) for r in range(4)]
+        elif t == "name8":
+            v = _name(b)
+        elif t == "layers":
+            v = decode_layers(b)
+        elif t == "cape":
+            v = {str(k): list(struct.unpack_from("<4f", b, 16 * i)) for i, k in enumerate(CAPE_VERTS)}
+        else:
+            v = b.hex()
+        out[name] = v
+    return out

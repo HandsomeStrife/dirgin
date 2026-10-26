@@ -1,0 +1,2 @@
+{"name": "g_ladder_route2", "frames": 400, "log_from": 110, "doc": "route probe 2: full-deflection run, stick up-right (lx 0.6, ly -1) for 360 frames, then release",
+ "events": [{"from": 10, "to": 370, "lx": 0.6, "ly": -1.0}]}

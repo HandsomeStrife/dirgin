@@ -1,0 +1,2 @@
+{"name": "c_run", "frames": 230, "doc": "run 3 s (full stick up) from frame 10, then release",
+ "events": [{"from": 10, "to": 160, "ly": -1.0}]}

@@ -1,0 +1,2 @@
+{"name": "f_railing", "frames": 300, "log_from": 10, "doc": "walk toward the camera (stick down; the outer deck edge is ~6.6 units behind the start), then stick down-right to slide along it",
+ "events": [{"from": 10, "to": 110, "ly": 0.6}, {"from": 110, "to": 290, "ly": 0.6, "lx": 0.6}]}

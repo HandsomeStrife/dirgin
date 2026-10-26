@@ -1,0 +1,2 @@
+{"name": "e_jumps", "frames": 300, "log_from": 10, "doc": "standing jump (cross 6 frames at 10), then run from 120 and jump at 140 while running (attempt 2; 170 hit the wall first)",
+ "events": [{"from": 10, "to": 16, "buttons": ["cross"]}, {"from": 120, "to": 260, "ly": -1.0}, {"from": 140, "to": 146, "buttons": ["cross"]}]}
