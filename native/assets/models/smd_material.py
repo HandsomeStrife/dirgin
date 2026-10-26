@@ -190,35 +190,145 @@ def block_material(buf, block_off, gi=0, di=0):
     return buf[P + doff], R._u16(buf, P + doff + 4)
 
 
-# ---- demo: a model with no capture --------------------------------------------
+# ---- GS-faithful software render (uncaptured models) ---------------------------
+#
+# What the game does per descriptor (FUN_005b19b8), checked against the p000 hero
+# dump (every Vincent draw of the last frame):
+#   flags & 2 == 0 -> opaque: ABE 0, no alpha test (TEST 0x51000)   [all p000 flag-0 draws]
+#   flags & 2      -> ABE 1, ALPHA (Cs-Cd)*As+Cd (reg 0x42 = 0x44), TEST ATE GEQUAL
+#                     AREF 100 AFAIL RGB_ONLY (0x5364d): every texel blends by As, only
+#                     As >= 100 writes Z.                             [p000 hair p000_2: 135 of 216 tris]
+#   TEX0 TFX MODULATE, TCC 1: As = At*Av/128 (Av = 0x80 for p005).
+# Parts: FUN_005b2ef8 walks the part list last-to-first (the hero dump draws the hair
+# part first); groups and descriptors in order. No culling: the strip winding is not
+# consistent (render_skinned), and the GS has none; the hair is single-layer cards.
 
-def render_from_file(cont, texc, outdir, tag, variant=0):
-    """Bind-pose software render of a skinned model with file-derived textures
-    (render_p005.render_multi; one atlas per material slot)."""
+GS_AREF = 100
+
+
+def model_scene(cont, texc, variant=0):
+    """Decode + bind a skinned model from the files. Returns dict(V, N, tris, mat, flags,
+    order, atl={slot: RGBA float, alpha in GS 0..128}, mats, gm)."""
     import render_p005 as P5
     from skd_skeleton import load_skeleton
-    import collections
     buf, NB = R.load_container(cont)
     sk = load_skeleton(cont, trans_scale=1.0); bc = sk['bone_count']
     Wm = [np.array(m, float) for m in sk['world_bind']]
-    V, N, tris, gmeta = P5.decode_groups(buf, NB, Wm, bc)
+    V, N, tris, gm = P5.decode_groups(buf, NB, Wm, bc)
     tm = tri_materials(buf, NB, Wm, bc, tris)
     mats = material_table(texc, variant)
-    atl = {}; bound = []; miss = collections.Counter()
-    for t, (m, _f) in zip(tris, tm):
-        if m == 0xff or m >= len(mats) or mats[m].get('ipu'):
-            miss[m] += 1; continue
-        if m not in atl:
-            atl[m] = texture_rgba(texc, mats[m])[:, :, :3].astype(np.float32)
-        bound.append((t[0], t[1], t[2], t[3], t[4], t[5], m))
+    blocks = sorted({gm[t[6]][0].split('.')[0] for t in tris}, key=lambda s: int(s.split('@')[1].split('.')[0], 16))
+    bidx = {b: i for i, b in enumerate(blocks)}
+    order = sorted(range(len(tris)), key=lambda i: (-bidx[gm[tris[i][6]][0].split('.')[0]], i))
+    atl = {}
+    for m, _f in tm:
+        if m != 0xff and m < len(mats) and not mats[m].get('ipu') and m not in atl:
+            a = texture_rgba(texc, mats[m]).astype(np.float32)
+            a[:, :, 3] = np.round(a[:, :, 3] * 128 / 255)          # dtex a*255/128 -> GS 0..128
+            atl[m] = a
+    return dict(V=V, N=N, tris=tris, mat=[m for m, _ in tm], flags=[f for _, f in tm], order=order,
+                atl=atl, mats=mats, gm=gm, blocks=blocks)
+
+
+def render_gs(sc, path, angle, elev, center=None, radius=None, gs=True, W_=900, H_=1200,
+              falsecol=None):
+    """gs=True: two-sided, part order, per-descriptor alpha test + blend (see above).
+    gs=False: render_p005.render_multi's behaviour (winding back-face cull, opaque, file
+    order) on the same camera, for before/after. falsecol: {slot: rgb} flat colours."""
+    import math
+    V, N, tris = sc['V'], sc['N'], sc['tris']
+    Vr = V.copy(); Vr[:, 1] *= -1.0
+    c = np.median(Vr, 0) if center is None else np.array([center[0], -center[1], center[2]], float)
+    rad = (np.percentile(np.linalg.norm(Vr - c, axis=1), 98) * 1.7) if radius is None else radius
+    az, el = math.radians(angle), math.radians(elev)
+    eye = c + rad * np.array([math.cos(el) * math.sin(az), math.sin(el), math.cos(el) * math.cos(az)])
+    fdir = c - eye; fdir /= np.linalg.norm(fdir)
+    s = np.cross(fdir, [0, 1.0, 0]); s /= np.linalg.norm(s); u = np.cross(s, fdir)
+    basis = np.array([s, u, -fdir]); Vt = (Vr - eye) @ basis.T
+    Nr = N.copy(); Nr[:, 1] *= -1.0; Nview = Nr @ basis.T
+    fl = 1 / math.tan(math.radians(40) / 2); aspect = W_ / H_
+    img = np.full((H_, W_, 3), 18, np.float32); zb = np.full((H_, W_), 1e9)
+    L = np.array([0.3, 0.6, 0.7]); L /= np.linalg.norm(L)
+    for i in (sc['order'] if gs else range(len(tris))):
+        t = tris[i]; m = sc['mat'][i]
+        if m not in sc['atl']:
+            continue
+        p = Vt[[t[0], t[1], t[2]]]
+        if np.any(p[:, 2] > -0.02):
+            continue
+        gnrm = np.cross(p[1] - p[0], p[2] - p[0]); gn = np.linalg.norm(gnrm)
+        if gn < 1e-9 or (not gs and gnrm[2] > 0):
+            continue
+        fn = Nview[[t[0], t[1], t[2]]].mean(0); fnn = np.linalg.norm(fn)
+        fn = fn / fnn if fnn > 1e-9 else gnrm / gn
+        sh = abs(np.dot(fn, L)) * 0.55 + 0.45
+        pr = np.array([((fl / aspect * q[0] / -q[2] * 0.5 + 0.5) * W_,
+                        (0.5 - fl * q[1] / -q[2] * 0.5) * H_, -q[2]) for q in p])
+        minx, maxx = max(int(pr[:, 0].min()), 0), min(int(pr[:, 0].max()) + 1, W_)
+        miny, maxy = max(int(pr[:, 1].min()), 0), min(int(pr[:, 1].max()) + 1, H_)
+        if maxx <= minx or maxy <= miny:
+            continue
+        (x0, y0), (x1, y1), (x2, y2) = pr[0, :2], pr[1, :2], pr[2, :2]
+        d = (y1 - y2) * (x0 - x2) + (x2 - x1) * (y0 - y2)
+        if abs(d) < 1e-9:
+            continue
+        ys, xs = np.mgrid[miny:maxy, minx:maxx]; xf, yf = xs + 0.5, ys + 0.5
+        aa = ((y1 - y2) * (xf - x2) + (x2 - x1) * (yf - y2)) / d
+        bb = ((y2 - y0) * (xf - x2) + (x0 - x2) * (yf - y2)) / d; g = 1 - aa - bb
+        cov = (aa >= 0) & (bb >= 0) & (g >= 0)
+        if not cov.any():
+            continue
+        z = aa * pr[0, 2] + bb * pr[1, 2] + g * pr[2, 2]
+        sub = zb[miny:maxy, minx:maxx]; ztest = cov & (z < sub)
+        if not ztest.any():
+            continue
+        tex = sc['atl'][m]; TH, TW = tex.shape[:2]
+        uv = np.array(t[3:6], float) / 4096.0
+        uu = aa * uv[0, 0] + bb * uv[1, 0] + g * uv[2, 0]; vv = aa * uv[0, 1] + bb * uv[1, 1] + g * uv[2, 1]
+        tx = np.clip((np.mod(uu, 1.0) * TW).astype(int), 0, TW - 1)
+        ty = np.clip((np.mod(vv, 1.0) * TH).astype(int), 0, TH - 1)
+        texel = tex[ty, tx]
+        col = (np.broadcast_to(np.array(falsecol[m], np.float32), texel[..., :3].shape) if falsecol
+               else texel[..., :3]) * sh
+        block = img[miny:maxy, minx:maxx]
+        if gs and sc['flags'][i] & 2:
+            As = texel[..., 3] * (t[7][3] if len(t) > 7 else 128) / 128.0
+            k = np.clip(As / 128.0, 0, 1)[..., None]
+            block[ztest] = (col * k + block * (1 - k))[ztest]
+            sub[ztest & (As >= GS_AREF)] = z[ztest & (As >= GS_AREF)]
+        else:
+            block[ztest] = col[ztest]; sub[ztest] = z[ztest]
+    Image.fromarray(np.clip(img, 0, 255).astype(np.uint8)).save(path)
+    return path
+
+
+def head_view(sc, top_frac=0.16):
+    """Center/radius framing the top `top_frac` of the figure (decode space is -Y up)."""
+    V = sc['V'][sorted({k for t in sc['tris'] for k in t[:3]})]
+    ymin, ymax = V[:, 1].min(), V[:, 1].max(); H = V[V[:, 1] < ymin + (ymax - ymin) * top_frac]
+    return H.mean(0), float(np.ptp(H, 0).max() * 1.6)
+
+
+# ---- demo: a model with no capture --------------------------------------------
+
+def render_from_file(cont, texc, outdir, tag, variant=0):
+    """Bind-pose software render of a skinned model with file-derived textures, drawn
+    the way the game does (render_gs: two-sided, part order, per-descriptor alpha
+    test + blend). Full figure front/back + head close-up front/side."""
+    import collections
+    sc = model_scene(cont, texc, variant)
     os.makedirs(outdir, exist_ok=True)
-    use = collections.Counter(m for *_x, m in bound)
-    info = dict(tris=len(tris), bound=len(bound), unbound=dict(miss),
-                slots={m: f"{mats[m]['image_name']}+clut({mats[m]['name']}) x{n}" for m, n in sorted(use.items())})
-    paths = []
-    for ang, el, nm in ((18, 6, 'front'), (200, 6, 'back'), (55, 8, '3q')):
-        p = os.path.join(outdir, f"{tag}_fromfile_{nm}.png")
-        P5.render_multi(V, N, bound, atl, p, ang, el); paths.append(p)
+    use = collections.Counter(m for m in sc['mat'])
+    mats = sc['mats']
+    info = dict(tris=len(sc['tris']), bound=sum(1 for m in sc['mat'] if m in sc['atl']),
+                alpha_tested=sum(1 for f in sc['flags'] if f & 2),
+                slots={m: f"{mats[m]['image_name']}+clut({mats[m]['name']}) x{n}" for m, n in sorted(use.items())
+                       if m < len(mats)})
+    c, r = head_view(sc); paths = []
+    for nm, ang, el, kw in (('front', 198, 6, {}), ('back', 18, 6, {}),
+                            ('head_front', 198, 4, dict(center=c, radius=r, W_=600, H_=600)),
+                            ('head_side', 120, 4, dict(center=c, radius=r, W_=600, H_=600))):
+        paths.append(render_gs(sc, os.path.join(outdir, f"{tag}_fromfile_{nm}.png"), ang, el, **kw))
     return info, paths
 
 

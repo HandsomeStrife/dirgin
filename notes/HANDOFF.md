@@ -222,6 +222,14 @@ Read this first instead of re-deriving. Review images: notes/review/ (README exp
   6.25/0.8161 -> 6.25/0.8167. Uncaptured models: smd_material.py --render CONT TEX OUT (p005
   7348/7348 bound; Dan: face/head/hair look wrong there, hair maybe missing transparency).
   Open: glow TEX0 = envmap1 at p000_ta's in-order address; the glow may be env-mapped (desc 0x40).
+- Uncaptured-model render (2026-10-26, review 64, Dan: "Perfect!"): smd_material.py --render CONT TEX
+  OUT draws like the game: no culling (strip winding is inconsistent; winding cull blanked half of
+  p005's face), parts last-to-first (FUN_005b2ef8; the hero dump draws the hair first), descriptor
+  flag bit 1 = ABE (Cs-Cd)*As+Cd + ATE GEQUAL 100 / AFAIL RGB_ONLY (only As >= 100 writes Z),
+  flag 0 = opaque; confirmed on every p000 draw in the hero dump. p005: 1314 flagged tris (hair
+  slots 5/6, cloak 7); L01@cf00 is a separate detailed face block, not a copy. Viewer light only.
+  Open: the p000 GPU export draws the hair opaque (268 flagged tris; 38% of p000_2 texels < 100):
+  needs flagged tris in an atlas region that keeps texture alpha, plus the -charatest pass.
 
 ## Room
 - out/ is gitignored. Rebuild (in native/assets/models, run -I):
