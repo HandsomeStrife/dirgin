@@ -3,10 +3,13 @@
 //
 // The room loading and shader are copied from main.js (kept separate on purpose).
 // Game space, -Y up. URL params: hud=0, aa=1, dpr=N, col=stub (force the stub),
-// cam=ex,ey,ez,yaw,pitch (detached camera at that view; H re-attaches it).
+// cam=ex,ey,ez,yaw,pitch (detached camera at that view; H re-attaches it),
+// actions=0 (no action modules), packs=a,b (clip packs to load; default jump,ladder,shoot,
+// packs= loads none). Packs load in the background after start (vincent_<pack>.glb).
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { TICK, PlayerController, SpeedAnimator, FollowCamera } from './player.js';
+import { loadActions } from './actions/index.js';
 import { initReport } from './report.js';
 
 const params = new URLSearchParams(location.search);
@@ -15,6 +18,7 @@ const msg = document.getElementById('msg');
 if (params.get('hud') === '0') hud.style.display = 'none';
 
 const SPAWN = { x: -1395.63, z: -1110.51 };
+const PACKS = params.has('packs') ? params.get('packs').split(',').filter(Boolean) : ['jump', 'ladder', 'shoot'];
 const ROOT_PER_FRAME = { walk: 0.525, run: 1.665 };   // clip root motion, glb units per 60 Hz frame
 // The glb's origin is not at his soles: export_web_vincent.py centres the root on the
 // bind-pose body (feet at model y = 12.13), but the in-place clips put the feet near
@@ -208,6 +212,31 @@ async function loadVincent(scale) {
   return { body, mixRoot: gltf.scene, clips: { idle: clip('h_st'), walk: clip('h_wk'), run: clip('h_rn') }, prims };
 }
 
+// clip sidecars: vincent.json + each pack's json -> { clip name: entry }
+async function loadMotions(name) {
+  const r = await fetch(`data/vincent/${name}.json`);
+  if (!r.ok) throw new Error(`${name}.json: HTTP ${r.status}`);
+  return (await r.json()).clips || {};
+}
+
+// Animation-only clip packs (export_web_vincent.py --pack). Their tracks use the same
+// joint node names as vincent.glb, so the main mixer binds them directly.
+async function loadPacks(names, anim, motions) {
+  const loader = new GLTFLoader();
+  const got = [];
+  await Promise.all(names.map(async n => {
+    try {
+      const [g, m] = await Promise.all([loader.loadAsync(`data/vincent/vincent_${n}.glb`), loadMotions(`vincent_${n}`)]);
+      anim.addClips(g.animations);
+      Object.assign(motions, m);
+      got.push(`${n} (${g.animations.length})`);
+    } catch (e) {
+      console.warn(`clip pack ${n} not loaded:`, e.message);
+    }
+  }));
+  return got;
+}
+
 // body.rotation.y for a heading h (dir = (sin h, cos h)): forward in body space is
 // (0,0,-1); Ry(t) sends it to (-sin t, 0, -cos t), so t = h + pi.
 const bodyYaw = h => h + Math.PI;
@@ -260,7 +289,7 @@ async function main() {
   const rootSpeed = { walk: ROOT_PER_FRAME.walk * s, run: ROOT_PER_FRAME.run * s };
   const ctrl = new PlayerController(col, {
     pos: { x: SPAWN.x, y: gy, z: SPAWN.z }, heading: heading0,
-    walkSpeed: rootSpeed.walk, runSpeed: rootSpeed.run, radius: 3.5, height: 19,
+    walkSpeed: rootSpeed.walk, runSpeed: rootSpeed.run, radius: 3.5, height: 19, scale: s,
   });
   const anim = new SpeedAnimator(vin.mixRoot, vin.clips, rootSpeed, { fade: 0.2 });
   anim.mixer.update(0);                            // h_st frame 0
@@ -269,6 +298,17 @@ async function main() {
   if (!Number.isFinite(sole) || Math.abs(sole) >= 40) console.warn('sole measurement failed:', sole);
   const follow = new FollowCamera(camera, col, { dist: 52, pitch: 0.3, targetHeight: 15 });
   follow.yaw = heading0;
+
+  // ---- actions (player.js header / ACTIONS.md)
+  const motions = {};
+  loadMotions('vincent').then(m => Object.assign(motions, m)).catch(e => console.warn(e.message));
+  ctrl.attach({ anim, camera: follow, motions });
+  let actionHelp = [];
+  if (params.get('actions') !== '0') {
+    for (const a of await loadActions()) { ctrl.addAction(a.action); if (a.help) actionHelp.push(a.help); }
+  }
+  let packsLoaded = [];
+  const packsReady = loadPacks(PACKS, anim, motions).then(g => { packsLoaded = g; return g; });
 
   // detached debug camera (?cam=), same format as main.js
   let detached = null;
@@ -284,11 +324,13 @@ async function main() {
 
   // ---- input
   const keys = new Set();
+  const pressed = new Set();                       // key-down edges not yet seen by a tick
   let frozen = false;                              // report mode: no input, no simulation
   const typing = e => /^(INPUT|TEXTAREA)$/.test(e.target.tagName);
   addEventListener('keydown', e => {
     if (typing(e) || frozen) return;
     keys.add(e.code);
+    if (!e.repeat) pressed.add(e.code);
     if (e.code === 'KeyH') { ctrl.reset(); follow.yaw = heading0; follow.pitch = 0.3; detached = null; }
     if (e.code === 'KeyR') { e.preventDefault(); report.open(); }
     if (e.code === 'Space' || e.code.startsWith('Arrow')) e.preventDefault();
@@ -325,7 +367,7 @@ async function main() {
     if (keys.has('KeyS') || keys.has('ArrowDown')) { x -= f.x; z -= f.z; }
     if (keys.has('KeyD') || keys.has('ArrowRight')) { x += r.x; z += r.z; }
     if (keys.has('KeyA') || keys.has('ArrowLeft')) { x -= r.x; z -= r.z; }
-    return { x, z, run: keys.has('ShiftLeft') || keys.has('ShiftRight') };
+    return { x, z, run: keys.has('ShiftLeft') || keys.has('ShiftRight'), keys, pressed };
   }
 
   // ---- Report button (report.js, shared with the main viewer)
@@ -354,9 +396,10 @@ async function main() {
     return {
       feet: [p.x, p.y, p.z].map(r4), heading_deg: +(ctrl.heading * 180 / Math.PI).toFixed(2),
       onGround: ctrl.onGround, vy: r4(ctrl.vy || 0), hitWall: ctrl.hitWall,
-      speed_per_tick: r4(ctrl.speed), clip: anim.current,
-      clipName: { idle: 'h_st', walk: 'h_wk', run: 'h_rn' }[anim.current], rate: r4(anim.rate),
-      clipTime: r4(anim.actions[anim.current].time), feetOffset: FEET_OFFSET,
+      speed_per_tick: r4(ctrl.speed), clip: anim.override ? 'action' : anim.current,
+      clipName: anim.clipName(), rate: r4(anim.rate),
+      clipTime: r4(anim.time()), feetOffset: FEET_OFFSET,
+      action: ctrl.active ? ctrl.active.name : null, packs: packsLoaded,
       ground: g && { y: r4(g.y), feetError: r4(g.y - p.y), tri: g.tri, subtree: g.subtree,
                      mask: g.mask === undefined ? null : '0x' + g.mask.toString(16).padStart(4, '0'),
                      normal: g.normal.map(r4), surface: g.surface },
@@ -365,7 +408,7 @@ async function main() {
   }
   const report = initReport({
     renderer, camera, root, scene, attrs: floats, toast, view: camView,
-    setFrozen(f) { frozen = f; keys.clear(); drag = null; if (!f) { clock.getDelta(); acc = 0; } },
+    setFrozen(f) { frozen = f; keys.clear(); pressed.clear(); drag = null; if (!f) { clock.getDelta(); acc = 0; } },
     extraMeta: () => ({ page: 'play', player: playerState() }),
   });
   document.getElementById('btn-report').addEventListener('click', e => { e.stopPropagation(); report.open(); });
@@ -381,6 +424,7 @@ async function main() {
     let n = 0;
     while (acc >= TICK && n < 8) {
       ctrl.step(readInput());
+      pressed.clear();                             // an edge is seen by one tick only
       // feet vs ground check (for the HUD / tests)
       const g = col.groundY(ctrl.pos.x, ctrl.pos.z, ctrl.pos.y);
       if (g != null) stats.groundErrMax = Math.max(stats.groundErrMax, Math.abs(g - ctrl.pos.y));
@@ -406,13 +450,14 @@ async function main() {
     const p = ctrl.pos;
     hud.textContent = `${fps.toFixed(0)} fps   collision: ${colName}\n` +
       `pos  ${p.x.toFixed(2)}, ${p.y.toFixed(2)}, ${p.z.toFixed(2)}\n` +
-      `clip ${anim.current} (${{ idle: 'h_st', walk: 'h_wk', run: 'h_rn' }[anim.current]}) x${anim.rate.toFixed(2)}` +
+      `clip ${anim.override ? 'action' : anim.current} (${anim.clipName()}) x${anim.rate.toFixed(2)}` +
+      `${ctrl.active ? '   action ' + ctrl.active.name : ''}` +
       `   speed ${(ctrl.speed * 60).toFixed(1)} u/s\n` +
       `onGround ${ctrl.onGround}${ctrl.hitWall ? '  WALL' : ''}${follow.blocked ? '  cam pulled in' : ''}\n` +
-      `click: mouse look (drag works too)   WASD move   Shift run   H respawn   R report`;
+      `click: mouse look (drag works too)   WASD move   Shift run   ${actionHelp.join('   ')}   H respawn   R report`;
   }
   window.__play = { ctrl, anim, follow, col, stats, camera, renderer, root, vin, spawnY: gy, rootSpeed,
-                    playerState, camView, report, keys };
+                    playerState, camView, report, keys, pressed, motions, packsReady, actionHelp };
   requestAnimationFrame(frame);
 }
 

@@ -4,8 +4,17 @@ three.js web viewer, plus a JSON sidecar. Output is game-derived: write it only 
 gitignored directory (default native/web/data/vincent/, checked with git check-ignore).
 
   export:  python3 -I export_web_vincent.py export <dump.bin> [--out DIR] [--mutate-parents]
+                                                   [--clips all|NAME,NAME,...] [--sets c,h]
   verify:  python3 -I export_web_vincent.py verify <dump.bin> [--out DIR] [--glb FILE]
                                                    [--clip h_wk --frames 0,13,27]
+  catalogue: python3 -I export_web_vincent.py catalogue [--out DIR]   -> DIR/motions.json
+
+  --clips: default h_st,h_wk,h_rn (byte-identical to the original 3-clip export). 'all' =
+  every clip of the clip sets in --sets (default c,h = 07700000 common + 0770000b handgun;
+  m = 0770000c, r = 0770000d, ev = 0770000f + 07700011). Names are unique across sets.
+  With --clips the JSON clip entries also carry loop / in_place_axes / container / root_total.
+  --pack NAME: write only vincent_NAME.glb (joint nodes + the clips, no mesh) and
+  vincent_NAME.json; vincent.glb/json are left alone. Load it next to vincent.glb.
 
 How it is built
 - Textures, UVs, vertex colours, per-triangle alpha flag and the game's draw-order runs come
@@ -25,6 +34,11 @@ How it is built
   (S_w = S_parent * s, non-uniform, h_wk up to 1.41) is not a standard node hierarchy, so
   local TRS would need shear; world TRS is exact. The real parents are in the JSON.
 - Root motion (bone 1 x/z) is removed from the glTF clips and given per frame in the JSON.
+  Per axis: bone 1 y is removed too when the clip's bone 1 translation track moves in y
+  (jumps h_jp1/2, ladder c_ld_*, knockbacks); never for h_st/h_wk/h_rn (their y track is 0).
+- Loops: a clip is a loop when the pose jump from its last frame back to frame 0 is at most
+  max(2 x its frame-0 step, 0.5) units (in place). Loops get a closing key at nf = frame 0;
+  one-shots end on their last key (nf - 1), so they hold their last pose.
 """
 import sys, os, json, struct, subprocess, io
 import numpy as np
@@ -39,6 +53,12 @@ REPO = os.path.abspath(os.path.join(HERE, "../../.."))
 DEFAULT_OUT = os.path.join(REPO, "native/web/data/vincent")
 CLIP_CONT = "/srv/games/dirge-port/extract/_KEL/noPath/0770000b.bin"   # h_* (handgun) clips
 CLIPS = ["h_st", "h_wk", "h_rn"]
+NOPATH = "/srv/games/dirge-port/extract/_KEL/noPath/"
+CLIP_SETS = {'c': ['07700000'], 'h': ['0770000b'], 'm': ['0770000c'], 'r': ['0770000d'],
+             'ev': ['0770000f', '07700011']}            # p000's motion containers (0a = copy of 00)
+DEFAULT_SETS = ['c', 'h']
+GUN_CLIP_CONT = NOPATH + "07770580.bin"               # Cerberus reload clips (4-bone gun rig)
+GUN_CONT = NOPATH + "07770581.bin"
 FPS = 60.0                    # ASSUMED: 1 clip frame per game tick at 60 Hz (unproven)
 REF_CLIP = ("h_st", 0)        # the reference run that supplies textures/UVs/colours/runs
 GLOW_GUN = {
@@ -105,11 +125,69 @@ def body_skin(buf, NB, sk):
     return np.asarray(V, float), Nn / ln, bone, tris
 
 
-def clip_mats(sk, clip, frame, parent=None, root_motion=False):
-    cbuf, CP = AR.find_clip(CLIP_CONT, clip)
-    trs = AR.decode_frame_trs(cbuf, CP, sk['bone_count'], frame)
+_CLIPS = {}
+def find_clip(cont, clip):
+    if (cont, clip) not in _CLIPS: _CLIPS[(cont, clip)] = AR.find_clip(cont, clip)
+    return _CLIPS[(cont, clip)]
+
+
+def list_clips(cont):
+    """[(name, frames)] of the MOD motion clips in a container, in file order."""
+    b = open(cont, 'rb').read(); u16 = lambda o: struct.unpack_from('<H', b, o)[0]
+    u32 = lambda o: struct.unpack_from('<I', b, o)[0]; out = []
+    for i in range(u16(0x10)):
+        o = u32(0x14 + 4 * i)
+        if b[o + 8:o + 11] == b'mod' and b[o + 0x10:o + 0x14] == b'MOD\x00':
+            out.append((b[o:o + 8].split(b'\0')[0].decode(), u32(o + 0x10 + 0x0c)))
+    return out
+
+
+def resolve_clips(spec, sets):
+    """--clips value -> [(name, container path)]."""
+    if spec is None: return [(c, CLIP_CONT) for c in CLIPS]
+    allc = {}
+    for st in list(CLIP_SETS):
+        for cid in CLIP_SETS[st]:
+            for n, _f in list_clips(NOPATH + cid + '.bin'): allc.setdefault(n, (NOPATH + cid + '.bin', st))
+    if spec == 'all':
+        return [(n, c) for n, (c, st) in allc.items() if st in sets]
+    out = []
+    for n in spec.split(','):
+        if n not in allc: sys.exit(f"unknown clip {n}")
+        out.append((n, allc[n][0]))
+    return out
+
+
+def compose_trs(sk, trs, parent=None, root_motion=False, zero_y=False):
+    if zero_y and not root_motion and trs[1][0] is not None:
+        trs = list(trs); t, s_, q = trs[1]; trs[1] = ((t[0], 0.0, t[2]), s_, q)
     s = sk if parent is None else dict(sk, parent=parent)
     return AR.compose(s, trs, root_motion=root_motion)
+
+
+def clip_mats(sk, clip, frame, parent=None, root_motion=False, cont=CLIP_CONT, zero_y=False):
+    cbuf, CP = find_clip(cont, clip)
+    trs = AR.decode_frame_trs(cbuf, CP, sk['bone_count'], frame)
+    return compose_trs(sk, trs, parent, root_motion, zero_y)
+
+
+def y_moves(sk, cont, clip):
+    """True if bone 1's translation track moves in y (vertical root motion)."""
+    cbuf, CP = find_clip(cont, clip)
+    for f in range(AR.clip_frames(cbuf, CP)):
+        t = AR.decode_frame_trs(cbuf, CP, sk['bone_count'], f)[1][0]
+        if t is not None and abs(t[1]) > 1e-9: return True
+    return False
+
+
+def pose_jump(Wa, Wb_):
+    return max(float(np.abs(a - b).max()) for a, b in zip(Wa, Wb_))
+
+
+def is_loop(wrap, step_med, nf):
+    """Loop if the last->first pose jump is an ordinary frame step (median over the clip).
+    Under 8 frames is never a loop (take-offs, hit flinches)."""
+    return nf >= 8 and wrap <= max(2 * step_med, 0.5)
 
 
 def mat_to_trs(M):
@@ -139,9 +217,9 @@ def qmat(q):
                      [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]])
 
 
-def run_ref(dump, outdir, clip, frame):
+def run_ref(dump, outdir, clip, frame, cont=None):
     cmd = [sys.executable, "-I", os.path.join(HERE, "export_p000_gpu2.py"), dump, outdir,
-           "--clip", clip, "--frame", str(frame), "--in-place"]
+           "--clip", clip, "--frame", str(frame), "--in-place"] + (["--clip-cont", cont] if cont else [])
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0: sys.exit(r.stdout[-2000:] + r.stderr[-2000:])
 
@@ -196,7 +274,25 @@ def read_glb(path):
 
 
 # ---------------------------------------------------------------- export
-def export(dump, out, mutate_parents=False):
+def add_anims(g, clips, bc, ext):
+    anims = []
+    for c, d in clips.items():
+        tm = (np.arange(len(d['frames'])) / FPS).astype('<f4')
+        ti = g.acc(tm, 5126, 'SCALAR', minmax=True)
+        ch = []; smp = []
+        for b in range(bc):
+            for path, k, typ in (('translation', 0, 'VEC3'), ('rotation', 1, 'VEC4'), ('scale', 2, 'VEC3')):
+                arr = np.array([fr[b][k] for fr in d['frames']], '<f4')
+                smp.append(dict(input=ti, output=g.acc(arr, 5126, typ), interpolation='LINEAR'))
+                ch.append(dict(sampler=len(smp) - 1, target=dict(node=b + 1, path=path)))
+        anims.append(dict(name=c, channels=ch, samplers=smp,
+                          extras=dict(frames=d['nf'], fps_assumed=FPS, in_place=True,
+                                      **(dict(loop=d['loop'], in_place_axes='xyz' if d['zero_y'] else 'xz')
+                                         if ext else {}))))
+    return anims
+
+
+def export(dump, out, mutate_parents=False, clip_spec=None, sets=DEFAULT_SETS, pack=None):
     check_ignored(out); os.makedirs(out, exist_ok=True)
     ref = os.path.join(out, "_ref"); os.makedirs(ref, exist_ok=True)
     print("reference export (textures/UVs/colours/runs) ->", ref)
@@ -243,26 +339,31 @@ def export(dump, out, mutate_parents=False):
     uv = mesh[:, 6:8]; col = mesh[:, 8:12] * 255.0 / 128.0     # GS 128 = neutral = 1.0
 
     # ---- clips: per frame world TRS per joint, in place; root motion separately
-    clips = {}
-    for c in CLIPS:
-        cbuf, CP = AR.find_clip(CLIP_CONT, c); nf = AR.clip_frames(cbuf, CP)
-        frames = []; root = []
+    clips = {}; ext = clip_spec is not None
+    clip_list = resolve_clips(clip_spec, sets)
+    print(f"{len(clip_list)} clips")
+    for c, cont in clip_list:
+        cbuf, CP = find_clip(cont, c); nf = AR.clip_frames(cbuf, CP)
+        zy = y_moves(sk, cont, c)
+        frames = []; root = []; Ws = []
         # keys sit on frames 0..nf-1 (the last track key is at nf-1; frame nf would be
-        # extrapolated). The wrap nf-1 -> 0 is about one ordinary frame step, so a closing
-        # key at nf repeating frame 0 makes the glTF loop seamless.
+        # extrapolated). For a loop the wrap nf-1 -> 0 is about one ordinary frame step, so
+        # a closing key at nf repeating frame 0 makes the glTF loop seamless.
         for f in range(nf):
-            W = clip_mats(sk, c, f, parent)
-            frames.append([mat_to_trs(M) for M in W])
-            Wr = clip_mats(sk, c, f, parent, root_motion=True)
+            W = clip_mats(sk, c, f, parent, cont=cont, zero_y=zy)
+            frames.append([mat_to_trs(M) for M in W]); Ws.append(W)
+            Wr = clip_mats(sk, c, f, parent, root_motion=True, cont=cont)
             root.append((Wr[1][:3, 3] - W[1][:3, 3]).tolist())
-        frames.append(list(frames[0]))
+        wrap, step = (pose_jump(Ws[-1], Ws[0]), pose_jump(Ws[0], Ws[1])) if nf > 1 else (0.0, 0.0)
+        step_med = float(np.median([pose_jump(Ws[f], Ws[f + 1]) for f in range(nf - 1)])) if nf > 1 else 0.0
+        loop = is_loop(wrap, step_med, nf)
+        if loop: frames.append(list(frames[0]))
         for b in range(bc):               # quaternion hemisphere continuity for slerp
             for f in range(1, len(frames)):
                 if np.dot(frames[f][b][1], frames[f - 1][b][1]) < 0:
                     t, q, s = frames[f][b]; frames[f][b] = (t, -q, s)
-        d_ = lambda f0, f1: max(float(np.abs(a - b).max()) for a, b in
-                                zip(clip_mats(sk, c, f0, parent), clip_mats(sk, c, f1, parent)))
-        clips[c] = dict(frames=frames, root=root, nf=nf, loop_err=d_(nf - 1, 0), step=d_(0, 1))
+        clips[c] = dict(frames=frames, root=root, nf=nf, loop_err=wrap, step=step, loop=loop,
+                        zero_y=zy, cont=cont, step_med=step_med)
 
     # ---- the glb
     g = GLB(); j = g.j
@@ -299,7 +400,6 @@ def export(dump, out, mutate_parents=False):
     bpos = pos[:nbody]; piv = np.array([(bpos[:, 0].min() + bpos[:, 0].max()) / 2, bpos[:, 1].max(),
                                         (bpos[:, 2].min() + bpos[:, 2].max()) / 2])
     rootT = [-piv[0], piv[1], piv[2]]           # Rx(180): (x,y,z) -> (x,-y,-z)
-    st0 = clips['h_st']['frames'][0]
     j['nodes'] = [dict(name='vincent_root', rotation=[1.0, 0.0, 0.0, 0.0], translation=[float(x) for x in rootT],
                        children=list(range(1, bc + 1)))]
     for b in range(bc):
@@ -311,26 +411,44 @@ def export(dump, out, mutate_parents=False):
                        inverseBindMatrices=A(ibm, 5126, 'MAT4'))]
     j['nodes'].append(dict(name='vincent_mesh', mesh=0, skin=0))
     j['scenes'] = [dict(name='vincent', nodes=[0, bc + 1])]; j['scene'] = 0
-    j['animations'] = []
-    for c, d in clips.items():
-        tm = (np.arange(d['nf'] + 1) / FPS).astype('<f4')
-        ti = A(tm, 5126, 'SCALAR', minmax=True)
-        ch = []; smp = []
-        for b in range(bc):
-            for path, k, typ in (('translation', 0, 'VEC3'), ('rotation', 1, 'VEC4'), ('scale', 2, 'VEC3')):
-                arr = np.array([fr[b][k] for fr in d['frames']], '<f4')
-                smp.append(dict(input=ti, output=A(arr, 5126, typ), interpolation='LINEAR'))
-                ch.append(dict(sampler=len(smp) - 1, target=dict(node=b + 1, path=path)))
-        j['animations'].append(dict(name=c, channels=ch, samplers=smp,
-                                    extras=dict(frames=d['nf'], fps_assumed=FPS, in_place=True)))
+    toY = lambda v: [v[0], -v[1], -v[2]]
+    clip_side = lambda d: dict(
+        frames=d['nf'], keys=len(d['frames']), duration_s=(len(d['frames']) - 1) / FPS,
+        wrap_jump=round(d['loop_err'], 4), frame_step=round(d['step'], 4),
+        keys_note='keys at frames 0..nf-1 + a closing key at nf = frame 0' if d['loop'] else
+                  'one-shot: keys at frames 0..nf-1, no closing key (holds the last pose)',
+        root_motion_per_frame_glb=[toY(r) for r in d['root']],
+        root_motion_per_loop_glb=toY(np.array(d['root'][-1]) * d['nf'] / max(d['nf'] - 1, 1)),
+        speed_units_per_frame=round(float(np.linalg.norm(d['root'][-1])) / max(d['nf'] - 1, 1), 4),
+        **(dict(loop=d['loop'], in_place_axes='xyz' if d['zero_y'] else 'xz', median_step=round(d['step_med'], 4),
+                container=os.path.basename(d['cont']),
+                root_total_glb=toY(np.array(d['root'][-1]) - np.array(d['root'][0])))
+           if ext else {}))
+    if pack:                                    # animation-only glb: root + joint nodes, no mesh
+        gp = GLB(); gp.j['nodes'] = j['nodes'][:bc + 1]
+        gp.j['scenes'] = [dict(name='vincent_clips', nodes=[0])]; gp.j['scene'] = 0
+        gp.j['animations'] = add_anims(gp, clips, bc, ext)
+        gp.j['asset']['extras'] = dict(sidecar=f'vincent_{pack}.json', base='vincent.glb')
+        gp.write(os.path.join(out, f'vincent_{pack}.glb'))
+        json.dump(dict(format=f'vincent_{pack}.glb: animation-only clip pack for vincent.glb (same joint '
+                              'node names j00..j92; three.js binds its tracks to the main model by name). '
+                              'Fields as in vincent.json clips.', fps=dict(assumed=FPS),
+                       clips={c: clip_side(d) for c, d in clips.items()}),
+                  open(os.path.join(out, f'vincent_{pack}.json'), 'w'), indent=1)
+        print("wrote", os.path.join(out, f'vincent_{pack}.glb'), f"{os.path.getsize(os.path.join(out, f'vincent_{pack}.glb')) / 1e6:.2f} MB,",
+              len(clips), "clips:", ' '.join(f"{c}{'(loop)' if d['loop'] else ''}" for c, d in clips.items()))
+        return
+    j['animations'] = add_anims(g, clips, bc, ext)
     j['asset']['extras'] = dict(sidecar='vincent.json')
     name = 'vincent_MUTANT_parents.glb' if mutate_parents else 'vincent.glb'
     g.write(os.path.join(out, name))
     print("wrote", os.path.join(out, name), f"({len(g.bin) // 1024} KiB bin, {len(pos)} verts, {len(pos) // 3} tris)")
+    asz = sum(g.j['bufferViews'][g.j['accessors'][s_['output']]['bufferView']]['byteLength']
+              for a in j['animations'] for s_ in a['samplers'])
+    print(f"animation outputs {asz / 1e6:.2f} MB over {sum(d['nf'] for d in clips.values())} frames")
     if mutate_parents: return
 
     # ---- sidecar
-    toY = lambda v: [v[0], -v[1], -v[2]]
     side = dict(
         format="vincent.glb: glTF 2.0 binary, one skinned mesh, flat joints, see 'notes'",
         glb='vincent.glb', units='game world units (placement scale ~1.0; Vincent ~%.1f tall)'
@@ -360,19 +478,14 @@ def export(dump, out, mutate_parents=False):
                                    'debugging/IK, not for re-parenting nodes (non-uniform scale '
                                    'inheritance is not a standard hierarchy)',
                     bind_world_colmajor=[np.array(M).T.reshape(16).tolist() for M in Wb]),
-        clips={c: dict(frames=d['nf'], keys=d['nf'] + 1, duration_s=d['nf'] / FPS,
-                       wrap_jump=round(d['loop_err'], 4), frame_step=round(d['step'], 4),
-                       keys_note='keys at frames 0..nf-1 + a closing key at nf = frame 0',
-                       root_motion_per_frame_glb=[toY(r) for r in d['root']],
-                       root_motion_per_loop_glb=toY(np.array(d['root'][-1]) * d['nf'] / max(d['nf'] - 1, 1)),
-                       speed_units_per_frame=round(float(np.linalg.norm(d['root'][-1])) / max(d['nf'] - 1, 1), 4))
-               for c, d in clips.items()},
+        clips={c: clip_side(d) for c, d in clips.items()},
         fps=dict(assumed=FPS, note='1 clip frame per game tick at 60 Hz is ASSUMED (HANDOFF: unproven; '
                                    'cloth notes suggest ~2 clip frames per 3 vsyncs = 40 fps). '
                                    'Use AnimationAction.timeScale to change.'),
         attach=GLOW_GUN, bind56_world_colmajor=np.array(Wb[56]).T.reshape(16).tolist(),
         source=dict(ref_run=f"export_p000_gpu2.py --clip {REF_CLIP[0]} --frame {REF_CLIP[1]} --in-place",
-                    clip_container=os.path.basename(CLIP_CONT)))
+                    clip_container=os.path.basename(CLIP_CONT) if not ext else
+                    sorted({os.path.basename(d['cont']) for d in clips.values()})))
     json.dump(side, open(os.path.join(out, 'vincent.json'), 'w'), indent=1)
     print("wrote", os.path.join(out, 'vincent.json'))
     for c, d in clips.items():
@@ -410,11 +523,14 @@ def verify(dump, out, glb, clip, frames):
     check_ignored(out)
     chk = os.path.join(out, "_ref_check"); os.makedirs(chk, exist_ok=True)
     side = json.load(open(os.path.join(out, 'vincent.json'))); nb = side['body_triangles'] * 3
+    ci = side['clips'][clip]; cont = NOPATH + ci['container'] if 'container' in ci else None
     res = {}
     for f in frames:
-        run_ref(dump, chk, clip, f)
+        run_ref(dump, chk, clip, f, cont)
         ref = read_mesh(os.path.join(chk, "vincent_p000.mesh"))[:, :3].astype(float)
         X = skin_glb(glb, clip, f)
+        if ci.get('in_place_axes') == 'xyz':   # gpu2 --in-place keeps bone 1 y: add it back
+            X[:, 1] -= ci['root_motion_per_frame_glb'][f][1]   # glb y = -model y
         e = np.linalg.norm(X - ref, axis=1)
         r = dict(body_median=float(np.median(e[:nb])), body_max=float(e[:nb].max()),
                  cape_median=float(np.median(e[nb:])), cape_max=float(e[nb:].max()))
@@ -423,10 +539,152 @@ def verify(dump, out, glb, clip, frames):
     return res
 
 
+# ---------------------------------------------------------------- catalogue
+# Purpose GUESSES from the clip name, checked against the measured root motion / hip height.
+# 'conf': high = root motion or hip height confirms it; mid = name pattern + data agree;
+# low = name only. Weapon sets h_/m_/r_ (handgun / machine gun / rifle) share one name scheme.
+WEAPON = {
+    'wk': ('walk', 'high'), 'rn': ('run', 'high'), 'sq': ('crouch idle', 'high'), 'st': ('stand idle', 'high'),
+    'jp0': ('jump: take-off crouch', 'high'), 'jp1': ('jump: rise (12 up)', 'high'),
+    'jp2': ('jump: descend (12 down)', 'high'), 'jp3': ('jump: airborne / falling loop', 'mid'),
+    'jp4': ('jump: landing', 'high'), 'div': ('dive / roll forward (30)', 'mid'),
+    'wk_a': ('aim level, walking', 'mid'), 'rn_a': ('aim level, running', 'mid'),
+    'sq_a': ('aim level, crouched', 'mid'), 'st_a': ('aim level, standing', 'mid'),
+    'sq_f': ('fire, crouched', 'mid'), 'st_f': ('fire, standing', 'mid'),
+    'sq_m': ('crouch walk', 'high'), 'rev_0': ('unknown, hips drop to the floor (collapse/revive?)', 'low'),
+    'brn_a': ('aimed strafe run backward', 'high'), 'lrn_a': ('aimed strafe run left', 'mid'),
+    'rrn_a': ('aimed strafe run right', 'high'), 'sq_ma': ('aimed crouch walk forward', 'high'),
+    'bs_ma': ('aimed crouch walk backward', 'high'), 'ls_ma': ('aimed crouch walk left', 'mid'),
+    'rs_ma': ('aimed crouch walk right', 'mid'),
+    'wk_rd': ('reload while walking', 'mid'), 'rn_rd': ('reload while running', 'mid'),
+    'sq_rd': ('reload, crouched', 'mid'), 'st_rd': ('reload, standing', 'mid'),
+    'fwk_rd': ('reload while walking (fast/forward?)', 'low'), 'sqm_rd': ('reload while crouch walking', 'mid'),
+    'frn_rd': ('reload while running (fast/forward?)', 'low'), 'swtch': ('weapon switch / draw', 'mid'),
+    'ld_del': ('ladder exit at bottom, left (weapon arm variant, no root motion)', 'low'),
+    'ld_der': ('ladder exit at bottom, right (weapon arm variant, no root motion)', 'low'),
+    'ld_uel': ('ladder exit at top, left (weapon arm variant, no root motion)', 'low'),
+    'ld_uer': ('ladder exit at top, right (weapon arm variant, no root motion)', 'low'),
+}
+for _b in ('wk', 'rn', 'sq', 'st', 'brn', 'lrn', 'rrn', 'sq_m', 'bs_m', 'ls_m', 'rs_m'):
+    for _sfx, _w in (('d', 'down'), ('u', 'up')):
+        _k = _b + ('a' if _b.endswith('_m') else '_a') + _sfx
+        _base = WEAPON.get(_b + ('a' if _b.endswith('_m') else '_a'), ('aim', 'mid'))[0]
+        WEAPON[_k] = (_base.replace('aim level', f'aim {_w}').replace('aimed', f'aimed {_w}'), 'mid')
+for _p in ('sq', 'st'):
+    for _sfx, _w in (('d', 'down'), ('u', 'up')): WEAPON[f'{_p}_f{_sfx}'] = (WEAPON[f'{_p}_f'][0].replace('fire', f'fire {_w}'), 'mid')
+COMMON = {
+    'sqd': ('hit flinch, crouched (d = damage?)', 'low'), 'std': ('hit flinch, standing', 'low'),
+    'jzd': ('hit flinch in the "jz" stance', 'low'),
+    'tf_0': ('unknown "tf" (hips lower ~3)', 'low'), 'tf_1': ('unknown "tf" variant', 'low'),
+    'tfof_0': ('end of "tf" (tf off)', 'low'), 'tfof_1': ('end of "tf" variant', 'low'),
+    'bl_0': ('knocked up/back (bl = blown?)', 'low'), 'bl_1': ('knocked down, 28.7 back, ends lying', 'mid'),
+    'fl_0': ('on the floor, kneeling/low (fl = floor?)', 'low'), 'fl_1': ('lying on the floor / getting up', 'low'),
+    'bl_ht0': ('blown/hit variant', 'low'),
+    'jz_a': ('"jz" stance aim level (1 frame)', 'low'), 'jz_ad': ('"jz" stance aim down (1 frame)', 'low'),
+    'jz_au': ('"jz" stance aim up (1 frame)', 'low'), 'jzend': ('leave the "jz" stance', 'low'),
+    'jzsetl': ('enter the "jz" stance from the left (6.3 forward)', 'low'),
+    'jzsetr': ('enter the "jz" stance from the right', 'low'),
+    'jz_fa0': ('death/fall in the "jz" stance', 'low'), 'jz_fa1': ('death/fall in the "jz" stance, variant', 'low'),
+    'jz_bl0': ('knocked back out of the "jz" stance', 'low'),
+    'ld_d': ('ladder: get on at the TOP, climbing down (18 down)', 'high'),
+    'ld_u': ('ladder: get on at the BOTTOM (6 up, starts 5.5 back)', 'high'),
+    'ld_jp': ('ladder: jump off backward (10 back)', 'mid'), 'ld_fa0': ('ladder: fall/knocked off', 'mid'),
+    'ld_lid': ('ladder: idle, left hand up (loop)', 'high'), 'ld_rid': ('ladder: idle, right hand up (loop)', 'high'),
+    'ld_uml': ('ladder: climb up one step (4.5), left', 'high'), 'ld_umr': ('ladder: climb up one step (4.5), right', 'high'),
+    'ld_dml': ('ladder: climb down one step (4.5), left', 'high'), 'ld_dmr': ('ladder: climb down one step (4.5), right', 'high'),
+    'ld_uel': ('ladder: get off at the TOP, left (18 up, 3.5 forward)', 'high'),
+    'ld_uer': ('ladder: get off at the TOP, right', 'high'),
+    'ld_del': ('ladder: get off at the BOTTOM, left (6 down, 5.5 back)', 'high'),
+    'ld_der': ('ladder: get off at the BOTTOM, right', 'high'),
+    'atk_0': ('melee combo hit 1', 'mid'), 'atk_1': ('melee combo hit 2', 'mid'), 'atk_2': ('melee combo hit 3', 'mid'),
+    'atk_3': ('melee combo hit 4', 'mid'), 'atk_4': ('melee finisher (hop)', 'mid'),
+    'atk_01': ('melee: recover after hit 1', 'low'), 'atk_11': ('melee: recover after hit 2', 'low'),
+    'atk_21': ('melee: recover after hit 3', 'low'),
+    'jp_fa0': ('death in the air (fa = fatal?)', 'low'), 'sq_fa0': ('death, crouched (ends on the floor)', 'mid'),
+    'st_fa0': ('death, standing (ends on the floor)', 'mid'),
+    'jp_bl0': ('hit knockback in the air (14-17 back)', 'mid'), 'sq_bl0': ('hit knockback, crouched', 'mid'),
+    'st_bl0': ('hit knockback, standing', 'mid'),
+}
+
+
+def guess(name):
+    if name.startswith('bv'): return 'event / cutscene motion', 'low'
+    pre, _, base = name.partition('_')
+    if pre == 'c': return COMMON.get(base, ('unknown', 'low'))
+    return WEAPON.get(base, ('unknown', 'low'))
+
+
+def catalogue(out):
+    check_ignored(out)
+    sk = load()[2]; bc = sk['bone_count']
+    toY = lambda v: [round(float(v[0]), 3), round(float(-v[1]), 3), round(float(-v[2]), 3)]
+    cat = []
+    for st, cids in CLIP_SETS.items():
+        for cid in cids:
+            cont = NOPATH + cid + '.bin'
+            for name, nf in list_clips(cont):
+                cbuf, CP = find_clip(cont, name)
+                T = [AR.decode_frame_trs(cbuf, CP, bc, f) for f in range(nf)]
+                Wr = [AR.compose(sk, t, root_motion=True) for t in T]
+                Wi = [compose_trs(sk, t, zero_y=True) for t in T]        # fully in place
+                r = np.array([W[1][:3, 3] for W in Wr]) - np.array([W[1][:3, 3] for W in Wi])
+                hip = np.array([W[2][:3, 3] for W in Wr])
+                d = lambda a, b: max(float(np.abs(x - y).max()) for x, y in zip(a, b))
+                wrap, step = (d(Wi[-1], Wi[0]), d(Wi[0], Wi[1])) if nf > 1 else (0.0, 0.0)
+                smed = float(np.median([d(Wi[f], Wi[f + 1]) for f in range(nf - 1)])) if nf > 1 else 0.0
+                tot = r[-1] - r[0]; g = toY(tot)
+                pur, conf = guess(name)
+                cat.append(dict(
+                    name=name, set=st, container=cid, frames=nf, duration_s=round(nf / FPS, 3),
+                    loops=bool(is_loop(wrap, smed, nf)), wrap_jump=round(wrap, 3), median_step=round(smed, 3),
+                    root_start_glb=toY(r[0]), root_total_glb=g,
+                    root_horizontal=round(float(np.hypot(tot[0], tot[2])), 3), root_up=g[1],
+                    vertical_root_motion=bool(np.abs(r[:, 1]).max() > 1e-6),
+                    root_up_range=[round(float(-r[:, 1].max()), 3), round(float(-r[:, 1].min()), 3)],
+                    hip_height=[round(float(-hip[0, 1]), 2), round(float(-hip[-1, 1]), 2)],
+                    hip_height_range=[round(float(-hip[:, 1].max()), 2), round(float(-hip[:, 1].min()), 2)],
+                    purpose=pur, confidence=conf))
+    # the gun's own clips (4-bone Cerberus rig)
+    from skd_skeleton import load_skeleton
+    gsk = load_skeleton(GUN_CONT, trans_scale=1.0); gbc = gsk['bone_count']; gun = []
+    for name, nf in list_clips(GUN_CLIP_CONT):
+        cbuf, CP = find_clip(GUN_CLIP_CONT, name)
+        Ws = [AR.compose(gsk, AR.decode_frame_trs(cbuf, CP, gbc, f)) for f in range(nf)]
+        bones = []
+        for b in range(gbc):
+            R0 = Ws[0][b][:3, :3]; ang = []
+            for W in Ws:
+                Rm = W[b][:3, :3] @ np.linalg.inv(R0)
+                ang.append(np.degrees(np.arccos(np.clip((np.trace(Rm) - 1) / 2, -1, 1))))
+            tr = np.array([W[b][:3, 3] for W in Ws])
+            bones.append(dict(bone=b, parent=int(gsk['parent'][b]), max_rot_deg=round(float(max(ang)), 1),
+                              translation_range=round(float(np.ptp(tr, axis=0).max()), 3)))
+        gun.append(dict(name=name, container='07770580', frames=nf, duration_s=round(nf / FPS, 3),
+                        pairs_with=name, purpose='Cerberus side of ' + guess(name)[0], bones=bones))
+    side = dict(
+        note='Vincent (p000) motion catalogue, generated by export_web_vincent.py catalogue. Axes are glb '
+             'space (Y up, +Z = his forward). Root = bone 1 translation (the part the glb removes, per '
+             'axis); hip = bone 2 height above the model origin (~12 standing, ~5.6 crouched, ~1 lying). '
+             'loops = measured (fully in place: pose jump last->first <= max(2 x frame step, 0.5)). '
+             'purpose = a GUESS from the name, conf high/mid/low (see the code). 60 fps ASSUMED.',
+        sets={k: v for k, v in CLIP_SETS.items()},
+        skipped={'0770000a': 'byte-identical copy of 07700000',
+                 '07701900/07703200 sets': 'other p000 builds (own rig + motion sets), not catalogued'},
+        clips=cat, gun_clips=gun,
+        gun_note='07770580 = 6 reload clips on the gun\'s own 4-bone skeleton (07770581), same names and '
+                 'lengths as Vincent\'s h_*_rd (h_st_rd: 41 vs 40). No other gun motions exist.')
+    json.dump(side, open(os.path.join(out, 'motions.json'), 'w'), indent=1)
+    print('wrote', os.path.join(out, 'motions.json'), len(cat), 'clips +', len(gun), 'gun clips')
+    return side
+
+
 def main(argv):
+    if argv[:1] == ['catalogue']:
+        out = DEFAULT_OUT if '--out' not in argv else os.path.abspath(argv[argv.index('--out') + 1])
+        return catalogue(out)
     if len(argv) < 2 or argv[0] not in ('export', 'verify'): sys.exit(__doc__)
     mode, dump = argv[0], argv[1]; out = DEFAULT_OUT; glb = None; clip = 'h_wk'; frames = [0, 13, 27]
-    mutate = False; i = 2
+    mutate = False; i = 2; clip_spec = None; sets = DEFAULT_SETS; pack = None
     while i < len(argv):
         k = argv[i]
         if k == '--out': out = os.path.abspath(argv[i + 1]); i += 2
@@ -434,8 +692,11 @@ def main(argv):
         elif k == '--clip': clip = argv[i + 1]; i += 2
         elif k == '--frames': frames = [int(x) for x in argv[i + 1].split(',')]; i += 2
         elif k == '--mutate-parents': mutate = True; i += 1
+        elif k == '--clips': clip_spec = argv[i + 1]; i += 2
+        elif k == '--sets': sets = argv[i + 1].split(','); i += 2
+        elif k == '--pack': pack = argv[i + 1]; i += 2
         else: sys.exit(f"unknown option {k}")
-    if mode == 'export': export(dump, out, mutate)
+    if mode == 'export': export(dump, out, mutate, clip_spec, sets, pack)
     else: verify(dump, out, glb or os.path.join(out, 'vincent.glb'), clip, frames)
 
 
