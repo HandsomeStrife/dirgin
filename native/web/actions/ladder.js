@@ -271,7 +271,7 @@ export function ladderAction() {
       if (ph.kind === 'fall') {                   // after the jump-off: fall to the floor
         const p = ctx.ctrl.pos;
         let nx = p.x + ph.vx, nz = p.z + ph.vz;
-        if (ctx.col.move) {                      // airborne body keeps walking the navmesh (FORMAT.md §3d)
+        if (typeof ctx.col.navMove === 'function') {   // navmesh: airborne body keeps walking it (FORMAT.md §3d)
           const r = ctx.col.move(p, { x: ph.vx, z: ph.vz }, { air: true }); nx = r.x; nz = r.z;
         } else if (ctx.col.capsulePush) [nx, nz] = ctx.col.capsulePush(nx, p.y, nz, ctx.ctrl.opts.radius, ctx.ctrl.opts.height);
         ph.vy = Math.min(ph.vy + GRAVITY, MAX_FALL);

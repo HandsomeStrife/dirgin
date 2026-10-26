@@ -15,6 +15,9 @@ gitignored directory (default native/web/data/vincent/, checked with git check-i
   With --clips the JSON clip entries also carry loop / in_place_axes / container / root_total.
   --pack NAME: write only vincent_NAME.glb (joint nodes + the clips, no mesh) and
   vincent_NAME.json; vincent.glb/json are left alone. Load it next to vincent.glb.
+  The pack JSON records bone_count and parent_sha1 (sha1 of the parent list as compact JSON,
+  e.g. [-1,0,1,...]) so a loader can refuse a pack built for another skeleton.
+  --pack with --mutate-parents is refused (it would write mutant clips into the real pack).
 
 How it is built
 - Textures, UVs, vertex colours, per-triangle alpha flag and the game's draw-order runs come
@@ -36,8 +39,9 @@ How it is built
 - Root motion (bone 1 x/z) is removed from the glTF clips and given per frame in the JSON.
   Per axis: bone 1 y is removed too when the clip's bone 1 translation track moves in y
   (jumps h_jp1/2, ladder c_ld_*, knockbacks); never for h_st/h_wk/h_rn (their y track is 0).
-- Loops: a clip is a loop when the pose jump from its last frame back to frame 0 is at most
-  max(2 x its frame-0 step, 0.5) units (in place). Loops get a closing key at nf = frame 0;
+- Loops: a clip is a loop when it has at least 8 frames and the pose jump from its last frame
+  back to frame 0 is at most max(2 x its median frame step, 0.5) units (in place; is_loop).
+  Loops get a closing key at nf = frame 0;
   one-shots end on their last key (nf - 1), so they hold their last pose.
 """
 import sys, os, json, struct, subprocess, io
@@ -292,7 +296,16 @@ def add_anims(g, clips, bc, ext):
     return anims
 
 
+def parent_sha1(parent):
+    """sha1 of the parent list as compact JSON ([-1,0,1,...]): ties a clip pack to its skeleton."""
+    import hashlib
+    return hashlib.sha1(json.dumps([int(x) for x in parent], separators=(',', ':')).encode()).hexdigest()
+
+
 def export(dump, out, mutate_parents=False, clip_spec=None, sets=DEFAULT_SETS, pack=None):
+    if pack and mutate_parents:
+        sys.exit("--pack with --mutate-parents refused: it would write mutant clips into "
+                 f"vincent_{pack}.glb/json. Run the mutation test without --pack.")
     check_ignored(out); os.makedirs(out, exist_ok=True)
     ref = os.path.join(out, "_ref"); os.makedirs(ref, exist_ok=True)
     print("reference export (textures/UVs/colours/runs) ->", ref)
@@ -433,6 +446,7 @@ def export(dump, out, mutate_parents=False, clip_spec=None, sets=DEFAULT_SETS, p
         json.dump(dict(format=f'vincent_{pack}.glb: animation-only clip pack for vincent.glb (same joint '
                               'node names j00..j92; three.js binds its tracks to the main model by name). '
                               'Fields as in vincent.json clips.', fps=dict(assumed=FPS),
+                       bone_count=bc, parent_sha1=parent_sha1(sk['parent']),
                        clips={c: clip_side(d) for c, d in clips.items()}),
                   open(os.path.join(out, f'vincent_{pack}.json'), 'w'), indent=1)
         print("wrote", os.path.join(out, f'vincent_{pack}.glb'), f"{os.path.getsize(os.path.join(out, f'vincent_{pack}.glb')) / 1e6:.2f} MB,",
