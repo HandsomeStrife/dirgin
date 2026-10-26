@@ -182,9 +182,29 @@ def _valid_desc(buf, NB, P, doff):
 
 
 def enum_descs(buf, NB, P, G):
-    """group+0x08 -> self-terminating array of draw-descriptor offsets.
-    Return list of (desc_off, vifPtr) file-relative."""
+    """group+0x08 -> array of draw-descriptor offsets; the count is byte G+2.
+    Return list of (desc_off, vifPtr) file-relative.
+
+    The descriptor header word can be any DMA tag (p000 L01.g0 d1 = 0x80010001,
+    refe+IRQ; S01.g1 d5 = 0x30020002, ref), so with the count known we don't
+    judge entries by their header. The old header check stopped L01.g0 after d0;
+    d0's VIF run then read d2's header 0xffff0003 as an UNPACK of 255 qwords and
+    skipped 7 index sub-packets (Vincent's right knee pad / crotch, bone 87).
+    Falls back to the header scan if the count doesn't fit the data."""
     arr = P + _u32(buf, G + 0x08); out = []
+    n = buf[G + 2] if G + 2 < NB else 0
+    if 0 < n <= 64 and arr + 4 * n <= NB:
+        for k in range(n):
+            doff = _u32(buf, arr + 4 * k)
+            if not (0 < doff and P + doff + 0x18 <= NB):
+                break
+            vif = _u32(buf, P + doff + 0x14)
+            if not (doff < vif < NB):
+                break
+            out.append((doff, vif))
+        else:
+            return out
+        out = []
     for k in range(64):
         if arr + 4 * k + 4 > NB:
             break

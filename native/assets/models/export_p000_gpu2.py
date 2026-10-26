@@ -263,7 +263,7 @@ def apply_bind_ref(tris, tri_tex0, how, path):
     """Where the reference has stronger evidence (exact/uvmap over this capture's
     uvmap/none), take its CLUT, translated to this capture's TEX0 through the TEX0
     pairs of triangles bound 'exact' in both. Returns counts."""
-    ref = [r for r in json.load(open(path)) if r['how'] != 'mirror']   # mirrored copies are appended last
+    ref = json.load(open(path))
     if len(ref) != len(tris) or any(r['v'] != [int(k) for k in t[:3]] for r, t in zip(ref, tris)):
         raise ValueError("bind_ref triangles do not match this decode")
     m = collections.defaultdict(collections.Counter)
@@ -352,22 +352,8 @@ def main():
     pl = solve_placement(*exact_pairs(Pn), piv)
     print("placement:", {k: round(v, 3) if isinstance(v, float) else v for k, v in pl.items()})
 
-    # ---- mirrored pieces the decode lacks (right knee pad; p000_pose.mirror_plan). Added
-    # after the placement solve so they can't move it; bound like their source tris.
     import p000_pose as PZ
-    mbone = PZ.mirror_bones(Wm); vb0 = PZ.vertex_bones(buf, NB, bc, gmeta)
-    dump_x = collections.defaultdict(list)
-    for t0, vs in dtris:
-        dump_x[tri_sig([v[1] for v in vs])].append(
-            float(world_to_model(np.mean([v[0] for v in vs], 0)[None], pl, piv)[0][0]))
-    mplan = PZ.mirror_plan(V, tris, lambda t: tri_sig(uvn(t)), vb0, mbone, dump_x, Wm, sk['parent'])
-    V, N, mtris, mvb = PZ.apply_mirror(V, N, tris, mplan, vb0, mbone, Wm, Wm)
-    tris = tris + mtris; tri_tex0 = tri_tex0 + [tri_tex0[i] for i in mplan]
-    how = how + ['mirror'] * len(mtris)
-    Pn = V.astype(np.float64); used_idx = sorted({i for t in tris for i in t[:3]})
-    mirror_stats = dict(tris=len(mtris), vertices=len(mvb),
-                        bones=dict(collections.Counter(int(vb0[tris[i][0]]) for i in mplan)))
-    print("mirrored:", mirror_stats)
+    vb0 = PZ.vertex_bones(buf, NB, bc, gmeta)
 
     # ---- cape (block 0x19f70) posed from the dump
     cape, cape_tex0, cst = C.posed_cape(buf, NB, dumppath)
@@ -405,7 +391,7 @@ def main():
         cands = collections.defaultdict(list); src = collections.Counter()
         for i, t in enumerate(tris):
             uvs = uvn(t)
-            if how[i] in ('exact', 'mirror'):
+            if how[i] == 'exact':
                 for dmap in dall.get(tri_sig(uvs), []):
                     for k in range(3):
                         w = dmap.get(q(uvs[k]))
@@ -413,8 +399,7 @@ def main():
             elif tri_tex0[i] is not None:
                 for k in range(3):
                     cands[t[k]].extend(byuv.get((tri_tex0[i], q(uvs[k])), []))
-        vb = dict(vb0); vb.update(mvb)
-        posed, rot, pose_stats = PZ.pose(placed, dict(cands), vb, sk['parent'], src=src)
+        posed, rot, pose_stats = PZ.pose(placed, dict(cands), vb0, sk['parent'], src=src)
         pose_stats['vertices'] = len(used_idx)
         pose_stats['with_dump_candidates'] = sum(1 for v in used_idx if cands.get(v))
         print("pose:", pose_stats)
@@ -438,8 +423,6 @@ def main():
             Wc = AR.compose(sk, trs, root_motion=not args['in_place'], **kw)
             Vc, Nc, tris_c, _g = P.decode_groups(buf, NB, Wc, bc)
             tris_c = [t for t in tris_c if t[6] in keep]
-            Vc, Nc, mt_c, _mb = PZ.apply_mirror(Vc, Nc, tris_c, mplan, vb0, mbone, Wm, Wc)
-            tris_c = tris_c + mt_c
             assert len(Vc) == len(V) and [t[:3] for t in tris_c] == [t[:3] for t in tris]
             Pc = Vc.astype(np.float64); pv = Pc[used_idx]
             pc = np.array([(pv[:, 0].min() + pv[:, 0].max()) / 2, pv[:, 1].max(), (pv[:, 2].min() + pv[:, 2].max()) / 2])
@@ -450,7 +433,7 @@ def main():
             sc, Rm, t = umeyama(Pc[dv], Dw)
             e = np.linalg.norm(X - Dw, axis=1)
             per = {b: round(float(np.median(e[m])), 3) for b in moved
-                   for m in [np.array([vb.get(v) == b for v in dv])] if m.sum() >= 4}
+                   for m in [np.array([vb0.get(v) == b for v in dv])] if m.sum() >= 4}
             return Pc, Nc, pv, pc, plc, dict(placed=err_stats(X, Dw), aligned=err_stats(sc * Pc[dv] @ Rm.T + t, Dw),
                                              moved_bones_median=per)
         Pn, Nc, pv, piv, pl, err = clip_pose()
@@ -522,7 +505,7 @@ def main():
     json.dump([dict(g=int(t[6]), name=gmeta[t[6]][0], tex0=(None if tri_tex0[i] is None else int(tri_tex0[i])),
                     how=how[i], uv=uvn(t), v=[int(k) for k in t[:3]]) for i, t in enumerate(tris)],
               open(os.path.join(outdir, "binding.json"), 'w'))
-    json.dump(dict(placement=pl, binding=dict(hc), mirrored=mirror_stats, cape=cst, pose=pose_stats, clip=clip_stats,
+    json.dump(dict(placement=pl, binding=dict(hc), cape=cst, pose=pose_stats, clip=clip_stats,
                    **({} if glow_stats is None else dict(glow=glow_stats)),
                    char_alpha_ref=CAPE_AREF_GL,
                    render_args=f"-s {pl['s']:.4f} -yaw {pl['yaw']:.2f} -x {pl['x']:.2f} -y {pl['y']:.2f} -z {pl['z']:.2f}",

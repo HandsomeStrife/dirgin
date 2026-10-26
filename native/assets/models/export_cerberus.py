@@ -109,8 +109,7 @@ def vincent_socket(p000_dir, bone):
     bc = sk['bone_count']; Wm = [np.array(m, float) for m in sk['world_bind']]
     V, _N, tris, gm = P.decode_groups(buf, NB, Wm, bc)
     vb = PZ.vertex_bones(buf, NB, bc, gm)
-    # mirrored copies (p000_pose.apply_mirror) are appended last: not in this decode
-    bind = [b for b in json.load(open(os.path.join(p000_dir, 'binding.json'))) if b['how'] != 'mirror']
+    bind = json.load(open(os.path.join(p000_dir, 'binding.json')))
     mesh, bbmin, bbmax = read_mesh(os.path.join(p000_dir, 'vincent_p000.mesh'))
     if len(bind) != len(tris) or any(b['v'] != [int(k) for k in t[:3]] for b, t in zip(bind, tris)):
         raise ValueError("binding.json does not match this decode")

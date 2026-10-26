@@ -199,21 +199,18 @@ Read this first instead of re-deriving. Review images: notes/review/ (README exp
   also when ALL are > STRICT_MARGIN=0.5 across. Bone 87 now 27-28 deg. Silhouette IoU: 185138
   0.856 -> 0.908, hero 0.847 -> 0.860, 185126 0.831 -> 0.830. Cost: thin fringe on the near shin
   (bone 84) in hero/185126 (walking feet land near the midline; margins 0.1/0.3 were worse).
-- Right knee pad (2026-10-26, review 60): the game draws the knee pad on both knees (same UVs);
-  our decode has it only on the left knee (bone 83: L01.g0 inner, L01.g1 outer), none on 87.
-  Root cause in the skinned decode, NOT found. Workaround: p000_pose.mirror_plan/apply_mirror,
-  called after the placement solve (and in clip_pose): a tri on one lateral bone whose UV triple
-  the dump draws > MIRROR_MARGIN=0.3 across on the mirror bone's side, with no copy of ours there,
-  is mirrored across model x=0 onto the mirror bone (mirror_bones). 27-33 tris per dump, appended
-  LAST to binding.json (how="mirror"; readers expecting the plain decode skip them: bind_ref,
-  export_cerberus). Legs |d|/SSIM: hero 5.64/0.828 -> 5.61/0.830, 185138 8.98/0.750 -> 8.81/0.762.
-  Dan (review 60): "may be missing some additional textures near the top of the legs".
-- Top of the legs (2026-10-26, review 61): the unmatched dump tris over hips/groin/upper thighs
-  were all crotch/inner-hip mirror cases (decode has them on bone 82 or 81+82 only). mirror_plan
-  also takes pelvis/central + leg tris (central vertices mirror onto their own bone) and
-  near-midline tris when the dump draws both sides; only under bone 81 (RELAX_ROOT; on torso/mantle
-  bones 5, 34-37, 67-70 it would also fire, not checked). +8-11 tris per dump. Visible unmatched
-  hip tris: hero 7->4, 185126 1->0, 185138 7->3. No missing CLUTs or props there.
+- Decoder: right-side pieces (2026-10-26, reviews 60-62): the right knee pad / crotch / inner hip
+  (and a chest/arm patch) were missing because of a DECODER bug, not mirroring. Group header
+  byte +2 = draw-descriptor count; render_skinned.enum_descs stopped at the first header that
+  wasn't 0xffff000N or a cnt/next DMA tag (L01.g0 d1 = 0x80010001), and the VIF parser then read
+  d2's header 0xffff0003 as a 2040-byte UNPACK, skipping 7 index sub-packets (bones 86/87).
+  S01.g1 lost a 6th descriptor the same way. Fix: enum_descs reads the count (falls back to the
+  scan). p000 2328 -> 2389 tris, 0 unreferenced pool slots. Game-wide: 90 containers / 501 groups
+  change (+22.8k tris; p005 S01.g2/g3 0 -> 384 each). The dump-driven mirror workaround from
+  reviews 60/61 was removed; placement.json has no "mirrored" key. Gun error 0.086 / 0.117.
+  Open: the last descriptor of a group still parses to EOF (can leak into the next group; fix
+  touches p000_cape/p000_cloth call sites). Group header carries per-vertex blend weights
+  (0.8, 0.6...) that our skinning ignores (shared slots are overwritten): unexplored.
 
 ## Room
 - out/ is gitignored. Rebuild (in native/assets/models, run -I):
