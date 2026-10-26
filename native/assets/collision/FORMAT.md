@@ -189,6 +189,106 @@ uploaded outside the graphics VU1 blobs there); see
 depend on it. The parser keeps the exact AABB box as a fallback only for leaves
 that yield no triangles (a handful of empty placeholder leaves in tiny maps).
 
+### 3c. tag-1 — oriented primitives (DECODED, worker 0055)
+
+Tag-1 nodes were skipped by `cid.c` until worker 0055. Each holds one primitive
+(z128: 247 in sub-tree 0, 996 in sub-tree 2; sub-tree 3 holds 112 tag-3 nodes,
+still not decoded). Decoded from `FUN_00270938` (broad phase: shape type at
+`+0x40`) and `FUN_0035dcf0` (the character's closest-point test):
+
+| off  | field                                                      |
+|------|------------------------------------------------------------|
+|+0x10 | AABB centre / +0x20 half / +0x30 1/half (as other nodes)   |
+|+0x40 | shape type                                                 |
+|+0x44 | class word (sub-tree 0: 1, 2, 3, 4, 0xc, or 0x5a9c94; sub-tree 2: always 0x5a9c94) |
+|+0x48 | flag word; bit 0 set = `FUN_0035a440` skips its ground test |
+|+0x60 | 4x4 matrix, unit shape -> world (row vectors: `[x y z 1]·M`) |
+|+0xa0 | the inverse matrix                                         |
+
+Unit shapes (radius/half-size 10): type 0/1 sphere (`FUN_0025dae8`), type 2 box
+`(-10,-10,-10)..(10,10,10)` (`FUN_0025cf00`), type 3/4 radius 10 around local Y
+over y −10..10 (`FUN_0025d1b8`; the AABB bounds y at ±10 scaled, so the ends are
+flat: a cylinder). `cid.c` tessellates them (box 12 tris, cylinder 16 sides +
+caps, sphere 8×16) with `source = 3` (`CID_SRC_PRIM`), `mask = class & 0xffff`,
+`surface = flag`. Tessellated boxes match their node AABBs exactly.
+
+Who uses them: sub-tree 0 → the character physics `FUN_0035a440` via
+`FUN_0026a548` → `FUN_00271668` → `FUN_00270938(+0x38, …, 2)` (2 = tag-1 only);
+it pushes the body sphere out of them and, for flag bit 0 clear, tests them as
+ground within 40°. Sub-tree 2 → `FUN_0026a5d8` → `FUN_002716c0`, called only from
+a physics-prop class (`0x406378`, `0x407578`; objects built by `FUN_00587b10`
+as box/sphere/capsule bodies). On z128 sub-tree 2 holds the deck slabs and every
+railing (the north, west and south rails of the start deck are boxes at
+z −1087.1, x −1425.9, z −1116.9, 10 units tall) — and nothing else on those
+railings exists in any sub-tree.
+
+### 3d. The sub-tree-0 tag-0 faces are the character's walk mesh (DECODED, worker 0061)
+
+**Which movement mode z128 uses.** `FUN_0034db80(char, mode)` turns the walk
+mode 10 into mode **0xc** when script flag bit 13 (`DAT_0046e298`) is set (and
+ignores the fall mode 0xb). `FUN_0053c140` sets bit 13 from the stage record
+`FUN_00311038()` = section 4 of the stage file (`06800001.bin`, record at
+0xa6630), field +0x44 bit 0, which is **1** in z128. (Only the script native
+`FUN_00326660` could clear it later; not traced. `FUN_003222a0`, the other
+setter, has no caller.) Mode 0xc (`FUN_0034c388` case 0xc) runs the physics
+body at char+0x3b0: `FUN_00358fb8` then `FUN_003590c8`, a state machine on
+body+0xa8 (0 ground, 2 fall, 1/3/4-7 others). Every state moves through
+**`FUN_00357d48`**. So worker 0057's walk-mode-10 rules (`FUN_003539b0`: 7.5 step,
+0.2 follow, 5 below, 7-unit wall ray) are real but not what z128 runs; the
+40-degree ground test (`FUN_0035a440`) is only reached when body flags +0xac
+bit 1 or 2 are set (not resolved).
+
+**Face record** (0x20 bytes, sub-tree +0x38 tag-0 nodes):
+
+| off  | field |
+|------|-------|
+|+0x00 | word0: low 4 bits vertex count (3 or 4); high bits not used by the walker |
+|+0x04 | u16 flags (below) |
+|+0x06 | u16 (not decoded; z128: 1, 2, 3, 0xc) |
+|+0x08 | u16 vertex index x4 into the sub-tree vertex pool |
+|+0x10 | neighbour pointer per edge v[i]->v[i+1] (payload offset, relocated by `FUN_0026f300`); 0 = boundary edge |
+
+z128: 3,186 polygons, 7,288 links (all reciprocal, never across files), 2,709
+boundary edges. The body keeps its polygon at body+0x110 and the vertex pool at
++0x114; `FUN_0035c918` caches the face plane (+0x120, `FUN_0035d0a0`) and the
+edge planes (+0x130.., `FUN_0035d2e0`: edge j through v[j], v[j+1] and v[j] + N,
+N = (v1-v0)x(v2-v1), positive = outside).
+
+**`FUN_00357d48(body, move)`**, up to 8 passes:
+1. Position outside the polygon (`FUN_002605c8`: any edge plane > 0): snap to
+   the closest point on its edges (`FUN_0035d788`).
+2. Ground states: project the move onto the polygon plane along the up axis
+   (`FUN_002606b8`) and rescale it to its original length (so a slope slows the
+   horizontal speed). States 1/3: remove the normal part instead.
+3. End point inside: move there (projected onto the plane, `FUN_00260628`), done.
+4. Else the first edge plane crossed (`FUN_0035d4e8`: start <= 0.001, end > 0,
+   smallest t). Neighbour across it (not the polygon just left): move to the
+   crossing point, switch polygon, carry on with the rest of the move.
+5. No neighbour (or refused, below): stop at the crossing point; the rest of the
+   move is projected onto the edge direction (`FUN_0025a778(0, ...)`), plus
+   -0.01 x its length along the edge plane normal (back inside); the character's
+   hit-wall bits are set (char+0x1c0 |= 0x400; 0x40000|0x80000 when the move
+   met the edge at 45-135 degrees). The fall state does the same flattened to XZ.
+
+Flags (on the neighbour unless noted):
+
+| flag | rule | z128 |
+|------|------|------|
+| 0x80 | a wall for bodies with flag +0xac 0x200 (char+0x45c; set by `FUN_00559748` from a controller's +0x28 bit 2, not resolved for the player) | 146 polygons, incl. a stair series every 18 units from y -106 to -16 |
+| 0x10 | ground states (`FUN_00357798`): the neighbour's shared edge plane (`FUN_0035d0e0`) with n.y < 0 (pointing up) -> enter and start falling (`FUN_00357148`); else a wall. Entering 0x10 from a polygon without it first casts a short probe for raised 0x10 polygons (`FUN_0035cca0`, `FUN_0035cef0`; not ported) | 131: the ladders (ladder 35 is polygon 25, x -1106..-1109.7, joining the landings at y -90.6 and -146: a wall from below, a drop from above) |
+| 0x02 | on the CURRENT polygon, at a boundary edge: `FUN_00359f38` looks for another polygon under the end point (`FUN_0035cbc8`: 7.5 above to 200 below, every loaded file); found -> move onto it; more than 3 lower -> fall. Crossing between chunk files (args inferred: the decompiler lost them) | 22 |
+| 0x100 | ground states: polygon search 8.5 below the end point (`FUN_00359f38`) | none |
+| 0x04 | ground states: shared-edge n.y < 0 -> `FUN_00357628` (state 1), else wall | none |
+| 0x40 | a wall unless body flag +0xac bit 3 | none |
+
+In the fall state (2) the body's ground point keeps walking the mesh (with no
+0x10/0x100/0x04 rules), the visual y follows the arc, and it lands when the y
+passes the polygon (`FUN_003590c8` state 2). **A jump cannot leave the walk mesh
+either.** So the railings, the deck edge and the "flat layer over the pipes"
+are all the walk mesh: the deck polygon is x -1417.9..-1355.7, z -1113.4..-1094.8
+at y -98.6 (5-10 units inside the visible deck edge), and a 4.2-wide strip at y
+-94.4 runs over the pipes. Vincent's three dumped feet lie 0.02-0.13 off it.
+
 ## 4. Where collision results go (for the future physics layer)
 
 Query output globals (set by `FUN_0026f750`/`FUN_0026f8a0`): `DAT_004e889c` hit
@@ -238,8 +338,22 @@ tested by `0x18b`. Masks with no bit in `0x0f` (`0x0080`, `0x0180`, such as the
 character probe. z128 class census (sub-tree +0x58, by area): `0x0a` (bits 1+3)
 and `0x0e` are the visible geometry; `0x04` alone is 88% walls, including the
 invisible blocker plane at the deck railing (`0x0104`, z=−1120.1, y −109..+10);
-`0x80` alone is 97% floors. Which index the player's wall probe uses is NOT
-decoded (it is behind the virtual call).
+`0x80` alone is 97% floors. Who tests what (worker 0061, callers of
+`FUN_005449f0` by index): index 6 (class 0x04) = `FUN_0032ace0` (the camera) and
+`FUN_003a6000`, so the 0x04 blockers are camera collision; class 0x80 is tested
+only by `FUN_00264ee0`, a ray 100 down from the camera whose hit surface word
+becomes the room visibility mask at 0x004e8710 (`FUN_00269400/410`): the y=−86
+plane is a visibility zone, not a kill plane. Walk probes 4/5 (`FUN_003539b0`)
+use class 0x02 when `DAT_0046e298` bit 0 is set (it must be in z128: class 0x01
+has only the 10 ladder faces). The probe method is vtable slot `+0x17c` of the
+character class (vtable `0x58c9e0`). `FUN_0035a440` calls it with index 5
+(`0x18e`, class `0x01`; `0x18d` when bit 0 of `DAT_0046e298` is set) for its
+object-riding probes; other callers pass 0, 3, 7, 8, 0xb, 0xd. Walk mode 10 has
+a horizontal wall probe (`FUN_003539b0`, index 4, 7 + speed ahead at 7.5 and 17
+above the feet), but z128 runs mode 0xc, whose walls are the walk mesh's
+boundary edges (§3d). In `FUN_0035a440` (reached from `FUN_00357d48` only with
+body flags +0xac bit 1 or 2) ground hits count only within **40° of up**
+(`acos(up·n) < 0.69813174`, four sites; `FUN_00261038` = angle between vectors).
 
 **Winding:** with normal `(v1−v0)×(v2−v0)`, most walkable tops have **n.y > 0**
 (pointing +Y = down, into the floor); undersides/ceilings have n.y < 0. Checked
@@ -262,12 +376,15 @@ empty table). v2 has no per-face flag at all.
   faces decoded to triangles** via the vertex pool; **tag-2 VU/VIF-packed leaves
   decoded to real triangles** (int16/int32 `/16` positions, tris+quads, per-face
   surface word), with the exact AABB box kept only as a fallback for leaves that
-  yield no geometry; surface-table size.
+  yield no geometry; **tag-1 primitives tessellated** (§3c, source 3); surface-table size.
+* **Walk mesh** (§3d): every sub-tree-0 tag-0 face is also kept as a
+  `cid_poly` (vertex indices, +0x04 flags, +0x06 word, neighbour pointers
+  resolved to polygon indices; dangling pointers are counted and left as walls).
 * Output: `cid_mesh { verts, tris(+surface,+source,+mask,+subtree), boxes,
   bbox }` (`mask` = tag-2 packet surface mask, `subtree` = 0..3 for
   +0x38/+0x58/+0x78/+0x98); OBJ export
   (`--boxes` adds any fallback AABBs) grouped by source (`inline_quad` /
-  `indexed` / `vu_packed`).
+  `indexed` / `vu_packed` / `primitive`).
 
 ## 7. Open gaps (summary)
 
@@ -284,7 +401,7 @@ empty table). v2 has no per-face flag at all.
 4. Interior (non-leaf) node fields of the v2 tree (child offsets) are skipped;
    the leaf signature scan recovers all v2 geometry regardless.
 
-## 8. Web export: DCOL v1 (`cidweb`, `cid_query.py`)
+## 8. Web export: DCOL v2 (`cidweb`, `cid_query.py`)
 
 `make z128web` → `out/web/z128_collision.bin` (gitignored: derived game data).
 `cidweb <out.bin> <mapid.rfd>...` merges any number of CID files (z128 = the 13
@@ -295,7 +412,7 @@ be wrapped directly as a JS typed array.
 | off  | type            | field                                        |
 |------|-----------------|----------------------------------------------|
 | 0x00 | char[4]         | `"DCOL"`                                     |
-| 0x04 | u32             | version = 1                                  |
+| 0x04 | u32             | version = 2 (v1 = the same without the walk mesh) |
 | 0x08 | u32             | nverts                                       |
 | 0x0c | u32             | ntris                                        |
 | 0x10 | f32[3]          | bbox min (x,y,z)                             |
@@ -305,29 +422,33 @@ be wrapped directly as a JS typed array.
 | 0x30 | f32[nverts*3]   | vertices x,y,z (game units, **−Y up**)       |
 | …    | u32[ntris*3]    | triangle vertex indices                      |
 | …    | u32[ntris]      | surface word (per-polygon S-32 word, §5)     |
-| …    | u32[ntris]      | info: bits 0–1 sub-tree (0=+0x38, 1=+0x58, 2=+0x78, 3=+0x98); bits 2–3 source (`cid_tri_source`); bits 8–15 input file index; bits 16–31 packet mask |
+| …    | u32[ntris]      | info: bits 0–1 sub-tree (0=+0x38, 1=+0x58, 2=+0x78, 3=+0x98); bits 2–3 source (`cid_tri_source`); bits 8–15 input file index; bits 16–31 packet mask (tag-1: class word & 0xffff) |
+| …    | u32, u32        | npolys, reserved (0)                         |
+| …    | u32[npolys*10]  | walk mesh (§3d), per polygon: `nv | flags<<16` (face +0x04); `word6 | file<<16`; v[4] vertex indices (nv used); nbr[4] polygon index or 0xffffffff |
 
-File size = `0x30 + 12·nverts + 20·ntris`. z128: 96,131 verts, 143,920 tris,
-4,032,020 bytes.
+File size = `0x30 + 12·nverts + 20·ntris + 8 + 40·npolys`. z128: 107,111 verts,
+161,716 tris, 3,186 polygons, 4,647,148 bytes.
 
-**Player set** (what `cid_query.py` and `collision.js` use, worker 0053):
-sub-tree 1 (+0x58) packets that some character probe tests, i.e.
-`mask & ~(f|0x100) != 0` for f in `0x18d, 0x18b, 0x187` (= `mask & 0x0e != 0`)
-→ 140,105 tris on z128. That is the earlier `mask & 0x80 == 0` set plus 112
-far-off floor tris (masks 0x84/0x88/0x8c/0x8e). Floor = **|n.y| ≥ 0.55** in either
-winding (two-sided, like the game; 0.55 takes the 45° ramps and the 55° walkway
-bevels, n.y 0.57); ground = the first floor at or below the feet (smallest
-y ≥ feet−step); walls = everything else, pushed out horizontally by a capsule.
+**Walking** (`move`, `ground_height` / `groundY`; worker 0061): the walk mesh,
+as decoded in §3d: polygon found under the feet (the game keeps it; a stateless
+caller takes the one nearest the feet between 7.5 above and maxDrop below),
+then `FUN_00357d48`'s passes, neighbour crossings, boundary slides and the
+0x80/0x10/0x02 flags (0x80 walkable by default, `block80` makes it a wall).
+`move(..., air=True)` walks only the airborne ground point (the jump/fall
+horizontal step). `ground_height` = the polygon search of `FUN_0035cbc8`, from
+step_up (default 7.5) above to 200 below. No slope limit, step height, ledge
+or headroom rule: those were worker 0055's stand-ins and are gone.
 
-Sub-tree 0 (+0x38, 3,625 tris, tag-0 indexed, mostly flat) is NOT used. The
-character physics `FUN_0035a440` does collect it (`FUN_0026a548` → `FUN_00271668`
-→ `FUN_00270938(+0x38, …, 2)`) and pushes a body sphere out of its faces, and
-under the start point its deck (−98.64) matches the dumped feet slightly better
-(0.02–0.13 vs 0.22–0.33). But as a floor it sits 1 unit above the visible
-walkway east of the start and rises to 4.8 above it near x=−1252, where
-sub-tree 1 matches the visible surface exactly. Its gameplay role is open.
+**Triangle set** (`capsule_push`, `segment_hit`: airborne helpers, camera,
+shots; not used for walking), 145,565 tris on z128: sub-tree 1 packets that some
+character probe tests (`mask & 0xfe7e != 0`, the game's test over 0x18d, 0x18b,
+0x187), plus the sub-tree-0 tag-1 primitives. The sub-tree-2 railing boxes are
+dropped: their only users are the physics-joint library (`FUN_00406378`,
+vtables near 0x4a8624), not characters.
+
+`sweep_collision.mjs` flood-fills the reachable area from the spawn (1-unit
+state bins) and counts steps whose body crosses the visible room meshes.
 
 `python3 -I cid_query.py out/web/z128_collision.bin` runs the self-test
 (ground under the three known Vincent positions, 8-direction walk);
 `… X Z [FEET_Y]` prints the ground under a point.
-

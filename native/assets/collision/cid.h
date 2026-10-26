@@ -33,7 +33,9 @@ typedef struct { float x, y, z; } cid_vec3;
 typedef enum {
     CID_SRC_INLINE_QUAD = 0, /* v2 inline quad leaf (split into 2 tris)         */
     CID_SRC_INDEXED     = 1, /* v>=9 tag-0 indexed convex polygon (fan tris)    */
-    CID_SRC_VU_PACKED   = 2  /* v>=9 tag-2 VU/VIF-packed leaf (int16/16 polys)  */
+    CID_SRC_VU_PACKED   = 2, /* v>=9 tag-2 VU/VIF-packed leaf (int16/16 polys)  */
+    CID_SRC_PRIM        = 3  /* v>=9 tag-1 primitive (box / cylinder / sphere),
+                              * tessellated; mask = node +0x44, surface = +0x48 */
 } cid_tri_source;
 
 typedef struct {
@@ -57,8 +59,27 @@ typedef struct {
     int32_t  npackets;   /* VU packets in this leaf (undecoded)                  */
 } cid_box;
 
+/* A sub-tree-0 (+0x38) tag-0 face record kept as a polygon: the walk mesh of
+ * the character physics body (FUN_00357d48, FORMAT.md 3d). The face record is
+ * 0x20 bytes: +0x00 word0 (low 4 bits = vertex count), +0x04 u16 flags (edge
+ * rules: 0x02, 0x04, 0x10, 0x40, 0x80, 0x100), +0x06 u16, +0x08 u16 vertex
+ * indices x4, +0x10 neighbour pointers x4 (one per edge v[i]->v[i+1], relocated
+ * by FUN_0026f300; 0 = boundary edge). */
+typedef struct {
+    uint32_t v[4];       /* indices into cid_mesh.verts (nv of them)             */
+    int32_t  nbr[4];     /* neighbour polygon index in cid_mesh.polys, -1 = none */
+    uint16_t flags;      /* face record +0x04                                    */
+    uint16_t word6;      /* face record +0x06 (meaning not decoded)              */
+    uint8_t  nv;         /* 3 or 4                                               */
+    uint32_t off;        /* payload offset of the face record (neighbour key)    */
+    uint32_t raw_nbr[4]; /* neighbour pointers as stored (payload offsets)       */
+} cid_poly;
+
 typedef struct {
     int      version;    /* CID header version (payload+4): 2 inline, 9/17/18/19 tree */
+    cid_poly *polys;     int npolys;    /* sub-tree-0 tag-0 walk mesh (FORMAT.md 3d) */
+    int n_poly_links;        /* neighbour pointers resolved to a polygon          */
+    int n_poly_dangling;     /* non-zero neighbour pointers matching no polygon   */
 
     cid_vec3 *verts;     int nverts;
     cid_tri  *tris;      int ntris;
@@ -70,6 +91,7 @@ typedef struct {
     int n_leaves_v2;         /* v2 type-7 inline leaves                          */
     int n_nodes_tag0;        /* v>=9 indexed leaves decoded                      */
     int n_nodes_tag2;        /* v>=9 VU-packed leaves encountered                */
+    int n_nodes_tag1;        /* v>=9 tag-1 primitives tessellated (FORMAT.md 3c) */
     int n_tag2_packets;      /* total VU packets in tag-2 leaves                 */
     int n_tag2_pkts_decoded; /* VU packets decoded to triangles                  */
     int n_tag2_pkts_boxed;   /* VU packets that fell back to the AABB box        */

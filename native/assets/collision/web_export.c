@@ -1,12 +1,12 @@
 /* web_export.c - merge one or more CID collision files into a compact binary
- * for the browser prototype ("DCOL" v1, little-endian). C99, no deps.
+ * for the browser prototype ("DCOL" v2, little-endian). C99, no deps.
  *
  *   cidweb <out.bin> <mapid.rfd>...
  *
  * Vertices are welded by exact float bits (the game's own data shares them).
  * Format (all little-endian, every section 4-byte aligned; see FORMAT.md 8):
  *   0x00 char[4] "DCOL"
- *   0x04 u32 version (1)
+ *   0x04 u32 version (2; v1 = the same without the walk-mesh section)
  *   0x08 u32 nverts
  *   0x0c u32 ntris
  *   0x10 f32 bbox min xyz, 0x1c f32 bbox max xyz
@@ -20,6 +20,11 @@
  *                                  bits 2-3 source (cid_tri_source),
  *                                  bits 8-15 input file index (argv order),
  *                                  bits 16-31 tag-2 packet surface mask
+ *        u32 npolys, u32 reserved (0)   walk mesh (FORMAT.md 3d, 8)
+ *        u32 poly[npolys*10]       per polygon: nv | flags<<16 (face +0x04),
+ *                                  word6 (face +0x06) | file<<16,
+ *                                  v[4] vertex indices (nv used),
+ *                                  nbr[4] polygon index or 0xffffffff
  */
 #include "cid.h"
 #include <stdio.h>
@@ -39,7 +44,7 @@ int main(int argc, char **argv) {
     if (nf > 256) { fprintf(stderr, "at most 256 input files (info bits 8-15)\n"); return 2; }
     cid_mesh *ms = calloc((size_t)nf, sizeof *ms);
     if (!ms) { fprintf(stderr, "oom\n"); return 1; }
-    size_t tot_v = 0, tot_t = 0;
+    size_t tot_v = 0, tot_t = 0, tot_p = 0;
     for (int i = 0; i < nf; i++) {
         char err[256];
         int r = cid_load_file(argv[i + 2], &ms[i], err, sizeof err);
@@ -51,6 +56,10 @@ int main(int argc, char **argv) {
             fprintf(stderr, "warn: %s has %d undecoded AABB leaves (not exported)\n",
                     argv[i + 2], ms[i].nboxes);
         tot_v += (size_t)ms[i].nverts; tot_t += (size_t)ms[i].ntris;
+        tot_p += (size_t)ms[i].npolys;
+        if (ms[i].n_poly_dangling)
+            fprintf(stderr, "warn: %s: %d walk-mesh neighbour pointers match no polygon (left as walls)\n",
+                    argv[i + 2], ms[i].n_poly_dangling);
     }
 
     size_t cap = 1; while (cap < tot_v * 2 + 16) cap <<= 1;
@@ -58,8 +67,9 @@ int main(int argc, char **argv) {
     float *V = malloc(tot_v * 3 * sizeof(float) + 12);
     uint32_t *T = malloc(tot_t * 3 * 4 + 4), *S = malloc(tot_t * 4 + 4),
              *I = malloc(tot_t * 4 + 4);
-    if (!h || !V || !T || !S || !I) { fprintf(stderr, "oom\n"); return 1; }
-    uint32_t nv = 0, nt = 0;
+    uint32_t *P = malloc(tot_p * 40 + 4);
+    if (!h || !V || !T || !S || !I || !P) { fprintf(stderr, "oom\n"); return 1; }
+    uint32_t nv = 0, nt = 0, np = 0;
     float bmin[3] = { 1e30f, 1e30f, 1e30f }, bmax[3] = { -1e30f, -1e30f, -1e30f };
 
     for (int f = 0; f < nf; f++) {
@@ -90,12 +100,24 @@ int main(int argc, char **argv) {
                   | ((uint32_t)(f & 0xff) << 8) | ((uint32_t)tr->mask << 16);
             nt++;
         }
+        uint32_t pbase = np;            /* neighbour indices are per file: offset them */
+        for (int q = 0; q < m->npolys; q++) {
+            const cid_poly *pl = &m->polys[q];
+            uint32_t *w = &P[(size_t)np * 10];
+            w[0] = (uint32_t)pl->nv | ((uint32_t)pl->flags << 16);
+            w[1] = (uint32_t)pl->word6 | ((uint32_t)(f & 0xffff) << 16);
+            for (int a = 0; a < 4; a++) {
+                w[2 + a] = a < pl->nv ? remap[pl->v[a]] : 0;
+                w[6 + a] = (a < pl->nv && pl->nbr[a] >= 0) ? pbase + (uint32_t)pl->nbr[a] : 0xffffffffu;
+            }
+            np++;
+        }
         free(remap);
     }
 
     FILE *o = fopen(argv[1], "wb");
     if (!o) { fprintf(stderr, "error: cannot write %s\n", argv[1]); return 1; }
-    uint32_t hdr_u[4] = { 0, 1, nv, nt };
+    uint32_t hdr_u[4] = { 0, 2, nv, nt };
     memcpy(&hdr_u[0], "DCOL", 4);
     uint32_t tail[2] = { (uint32_t)nf, 0 };
     /* Written in host order: the format is little-endian, so this tool must run on a LE host. */
@@ -108,14 +130,17 @@ int main(int argc, char **argv) {
     ok &= fwrite(T, 4, (size_t)nt * 3, o) == (size_t)nt * 3;
     ok &= fwrite(S, 4, nt, o) == nt;
     ok &= fwrite(I, 4, nt, o) == nt;
+    uint32_t ph[2] = { np, 0 };
+    ok &= fwrite(ph, 4, 2, o) == 2;
+    ok &= fwrite(P, 4, (size_t)np * 10, o) == (size_t)np * 10;
     long sz = ftell(o);
     if (fclose(o) != 0) ok = 0;
     if (!ok) { fprintf(stderr, "write failed: %s\n", argv[1]); return 1; }
-    printf("wrote %s: %u verts (welded from %zu), %u tris, %d files, %ld bytes\n",
-           argv[1], nv, tot_v, nt, nf, sz);
+    printf("wrote %s: %u verts (welded from %zu), %u tris, %u walk polygons, %d files, %ld bytes\n",
+           argv[1], nv, tot_v, nt, np, nf, sz);
     printf("bbox %.2f %.2f %.2f .. %.2f %.2f %.2f\n",
            bmin[0], bmin[1], bmin[2], bmax[0], bmax[1], bmax[2]);
     for (int i = 0; i < nf; i++) cid_free(&ms[i]);
-    free(ms); free(h); free(V); free(T); free(S); free(I);
+    free(ms); free(h); free(V); free(T); free(S); free(I); free(P);
     return 0;
 }

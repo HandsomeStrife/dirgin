@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 /* ----- little-endian, bounds-checked readers over the CID payload ----- */
 
@@ -58,6 +59,7 @@ typedef struct {
     vec verts;   /* cid_vec3 */
     vec tris;    /* cid_tri  */
     vec boxes;   /* cid_box  */
+    vec polys;   /* cid_poly (sub-tree-0 tag-0 walk mesh) */
     int oom;
     uint16_t cur_mask;   /* tag-2 packet surface-type mask (pkt+0x08); 0 otherwise */
     uint8_t cur_subtree; /* sub-tree being walked (0..3 = +0x38/+0x58/+0x78/+0x98) */
@@ -202,6 +204,23 @@ static void parse_indexed_node(blob *b, builder *bd, size_t node, size_t pool,
             idx[j] = push_vert(bd, x, y, z);
         }
         if (!good) continue;
+        /* Sub-tree 0 faces are also the character's walk mesh (FORMAT.md 3d):
+         * keep the polygon with its flags and neighbour pointers (resolved to
+         * polygon indices once the whole file is read). Only 3/4-vertex
+         * records carry 4 neighbour slots in the 0x20-byte record. */
+        if (bd->cur_subtree == 0 && vc <= 4) {
+            cid_poly p; memset(&p, 0, sizeof p);
+            p.nv = (uint8_t)vc;
+            p.off = (uint32_t)fo;
+            p.flags = rd_u16(b, fo + 4, &k);
+            p.word6 = rd_u16(b, fo + 6, &k);
+            for (int j = 0; j < 4; j++) {
+                p.v[j] = j < vc ? idx[j] : 0;
+                p.raw_nbr[j] = j < vc ? rd_u32(b, fo + 0x10 + (size_t)j * 4, &k) : 0;
+                p.nbr[j] = -1;
+            }
+            if (k && !vec_push(&bd->polys, &p)) bd->oom = 1;
+        }
         /* convex polygon -> triangle fan (matches FUN_0026f578 winding) */
         for (int j = 1; j + 1 < vc; j++)
             push_tri(bd, idx[0], idx[j], idx[j + 1], surf, CID_SRC_INDEXED);
@@ -425,6 +444,90 @@ static void parse_vu_node(blob *b, builder *bd, size_t node, cid_mesh *out) {
     if (node_tris == 0) emit_vu_box(b, bd, node, pc);
 }
 
+/* ================================================================
+ *  tag-1 node: one oriented primitive (FORMAT.md 3c). Decoded from
+ *  FUN_00270938 (broad phase, shape type at +0x40) and FUN_0035dcf0 (the
+ *  character's closest-point test): the point is taken into unit space by the
+ *  inverse matrix at +0xa0, tested against a unit shape, and mapped back by
+ *  the matrix at +0x60 (row vectors: world = [x y z 1] * M).
+ *    type 0/1  sphere, radius 10                   (FUN_0025dae8)
+ *    type 2    box (-10,-10,-10)..(10,10,10)       (FUN_0025cf00)
+ *    type 3/4  radius 10 around local Y, y -10..10 (FUN_0025d1b8; the node
+ *              AABB bounds y at +-10 scaled, so the ends are flat: cylinder)
+ *  +0x44 = class word (1,2,3,4,0xc on z128 sub-tree 0), +0x48 = flag word
+ *  (bit 0 set: FUN_0035a440 skips the ground test against it).
+ * ================================================================ */
+#define PRIM_SEG 16
+static void parse_prim_node(blob *b, builder *bd, size_t node, cid_mesh *out) {
+    int ok = 1;
+    uint32_t type = rd_u32(b, node + 0x40, &ok);
+    uint32_t cls  = rd_u32(b, node + 0x44, &ok);
+    uint32_t flag = rd_u32(b, node + 0x48, &ok);
+    float M[16];
+    for (int i = 0; i < 16; i++) {
+        M[i] = rd_f32(b, node + 0x60 + (size_t)i * 4, &ok);
+        if (ok && !finite_coord(M[i])) ok = 0;
+    }
+    if (!ok || type > 4) return;
+    float P[2 + PRIM_SEG * 8][3];            /* unit-space points (<= 130)        */
+    int np = 0;
+    uint16_t T[PRIM_SEG * 16][3];            /* triangles over P (<= 256)         */
+    int nt = 0;
+#define PT(X, Y, Z) (P[np][0] = (X), P[np][1] = (Y), P[np][2] = (Z), np++)
+#define TR(A, B, C) (T[nt][0] = (uint16_t)(A), T[nt][1] = (uint16_t)(B), T[nt][2] = (uint16_t)(C), nt++)
+    const float R = 10.0f, PI2 = 6.28318530718f;
+    if (type == 2) {
+        for (int i = 0; i < 8; i++) PT(i & 1 ? R : -R, i & 2 ? R : -R, i & 4 ? R : -R);
+        static const uint8_t F[6][4] = { {0,2,3,1}, {4,5,7,6}, {0,1,5,4},
+                                         {2,6,7,3}, {0,4,6,2}, {1,3,7,5} };
+        for (int f = 0; f < 6; f++) { TR(F[f][0], F[f][1], F[f][2]); TR(F[f][0], F[f][2], F[f][3]); }
+    } else if (type >= 3) {                  /* cylinder: rings at y=-10 and y=+10 */
+        for (int i = 0; i < PRIM_SEG; i++) {
+            float a = PI2 * (float)i / PRIM_SEG;
+            PT(R * cosf(a), -R, R * sinf(a));
+            PT(R * cosf(a),  R, R * sinf(a));
+        }
+        for (int i = 0; i < PRIM_SEG; i++) {
+            int j = (i + 1) % PRIM_SEG;
+            TR(2 * i, 2 * j, 2 * j + 1); TR(2 * i, 2 * j + 1, 2 * i + 1);
+        }
+        for (int i = 1; i + 1 < PRIM_SEG; i++) { TR(0, 2 * (i + 1), 2 * i); TR(1, 2 * i + 1, 2 * (i + 1) + 1); }
+    } else {                                 /* sphere: 8 latitude bands          */
+        const int LAT = 8;
+        PT(0, -R, 0); PT(0, R, 0);
+        for (int l = 1; l < LAT; l++) {
+            float t = 3.14159265359f * (float)l / LAT;
+            for (int i = 0; i < PRIM_SEG; i++) {
+                float a = PI2 * (float)i / PRIM_SEG;
+                PT(R * sinf(t) * cosf(a), -R * cosf(t), R * sinf(t) * sinf(a));
+            }
+        }
+        for (int i = 0; i < PRIM_SEG; i++) {
+            int j = (i + 1) % PRIM_SEG;
+            TR(0, 2 + j, 2 + i);
+            TR(1, 2 + (LAT - 2) * PRIM_SEG + i, 2 + (LAT - 2) * PRIM_SEG + j);
+            for (int l = 0; l + 2 < LAT; l++) {
+                int a0 = 2 + l * PRIM_SEG, a1 = a0 + PRIM_SEG;
+                TR(a0 + i, a0 + j, a1 + j); TR(a0 + i, a1 + j, a1 + i);
+            }
+        }
+    }
+#undef PT
+#undef TR
+    uint32_t idx[2 + PRIM_SEG * 8];
+    for (int i = 0; i < np; i++) {
+        float x = P[i][0], y = P[i][1], z = P[i][2];
+        idx[i] = push_vert(bd, x * M[0] + y * M[4] + z * M[8] + M[12],
+                               x * M[1] + y * M[5] + z * M[9] + M[13],
+                               x * M[2] + y * M[6] + z * M[10] + M[14]);
+    }
+    uint16_t save = bd->cur_mask;
+    bd->cur_mask = (uint16_t)(cls & 0xffff);
+    for (int i = 0; i < nt; i++) push_tri(bd, idx[T[i][0]], idx[T[i][1]], idx[T[i][2]], flag, CID_SRC_PRIM);
+    bd->cur_mask = save;
+    out->n_nodes_tag1++;
+}
+
 static void parse_tree(blob *b, builder *bd, cid_mesh *out) {
     int ok = 1;
     out->surf_table_count = rd_i32(b, 0x20, &ok);
@@ -451,6 +554,8 @@ static void parse_tree(blob *b, builder *bd, cid_mesh *out) {
                 else         parse_vu_node(b, bd, nodep, out); /* no pool: box it */
             } else if (tag == 2) {
                 parse_vu_node(b, bd, nodep, out);
+            } else if (tag == 1) {
+                parse_prim_node(b, bd, nodep, out);
             }
         }
     }
@@ -520,6 +625,33 @@ static void finalize_bbox(cid_mesh *m) {
     }
 }
 
+/* Neighbour pointers (payload offsets of face records) -> polygon indices.
+ * Polygons are appended in file order, so their offsets are already sorted
+ * within a node but not across nodes: sort a copy of (off, index). */
+typedef struct { uint32_t off; int32_t i; } poly_key;
+static int poly_key_cmp(const void *a, const void *b) {
+    uint32_t x = ((const poly_key *)a)->off, y = ((const poly_key *)b)->off;
+    return x < y ? -1 : x > y;
+}
+static void resolve_poly_links(cid_mesh *m) {
+    if (m->npolys <= 0) return;
+    poly_key *k = malloc((size_t)m->npolys * sizeof *k);
+    if (!k) return;                       /* links stay -1: fails toward walls */
+    for (int i = 0; i < m->npolys; i++) { k[i].off = m->polys[i].off; k[i].i = i; }
+    qsort(k, (size_t)m->npolys, sizeof *k, poly_key_cmp);
+    for (int i = 0; i < m->npolys; i++) {
+        cid_poly *p = &m->polys[i];
+        for (int j = 0; j < p->nv; j++) {
+            if (!p->raw_nbr[j]) continue;
+            poly_key q = { p->raw_nbr[j], 0 };
+            poly_key *h = bsearch(&q, k, (size_t)m->npolys, sizeof *k, poly_key_cmp);
+            if (h) { p->nbr[j] = h->i; m->n_poly_links++; }
+            else   m->n_poly_dangling++;
+        }
+    }
+    free(k);
+}
+
 int cid_load_mem(const uint8_t *buf, size_t len, cid_mesh *out,
                  char *errbuf, size_t errlen) {
     memset(out, 0, sizeof *out);
@@ -540,6 +672,7 @@ int cid_load_mem(const uint8_t *buf, size_t len, cid_mesh *out,
     bd.verts.esz = sizeof(cid_vec3);
     bd.tris.esz  = sizeof(cid_tri);
     bd.boxes.esz = sizeof(cid_box);
+    bd.polys.esz = sizeof(cid_poly);
 
     if (out->version <= 8) {
         if (out->version != 2) {
@@ -553,13 +686,15 @@ int cid_load_mem(const uint8_t *buf, size_t len, cid_mesh *out,
     }
 
     if (bd.oom) {
-        free(bd.verts.d); free(bd.tris.d); free(bd.boxes.d);
+        free(bd.verts.d); free(bd.tris.d); free(bd.boxes.d); free(bd.polys.d);
         return CID_ERR_OOM;
     }
 
     out->verts  = (cid_vec3 *)bd.verts.d; out->nverts  = bd.verts.n;
     out->tris   = (cid_tri  *)bd.tris.d;  out->ntris   = bd.tris.n;
     out->boxes  = (cid_box  *)bd.boxes.d; out->nboxes  = bd.boxes.n;
+    out->polys  = (cid_poly *)bd.polys.d; out->npolys  = bd.polys.n;
+    resolve_poly_links(out);
     finalize_bbox(out);
     return CID_OK;
 }
@@ -585,6 +720,6 @@ int cid_load_file(const char *path, cid_mesh *out, char *errbuf, size_t errlen) 
 
 void cid_free(cid_mesh *m) {
     if (!m) return;
-    free(m->verts); free(m->tris); free(m->boxes);
+    free(m->verts); free(m->tris); free(m->boxes); free(m->polys);
     memset(m, 0, sizeof *m);
 }

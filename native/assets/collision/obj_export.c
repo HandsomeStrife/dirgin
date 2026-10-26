@@ -47,7 +47,8 @@ int cid_write_obj(const cid_mesh *m, const char *path, int include_boxes) {
         if ((int)t->source != cur) {
             cur = (int)t->source;
             const char *gn = cur == CID_SRC_INLINE_QUAD ? "inline_quad"
-                           : cur == CID_SRC_INDEXED      ? "indexed"
+                           : cur == CID_SRC_INDEXED     ? "indexed"
+                           : cur == CID_SRC_PRIM        ? "primitive"
                            :                               "vu_packed";
             fprintf(f, "g %s\n", gn);
         }

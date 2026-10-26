@@ -1,28 +1,53 @@
 // collision.js -- browser port of native/assets/collision/cid_query.py.
-// Reads a DCOL v1 file (FORMAT.md section 8). No dependencies.
+// Reads a DCOL v2 file (FORMAT.md section 8). No dependencies.
 //
 // Game space, -Y up: "down" is +y, feet sit at a larger y than the head.
 //
 //   const col = await loadCollision('data/z128_collision.bin');
-//   col.groundY(x, z, feetY)   -> y of the first floor at or below the feet, or null
-//   col.groundHit(x, z, feetY) -> {y, tri, normal, surface, subtree, mask} | null
+//   col.groundY(x, z, feetY)   -> y of the walk polygon under the feet, or null
+//   col.groundHit(x, z, feetY) -> {y, tri, poly, normal, surface, subtree, mask} | null
 //   col.move(pos, delta, opts) -> {x, y, z, onGround, hitWall}
+//        opts.air: walk only the ground point (jump / fall horizontal step),
+//        y unchanged, onGround false; the polygon height there is groundY().
+//   col.capsulePush(x, feetY, z, radius, height) -> [x, z, hit]   (triangle walls)
 //   col.segment(a, b)          -> {t, point, tri, normal, surface} | null
 //
+// Walking is the game's navmesh walker (worker 0061; cid_query.py docstring and
+// FORMAT.md 3d have the decode): z128 runs the physics-body movement mode 0xc,
+// whose FUN_00357d48 walks the sub-tree-0 tag-0 polygons through their edge
+// neighbours. A boundary edge is a wall (slide along it, 1% pushed back in).
+// Flags: 0x80 walkable unless options.block80; 0x10 one-way drop (fall if the
+// shared edge's outward normal points up, else wall); 0x02 boundary edges look
+// for a polygon in another file; 0x04/0x40/0x100 (absent in z128) walls. No
+// slope limit, step height, ledge or headroom rule: the polygons are the
+// walkable area. The triangle set (capsulePush, segment) = sub-tree-1 packets
+// the character probes test (mask & 0xfe7e) + sub-tree-0 tag-1 primitives.
 // The rules and the float maths follow cid_query.py line for line (all maths
-// in doubles, triangles visited in the same order), so results match it exactly.
+// in doubles, items visited in the same order), so results match it exactly.
 
-export const FLOOR_NY = 0.55;  // cos(56.6 deg): 45-degree ramps and the 55-degree walkway bevels (n.y 0.57) are floor
-export const STEP_UP = 5.0;    // max rise the feet snap up onto (stairs are ~3.4)
-export const CELL = 32.0;      // XZ grid cell size for the broad phase
+export const FLOOR_NY = 0.55;   // capsulePush ignores faces this flat
+export const SEARCH_UP = 7.5;   // FUN_0035cbc8: polygon search starts 7.5 above the point
+export const SEARCH_DOWN = 200; // ... and ends 200 below it
+export const DROP_FALL = 3.0;   // FUN_00359f38: a polygon more than 3 lower starts a fall
+export const NAV_PASSES = 8;    // FUN_00357d48 loop limit
+export const EDGE_EPS = 0.001;  // FUN_0035d4e8: start point inside an edge plane up to 0.001
+export const SLIDE_IN = 0.01;   // slide move pushed 1% of its length back inside the edge
+export const HEIGHT = 19.0;     // body height for capsulePush (a guess)
+export const STEP_UP = 5.0;     // capsulePush: walls lower than this above the feet do not block
+export const CELL = 32.0;       // XZ grid cell size for the broad phase
+export const INSIDE_EPS = 1e-4; // vertical polygon search: tolerance on the edge planes
 // Character probe flag words (FUN_0054fc38 table, FUN_002db1f0 ground ray).
 export const PROBE_FLAGS = [0x18d, 0x18b, 0x187];
 
-// info word (FORMAT.md section 8) -> is this triangle player collision?
-// Every sub-tree-1 packet that some character probe tests: FUN_0026f8a0 tests a
-// packet only if (mask & ~(flags | 0x100)) != 0. Sub-tree 0 is not used (it floats
-// above the visible walkway). See cid_query.py for the decode.
+export const SRC_PRIM = 3;      // info bits 2-3: tag-1 primitive (FORMAT.md 3c)
+export const F_CHUNK = 0x02, F_DROP = 0x10, F_NPC = 0x80, F_WALLS = 0x04 | 0x40 | 0x100;
+
+// info word (FORMAT.md section 8) -> is this triangle in the triangle set?
+// Sub-tree-1 packets some character probe tests: FUN_0026f8a0 tests a packet only
+// if (mask & ~(flags | 0x100)) != 0, i.e. mask & 0xfe7e != 0 over the three flag
+// words; plus the sub-tree-0 tag-1 primitives (FUN_0035a440's body push).
 export function inPlayerSet(inf) {
+  if ((inf & 3) === 0) return ((inf >>> 2) & 3) === SRC_PRIM;
   if ((inf & 3) !== 1) return false;
   const m = inf >>> 16;
   for (const f of PROBE_FLAGS) if ((m & ~(f | 0x100) & 0xffff) !== 0) return true;
@@ -40,25 +65,94 @@ export async function loadCollision(src, options) {
   return new Collision(src, options);
 }
 
+// FUN_0025ff10: plane through p1, p2, p3 (arrays), normal (p2-p1) x (p3-p2) made
+// unit, w = -n.p1. null if degenerate.
+function plane3(p1, p2, p3) {
+  const ax = p2[0] - p1[0], ay = p2[1] - p1[1], az = p2[2] - p1[2];
+  const bx = p3[0] - p2[0], by = p3[1] - p2[1], bz = p3[2] - p2[2];
+  const n0 = ay * bz - az * by, n1 = az * bx - ax * bz, n2 = ax * by - ay * bx;
+  const ln = Math.sqrt(n0 * n0 + n1 * n1 + n2 * n2);
+  if (ln < 1e-12) return null;
+  const nx = n0 / ln, ny = n1 / ln, nz = n2 / ln;
+  return [nx, ny, nz, -(nx * p1[0] + ny * p1[1] + nz * p1[2])];
+}
+
+// Uniform XZ grid (dense, CSR): each item goes in every cell its XZ bbox
+// [x0, x1, z0, z1] touches, in item order, like the Python dict of lists.
+function buildGrid(n, boxOf) {
+  const rng = (i) => { const b = boxOf(i); return [Math.floor(b[0] / CELL), Math.floor(b[1] / CELL), Math.floor(b[2] / CELL), Math.floor(b[3] / CELL)]; };
+  let gx0 = Infinity, gx1 = -Infinity, gz0 = Infinity, gz1 = -Infinity;
+  const R = new Array(n);
+  for (let i = 0; i < n; i++) {
+    const r = R[i] = rng(i);
+    if (r[0] < gx0) gx0 = r[0]; if (r[1] > gx1) gx1 = r[1];
+    if (r[2] < gz0) gz0 = r[2]; if (r[3] > gz1) gz1 = r[3];
+  }
+  if (n === 0) { gx0 = gz0 = 0; gx1 = gz1 = -1; }
+  const W = gx1 - gx0 + 1, H = gz1 - gz0 + 1;
+  const start = new Uint32Array(W * H + 1);
+  for (let i = 0; i < n; i++) {
+    const [x0, x1, z0, z1] = R[i];
+    for (let gx = x0; gx <= x1; gx++) for (let gz = z0; gz <= z1; gz++) start[(gx - gx0) * H + (gz - gz0) + 1]++;
+  }
+  for (let c = 0; c < W * H; c++) start[c + 1] += start[c];
+  const fill = start.slice(0, W * H);
+  const items = new Uint32Array(start[W * H]);
+  for (let i = 0; i < n; i++) {
+    const [x0, x1, z0, z1] = R[i];
+    for (let gx = x0; gx <= x1; gx++) for (let gz = z0; gz <= z1; gz++) items[fill[(gx - gx0) * H + (gz - gz0)]++] = i;
+  }
+  let used = 0;
+  for (let c = 0; c < W * H; c++) if (start[c + 1] > start[c]) used++;
+  return { gx0, gz0, W, H, start, items, used, stamp: new Uint32Array(Math.max(n, 1)), gen: 0, list: new Uint32Array(Math.max(n, 1)) };
+}
+
+// Item indices whose cells overlap the XZ box, deduplicated, in the Python's
+// order (gx outer, gz inner, cell order). Returns the count; the indices are
+// in g.list (reused, valid until the next call on this grid).
+function gridCells(g, xmin, zmin, xmax, zmax) {
+  const { gx0, gz0, W, H, start, items, stamp, list: out } = g;
+  if (++g.gen === 0xffffffff) { stamp.fill(0); g.gen = 1; }
+  const gen = g.gen;
+  const ax = Math.max(Math.floor(xmin / CELL), gx0), bx = Math.min(Math.floor(xmax / CELL), gx0 + W - 1);
+  const az = Math.max(Math.floor(zmin / CELL), gz0), bz = Math.min(Math.floor(zmax / CELL), gz0 + H - 1);
+  let m = 0;
+  for (let gx = ax; gx <= bx; gx++) {
+    for (let gz = az; gz <= bz; gz++) {
+      const c = (gx - gx0) * H + (gz - gz0);
+      for (let q = start[c], e = start[c + 1]; q < e; q++) {
+        const i = items[q];
+        if (stamp[i] !== gen) { stamp[i] = gen; out[m++] = i; }
+      }
+    }
+  }
+  return m;
+}
+
 export class Collision {
   // buf: ArrayBuffer (or a typed array view of one).
-  // options.includeAll: keep every triangle (debug; the player set is the default).
+  // options.includeAll: keep every triangle in the triangle set (debug).
+  // options.block80: polygons flagged 0x80 are walls (bodies with flag 0x200).
   constructor(buf, options = {}) {
     let off = 0;
     if (ArrayBuffer.isView(buf)) { off = buf.byteOffset; buf = buf.buffer.slice(off, off + buf.byteLength); }
     const dv = new DataView(buf);
     const magic = String.fromCharCode(dv.getUint8(0), dv.getUint8(1), dv.getUint8(2), dv.getUint8(3));
-    if (magic !== 'DCOL' || dv.getUint32(4, true) !== 1) throw new Error('not a DCOL v1 file');
+    if (magic !== 'DCOL' || dv.getUint32(4, true) !== 2)
+      throw new Error('not a DCOL v2 file (rebuild: make -C native/assets/collision z128web)');
     const nv = dv.getUint32(8, true), nt = dv.getUint32(12, true);
     let o = 0x30;
     const v = new Float32Array(buf, o, nv * 3); o += nv * 12;
     const tri = new Uint32Array(buf, o, nt * 3); o += nt * 12;
     const surf = new Uint32Array(buf, o, nt); o += nt * 4;
     const info = new Uint32Array(buf, o, nt); o += nt * 4;
+    const npoly = dv.getUint32(o, true); o += 8;
+    const pw = new Uint32Array(buf, o, npoly * 10); o += npoly * 40;
     if (o !== buf.byteLength) throw new Error('size mismatch');
     // (DCOL is little-endian; every browser we target is too.)
+    this.block80 = !!options.block80;
 
-    // Player set (inPlayerSet). Drop degenerate triangles.
+    // ---- triangle set (capsulePush, segment). Drop degenerate triangles.
     const includeAll = !!options.includeAll;
     const T = new Float64Array(nt * K);
     const S = new Uint32Array(nt);     // surface word
@@ -90,118 +184,259 @@ export class Collision {
     this.S = S.subarray(0, n);
     this.src = src.subarray(0, n);
     this.info = inf2.subarray(0, n);
+    const Tt = this.T;
+    this.tgrid = buildGrid(n, (i) => {
+      const p = i * K;
+      return [Math.min(Tt[p], Tt[p + 3], Tt[p + 6]), Math.max(Tt[p], Tt[p + 3], Tt[p + 6]),
+              Math.min(Tt[p + 2], Tt[p + 5], Tt[p + 8]), Math.max(Tt[p + 2], Tt[p + 5], Tt[p + 8])];
+    });
+    this.ncells = this.tgrid.used;
+    this._list = this.tgrid.list;
 
-    // Uniform XZ grid (dense, CSR): each triangle goes in every cell its XZ
-    // bbox touches, in triangle order, like the Python dict of lists.
-    const cellRange = (p) => {
-      const x0 = Math.floor(Math.min(T[p], T[p + 3], T[p + 6]) / CELL);
-      const x1 = Math.floor(Math.max(T[p], T[p + 3], T[p + 6]) / CELL);
-      const z0 = Math.floor(Math.min(T[p + 2], T[p + 5], T[p + 8]) / CELL);
-      const z1 = Math.floor(Math.max(T[p + 2], T[p + 5], T[p + 8]) / CELL);
+    // ---- walk mesh (FORMAT.md 3d)
+    const polys = this.polys = new Array(npoly);
+    for (let q = 0; q < npoly; q++) {
+      const w = q * 10;
+      const pnv = pw[w] & 0xffff;
+      const P = { nv: pnv, flags: pw[w] >>> 16, word6: pw[w + 1] & 0xffff, file: pw[w + 1] >>> 16,
+                  v: [], nbr: [], plane: null, edges: [], ok: false };
+      for (let a = 0; a < pnv; a++) {
+        const vi = pw[w + 2 + a] * 3;
+        P.v.push([v[vi], v[vi + 1], v[vi + 2]]);
+        P.nbr.push(pw[w + 6 + a] === 0xffffffff ? null : pw[w + 6 + a]);
+      }
+      const vs = P.v;
+      P.plane = plane3(vs[0], vs[1], vs[2]);           // FUN_0035d0a0
+      // FUN_0035d2e0: N = (v1-v0) x (v2-v1) (not unit); edge plane j through v[j], v[j+1], v[j] + N.
+      const ax = vs[1][0] - vs[0][0], ay = vs[1][1] - vs[0][1], az = vs[1][2] - vs[0][2];
+      const bx = vs[2][0] - vs[1][0], by = vs[2][1] - vs[1][1], bz = vs[2][2] - vs[1][2];
+      const N = [ay * bz - az * by, az * bx - ax * bz, ax * by - ay * bx];
+      for (let a = 0; a < pnv; a++) {
+        const p1 = vs[a], p2 = vs[(a + 1) % pnv];
+        P.edges.push(plane3(p1, p2, [p1[0] + N[0], p1[1] + N[1], p1[2] + N[2]]));
+      }
+      P.ok = P.plane !== null && P.edges.every(e => e !== null);
+      polys[q] = P;
+    }
+    this.npolys = npoly;
+    this.pgrid = buildGrid(npoly, (i) => {
+      const vs = polys[i].v;
+      let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
+      for (const p of vs) { if (p[0] < x0) x0 = p[0]; if (p[0] > x1) x1 = p[0]; if (p[2] < z0) z0 = p[2]; if (p[2] > z1) z1 = p[2]; }
       return [x0, x1, z0, z1];
-    };
-    let gx0 = Infinity, gx1 = -Infinity, gz0 = Infinity, gz1 = -Infinity;
-    for (let i = 0; i < n; i++) {
-      const [x0, x1, z0, z1] = cellRange(i * K);
-      if (x0 < gx0) gx0 = x0; if (x1 > gx1) gx1 = x1;
-      if (z0 < gz0) gz0 = z0; if (z1 > gz1) gz1 = z1;
-    }
-    if (n === 0) { gx0 = gz0 = 0; gx1 = gz1 = -1; }
-    const W = gx1 - gx0 + 1, H = gz1 - gz0 + 1;
-    const start = new Uint32Array(W * H + 1);
-    for (let i = 0; i < n; i++) {
-      const [x0, x1, z0, z1] = cellRange(i * K);
-      for (let gx = x0; gx <= x1; gx++)
-        for (let gz = z0; gz <= z1; gz++) start[(gx - gx0) * H + (gz - gz0) + 1]++;
-    }
-    for (let c = 0; c < W * H; c++) start[c + 1] += start[c];
-    const fill = start.slice(0, W * H);
-    const items = new Uint32Array(start[W * H]);
-    for (let i = 0; i < n; i++) {
-      const [x0, x1, z0, z1] = cellRange(i * K);
-      for (let gx = x0; gx <= x1; gx++)
-        for (let gz = z0; gz <= z1; gz++) items[fill[(gx - gx0) * H + (gz - gz0)]++] = i;
-    }
-    Object.assign(this, { gx0, gz0, W, H, start, items });
-    let used = 0;
-    for (let c = 0; c < W * H; c++) if (start[c + 1] > start[c]) used++;
-    this.ncells = used;
-
-    this._stamp = new Uint32Array(n);   // dedupe for cells()
-    this._gen = 0;
-    this._list = new Uint32Array(Math.max(n, 1));
+    });
+    this.npcells = this.pgrid.used;
   }
 
-  // Triangle indices whose cells overlap the XZ box, deduplicated, in the
-  // Python's order (gx outer, gz inner, cell order). Returns the count; the
-  // indices are in this._list (reused, valid until the next call).
-  _cells(xmin, zmin, xmax, zmax) {
-    const { gx0, gz0, W, H, start, items, _stamp: stamp, _list: out } = this;
-    if (++this._gen === 0xffffffff) { stamp.fill(0); this._gen = 1; }
-    const gen = this._gen;
-    const ax = Math.max(Math.floor(xmin / CELL), gx0), bx = Math.min(Math.floor(xmax / CELL), gx0 + W - 1);
-    const az = Math.max(Math.floor(zmin / CELL), gz0), bz = Math.min(Math.floor(zmax / CELL), gz0 + H - 1);
-    let m = 0;
-    for (let gx = ax; gx <= bx; gx++) {
-      for (let gz = az; gz <= bz; gz++) {
-        const c = (gx - gx0) * H + (gz - gz0);
-        for (let q = start[c], e = start[c + 1]; q < e; q++) {
-          const i = items[q];
-          if (stamp[i] !== gen) { stamp[i] = gen; out[m++] = i; }
-        }
+  _cells(xmin, zmin, xmax, zmax) { return gridCells(this.tgrid, xmin, zmin, xmax, zmax); }
+
+  // ------------------------------------------------------------ walk mesh
+  // FUN_002605c8: inside every edge plane.
+  _inside(P, x, y, z, eps = 0.0) {
+    for (const e of P.edges) if (e[0] * x + e[1] * y + e[2] * z + e[3] > eps) return false;
+    return true;
+  }
+
+  // First walk polygon hit by the vertical segment yTop -> yBot (yTop < yBot,
+  // -Y up): the smallest y >= yTop. Returns [poly, y] or null. yTop null: no limit.
+  findPoly(x, z, yTop, yBot) {
+    const g = this.pgrid, m = gridCells(g, x, z, x, z), list = g.list;
+    let bi = -1, by = 0;
+    for (let q = 0; q < m; q++) {
+      const i = list[q], P = this.polys[i];
+      if (!P.ok || Math.abs(P.plane[1]) < 1e-6) continue;
+      const pl = P.plane;
+      const y = -(pl[0] * x + pl[2] * z + pl[3]) / pl[1];
+      if ((yTop !== null && y < yTop) || y > yBot) continue;
+      if (!this._inside(P, x, y, z, INSIDE_EPS)) continue;
+      if (bi < 0 || y < by) { bi = i; by = y; }
+    }
+    return bi < 0 ? null : [bi, by];
+  }
+
+  // The polygon a walking body at the feet is on: nearest the feet between
+  // SEARCH_UP above and maxDrop below (cid_query.py nearest_poly).
+  nearestPoly(x, y, z, maxDrop) {
+    const g = this.pgrid, m = gridCells(g, x, z, x, z), list = g.list;
+    let bi = -1, by = 0, bd = 0;
+    for (let q = 0; q < m; q++) {
+      const i = list[q], P = this.polys[i];
+      if (!P.ok || Math.abs(P.plane[1]) < 1e-6) continue;
+      const pl = P.plane;
+      const py = -(pl[0] * x + pl[2] * z + pl[3]) / pl[1];
+      if (py < y - SEARCH_UP || py > y + maxDrop) continue;
+      if (!this._inside(P, x, py, z, INSIDE_EPS)) continue;
+      const d = Math.abs(py - y);
+      if (bi < 0 || d < bd) { bi = i; by = py; bd = d; }
+    }
+    return bi < 0 ? null : [bi, by];
+  }
+
+  // FUN_0035cbc8: from SEARCH_UP above to SEARCH_DOWN below.
+  locate(x, y, z) { return this.findPoly(x, z, y - SEARCH_UP, y + SEARCH_DOWN); }
+
+  // FUN_0035d788: closest point on the polygon's edges.
+  _clamp(P, x, y, z) {
+    let bd = null, q = null;
+    const n = P.nv;
+    for (let a = 0; a < n; a++) {
+      const [ax, ay, az] = P.v[a], [bx, by, bz] = P.v[(a + 1) % n];
+      const ex = bx - ax, ey = by - ay, ez = bz - az;
+      const ll = ex * ex + ey * ey + ez * ez;
+      const t = ll > 0 ? ((x - ax) * ex + (y - ay) * ey + (z - az) * ez) / ll : 0.0;
+      let c;
+      if (t < 0.0) c = [ax, ay, az];
+      else if (t > 1.0) c = [bx, by, bz];
+      else c = [ax + ex * t, ay + ey * t, az + ez * t];
+      const d = (x - c[0]) ** 2 + (y - c[1]) ** 2 + (z - c[2]) ** 2;
+      if (bd === null || d < bd) { bd = d; q = c; }
+    }
+    return q;
+  }
+
+  // FUN_0035d4e8: first edge plane crossed from p to c (the move flattened onto
+  // the polygon plane). Returns [edge, x, y, z]; edge -1 and p if none.
+  _exit(P, px, py, pz, cx, cy, cz) {
+    const pl = P.plane;
+    let dx = cx - px, dy = cy - py, dz = cz - pz;
+    const dn = dx * pl[0] + dy * pl[1] + dz * pl[2];
+    dx = dx - pl[0] * dn; dy = dy - pl[1] * dn; dz = dz - pl[2] * dn;
+    let bt = null, best = [-1, px, py, pz];
+    for (let a = 0; a < P.edges.length; a++) {
+      const e = P.edges[a];
+      const sp = e[0] * px + e[1] * py + e[2] * pz + e[3];
+      const sc = e[0] * cx + e[1] * cy + e[2] * cz + e[3];
+      if (sp <= EDGE_EPS && sc > 0.0) {
+        const den = e[0] * dx + e[1] * dy + e[2] * dz;
+        if (den === 0.0) continue;
+        const t = -sp / den;
+        if (bt === null || t < bt) { bt = t; best = [a, px + dx * t, py + dy * t, pz + dz * t]; }
       }
     }
-    return m;
+    return best;
+  }
+
+  // FUN_00260628 along the plane normal: the point on P's plane.
+  _project(P, x, y, z) {
+    const pl = P.plane;
+    const s = pl[0] * x + pl[1] * y + pl[2] * z + pl[3];
+    return [x - pl[0] * s, y - pl[1] * s, z - pl[2] * s];
+  }
+
+  // FUN_00357d48 over the walk mesh from polygon pi at (x,y,z) by (dx, 0, dz)
+  // (cid_query.py nav_move). Returns [x, y, z, poly, hitWall, fall].
+  navMove(pi, x, y, z, dx, dz, air = false) {
+    let P = this.polys[pi];
+    let mx = dx, my = 0.0, mz = dz;
+    let prev = null, hit = false;
+    for (let it = 0; it < NAV_PASSES; it++) {
+      if (!this._inside(P, x, y, z)) [x, y, z] = this._clamp(P, x, y, z);   // FUN_0035d788
+      const L = Math.sqrt(mx * mx + my * my + mz * mz);
+      if (L < 0.001) break;
+      const pl = P.plane;
+      // FUN_002606b8 (along the up axis) then rescale to the length L
+      if (Math.abs(pl[1]) > 1e-9) my = my - (pl[0] * mx + pl[1] * my + pl[2] * mz) / pl[1];
+      const l2 = Math.sqrt(mx * mx + my * my + mz * mz);
+      if (l2 > 0.0) { mx = mx / l2 * L; my = my / l2 * L; mz = mz / l2 * L; }
+      const cx = x + mx, cy = y + my, cz = z + mz;
+      if (this._inside(P, cx, cy, cz)) { [x, y, z] = this._project(P, cx, cy, cz); break; }
+      const [e, ex, ey, ez] = this._exit(P, x, y, z, cx, cy, cz);
+      if ((ex - x) ** 2 + (ey - y) ** 2 + (ez - z) ** 2 > mx * mx + my * my + mz * mz) {
+        [x, y, z] = this._clamp(P, cx, cy, cz);
+        break;
+      }
+      if (e < 0) break;
+      let nb = P.nbr[e];
+      if (nb !== null && (nb === prev || !this.polys[nb].ok)) nb = null;
+      let fall = false;
+      if (nb !== null) {
+        const N = this.polys[nb];
+        if ((N.flags & F_NPC) && this.block80) nb = null;
+        else if (N.flags & F_WALLS) nb = null;
+        else if (!air && (N.flags & F_DROP)) {
+          const k = N.nbr.indexOf(pi);
+          if (k >= 0 && N.edges[k][1] < 0.0) fall = true;        // FUN_00357148: drop off
+          else nb = null;
+        }
+      }
+      if (nb !== null) {
+        x = ex; y = ey; z = ez;
+        mx = cx - ex; my = cy - ey; mz = cz - ez;
+        prev = pi; pi = nb; P = this.polys[nb];
+        if (fall) return [x, y, z, pi, hit, true];
+        if (mx * mx + my * my + mz * mz === 0.0) break;
+        continue;
+      }
+      // boundary edge
+      x = ex; y = ey; z = ez;
+      mx = cx - ex; my = cy - ey; mz = cz - ez;
+      if (P.flags & F_CHUNK) {                                    // FUN_00359f38 at the end point
+        const f = this.locate(cx, cy, cz);
+        if (f !== null && f[0] !== pi) {
+          const fy = f[1];
+          return [cx, fy, cz, f[0], hit, fy - y > DROP_FALL];
+        }
+      }
+      const a = P.v[e], b = P.v[(e + 1) % P.nv];
+      let ux = b[0] - a[0], uy = b[1] - a[1], uz = b[2] - a[2];
+      let keepY = 0;
+      if (air) { uy = 0.0; keepY = my; my = 0.0; }               // state 2: horizontal slide
+      const lu = Math.sqrt(ux * ux + uy * uy + uz * uz);
+      if (lu > 0.0) { ux = ux / lu; uy = uy / lu; uz = uz / lu; }
+      const s = mx * ux + my * uy + mz * uz;                      // FUN_0025a778(0, ...): onto the edge
+      mx = ux * s; my = uy * s; mz = uz * s;
+      const k = -Math.sqrt(mx * mx + my * my + mz * mz) * SLIDE_IN;
+      const en = P.edges[e];
+      mx = mx + en[0] * k; mz = mz + en[2] * k;
+      if (air) my = keepY;
+      else my = my + en[1] * k;
+      hit = true;
+      if (mx * mx + my * my + mz * mz === 0.0) break;
+    }
+    return [x, y, z, pi, hit, false];
   }
 
   // ------------------------------------------------------------------ ground
-  // Height of triangle i's plane at (x,z) if inside its XZ projection, else null.
-  _surfaceY(i, x, z) {
-    const T = this.T, p = i * K;
-    const ax = T[p], az = T[p + 2];
-    const ux = T[p + 3] - ax, uz = T[p + 5] - az;
-    const wx = T[p + 6] - ax, wz = T[p + 8] - az;
-    const den = ux * wz - wx * uz;
-    if (Math.abs(den) < 1e-9) return null;          // vertical triangle
-    const px = x - ax, pz = z - az;
-    const u = (px * wz - wx * pz) / den;
-    const v = (ux * pz - px * uz) / den;
-    const e = 1e-6;
-    if (u < -e || v < -e || u + v > 1 + e) return null;
-    return T[p + 1] + u * (T[p + 4] - T[p + 1]) + v * (T[p + 7] - T[p + 1]);
+  // The walk polygon under (x,z): first hit going down from feetY - stepUp to
+  // feetY + SEARCH_DOWN. feetY null/undefined: the topmost polygon.
+  // Returns {y, tri, poly, normal, surface, subtree, mask} or null (tri = poly
+  // index, surface = mask = its flags; subtree 0).
+  groundHit(x, z, feetY, stepUp = SEARCH_UP) {
+    const f = this.findPoly(x, z, feetY == null ? null : feetY - stepUp, feetY == null ? Infinity : feetY + SEARCH_DOWN);
+    if (f === null) return null;
+    const P = this.polys[f[0]];
+    return { y: f[1], tri: f[0], poly: f[0], normal: [P.plane[0], P.plane[1], P.plane[2]],
+             surface: P.flags, subtree: 0, mask: P.flags };
   }
 
-  // First floor (|n.y| >= FLOOR_NY, either winding: the game's ray is two-sided) under (x,z), counting from feetY - stepUp
-  // downwards (+y): the smallest y >= feetY - stepUp. feetY null/undefined:
-  // the topmost floor. Returns {y, tri, normal, surface} or null.
-  groundHit(x, z, feetY, stepUp = STEP_UP) {
-    const T = this.T, list = this._list;
-    const lim = feetY == null ? null : feetY - stepUp;
-    const m = this._cells(x, z, x, z);
-    let best = null, bi = -1;
-    for (let q = 0; q < m; q++) {
-      const i = list[q];
-      if (Math.abs(T[i * K + 10]) < FLOOR_NY) continue;
-      const y = this._surfaceY(i, x, z);
-      if (y === null || (lim !== null && y < lim)) continue;
-      if (best === null || y < best) { best = y; bi = i; }
-    }
-    if (best === null) return null;
-    const p = bi * K;
-    const inf = this.info[bi];
-    return { y: best, tri: this.src[bi], normal: [T[p + 9], T[p + 10], T[p + 11]], surface: this.S[bi],
-             subtree: inf & 3, mask: inf >>> 16 };
-  }
-
-  groundY(x, z, feetY, stepUp = STEP_UP) {
+  groundY(x, z, feetY, stepUp = SEARCH_UP) {
     const g = this.groundHit(x, z, feetY, stepUp);
     return g === null ? null : g.y;
   }
 
+  // pos {x,y,z} = feet; delta {x,z} = horizontal move this tick (cid_query.py move).
+  // Off the mesh (no polygon from SEARCH_UP above to maxDrop below): stay,
+  // onGround false (the caller falls). A drop: onGround false at the drop point.
+  // opts.air: walk the ground point only; y unchanged, onGround false.
+  // opts.radius/height: unused (the polygons are the area the body's centre may use).
+  move(pos, delta, opts = {}) {
+    const maxDrop = opts.maxDrop ?? 40, air = !!opts.air;
+    const f = air ? this.findPoly(pos.x, pos.z, pos.y - SEARCH_UP, pos.y + SEARCH_DOWN)
+                  : this.nearestPoly(pos.x, pos.y, pos.z, maxDrop);
+    if (f === null) {
+      if (air) return { x: pos.x + delta.x, y: pos.y, z: pos.z + delta.z, onGround: false, hitWall: false };
+      return { x: pos.x, y: pos.y, z: pos.z, onGround: false, hitWall: false };
+    }
+    const r = this.navMove(f[0], pos.x, f[1], pos.z, delta.x, delta.z, air);
+    if (air) return { x: r[0], y: pos.y, z: r[2], onGround: false, hitWall: r[4] };
+    return { x: r[0], y: r[1], z: r[2], onGround: !r[5], hitWall: r[4] };
+  }
+
   // -------------------------------------------------------------- walls
-  // Push a vertical capsule out of walls, horizontally only (cid_query.py
-  // capsule_push). Returns [x, z, hit].
-  capsulePush(x, feetY, z, radius = 3.5, height = 19.0, stepUp = STEP_UP, iters = 3) {
+  // Push a vertical capsule out of the triangle set's walls, horizontally only
+  // (cid_query.py capsule_push). Not the game's walk; kept for the airborne
+  // helpers. Returns [x, z, hit].
+  capsulePush(x, feetY, z, radius = 3.5, height = HEIGHT, stepUp = STEP_UP, iters = 3) {
     const T = this.T, list = this._list;
     const y0 = feetY - stepUp - radius;
     const y1 = feetY - height + radius;
@@ -243,19 +478,6 @@ export class Collision {
       if (!moved) break;
     }
     return [x, z, hit];
-  }
-
-  // pos {x,y,z} = feet; delta {x,z} = horizontal move this tick.
-  // Push the capsule out of walls at the new spot, then snap the feet to the
-  // ground (rise <= STEP_UP). No ground, or a drop > maxDrop: do not move.
-  move(pos, delta, opts = {}) {
-    const radius = opts.radius ?? 3.5, height = opts.height ?? 19;
-    const maxDrop = opts.maxDrop ?? 40;
-    const [nx, nz, hitWall] = this.capsulePush(pos.x + delta.x, pos.y, pos.z + delta.z, radius, height);
-    const g = this.groundY(nx, nz, pos.y);
-    if (g === null || g - pos.y > maxDrop)
-      return { x: pos.x, y: pos.y, z: pos.z, onGround: false, hitWall };
-    return { x: nx, y: g, z: nz, onGround: true, hitWall };
   }
 
   // ------------------------------------------------------------- segment

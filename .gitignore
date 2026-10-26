@@ -40,6 +40,7 @@
 !native/web/*.js
 !native/web/*.mjs
 !native/web/actions/*.js
+!native/assets/collision/*.mjs
 
 # ----------------------------------------------------------------------------
 # 4) Re-exclude DERIVATIVES OF THE COPYRIGHTED GAME BINARY (never public):

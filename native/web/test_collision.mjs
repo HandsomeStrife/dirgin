@@ -15,7 +15,7 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '../..');
 const modPath = path.resolve(process.argv[2] ?? path.join(here, 'collision.js'));
 const binPath = path.resolve(process.argv[3] ?? path.join(here, 'data/z128_collision.bin'));
-const pyDir = path.join(root, 'native/assets/collision');
+const pyDir = process.env.COLLISION_PY_DIR ?? path.join(root, 'native/assets/collision');   // override: mutation runs
 const TOL = 1e-4;
 
 const { Collision } = await import(pathToFileURL(modPath).href);
@@ -47,8 +47,9 @@ for (let i = 0; i < 300; i++)                        // dense near the start
   ground.push([X0 + (rnd() - 0.5) * 400, Z0 + (rnd() - 0.5) * 400, lerp(-130, -60, rnd())]);
 for (const [, x, z, fy] of SPOTS) { ground.push([x, z, fy]); ground.push([x, z, null]); }
 // Slopes near the floor threshold (0.45 <= |n.y| < 0.75, both windings): centroids,
-// feet just above. Picked from the file itself with an inline copy of the player-set
-// rule (sub-tree 1 with a class bit in 0x0e), not from the module under test.
+// feet just above. Picked from the file itself with an inline copy of the sub-tree-1
+// player-set rule (the game's packet test over the three probe flag words,
+// mask & ~(f|0x100) != 0, i.e. mask & 0xfe7e), not from the module under test.
 {
   const nv = dv.getUint32(8, true), nt = dv.getUint32(12, true);
   const V = new Float32Array(buf.buffer.slice(buf.byteOffset + 0x30, buf.byteOffset + 0x30 + nv * 12));
@@ -56,7 +57,7 @@ for (const [, x, z, fy] of SPOTS) { ground.push([x, z, fy]); ground.push([x, z, 
   const F = new Uint32Array(buf.buffer.slice(buf.byteOffset + 0x30 + nv * 12 + nt * 16, buf.byteOffset + 0x30 + nv * 12 + nt * 20));
   const picks = [];
   for (let t = 0; t < nt; t++) {
-    if ((F[t] & 3) !== 1 || !((F[t] >>> 16) & 0x0e)) continue;
+    if ((F[t] & 3) !== 1 || !((F[t] >>> 16) & 0xfe7e)) continue;
     const a = I[3 * t] * 3, b = I[3 * t + 1] * 3, c = I[3 * t + 2] * 3;
     const ux = V[b] - V[a], uy = V[b + 1] - V[a + 1], uz = V[b + 2] - V[a + 2];
     const wx = V[c] - V[a], wy = V[c + 1] - V[a + 1], wz = V[c + 2] - V[a + 2];
@@ -73,9 +74,15 @@ for (let i = 0; i < 300; i++)
   pushes.push([X0 + (rnd() - 0.5) * 300, lerp(-110, -90, rnd()), Z0 + (rnd() - 0.5) * 300]);
 
 const walks = [];                                    // {x,y,z, deltas:[[dx,dz]...]}
+// Starts: centroids of walk polygons within 400 of the spawn (the walker only moves on them).
+const nearPolys = [];
+for (let i = 0; i < col.npolys; i++) {
+  const vs = col.polys[i].v, c = [0, 1, 2].map(k => vs.reduce((a, v) => a + v[k], 0) / vs.length);
+  if (Math.hypot(c[0] - X0, c[2] - Z0) < 400) nearPolys.push(c);
+}
 for (let w = 0; w < 30; w++) {
-  const x = X0 + (rnd() - 0.5) * 200, z = Z0 + (rnd() - 0.5) * 200;
-  const y = col.groundY(x, z, FY0 + 20);            // start on a floor (same answer checked above)
+  const [x, cy, z] = nearPolys[Math.floor(rnd() * nearPolys.length)];
+  const y = col.groundY(x, z, cy);                  // start on its polygon (same answer checked above)
   if (y === null) continue;
   let a = rnd() * 2 * Math.PI;
   const deltas = [];
@@ -84,7 +91,7 @@ for (let w = 0; w < 30; w++) {
     const sp = lerp(0.5, 2.0, rnd());
     deltas.push([Math.cos(a) * sp, Math.sin(a) * sp]);
   }
-  walks.push({ x, y, z, deltas });
+  walks.push({ x, y, z, deltas, air: w % 3 === 2 });   // every third walk: the airborne ground-point walk
 }
 
 const segs = [];                                     // [[ax,ay,az],[bx,by,bz]]
@@ -102,13 +109,9 @@ sys.path.insert(0, sys.argv[1])
 import cid_query
 col = cid_query.Collision(sys.argv[2])
 q = json.load(sys.stdin)
-def move(x, y, z, dx, dz):
-    nx, nz, hit = col.capsule_push(x + dx, y, z + dz)
-    g = col.ground_height(nx, nz, y)
-    if g is None or g[0] - y > 40:
-        return [x, y, z, False, hit]
-    return [nx, g[0], nz, True, hit]
-out = {'ntris': len(col.tris), 'ncells': len(col.grid)}
+def move(x, y, z, dx, dz, air=False):
+    return list(col.move(x, y, z, dx, dz, air=air))
+out = {'ntris': len(col.tris), 'ncells': len(col.grid), 'npolys': len(col.polys), 'npcells': len(col.pgrid)}
 out['ground'] = [(lambda g: None if g is None else g[0])(col.ground_height(x, z, fy)) for x, z, fy in q['ground']]
 out['push'] = [list(col.capsule_push(x, fy, z)) for x, fy, z in q['pushes']]
 # the self-test's 8-direction walk, exactly as _selftest runs it
@@ -134,7 +137,7 @@ for w in q['walks']:
     x, y, z = w['x'], w['y'], w['z']
     steps = []
     for dx, dz in w['deltas']:
-        r = move(x, y, z, dx, dz)
+        r = move(x, y, z, dx, dz, w['air'])
         steps.append(r)
         x, y, z = r[0], r[1], r[2]
     rw.append(steps)
@@ -193,7 +196,7 @@ py.selfwalk.forEach((w, k) => {                      // drive JS with the same r
 walks.forEach((w, i) => {
   let pos = { x: w.x, y: w.y, z: w.z };
   for (let s = 0; s < w.deltas.length; s++) {
-    const r = col.move(pos, { x: w.deltas[s][0], z: w.deltas[s][1] }); moveCalls++;
+    const r = col.move(pos, { x: w.deltas[s][0], z: w.deltas[s][1] }, { air: w.air }); moveCalls++;
     if (!sameMove(r, py.walks[i][s])) { note('walks', `walk ${i} step ${s}: js ${JSON.stringify(r)} py ${JSON.stringify(py.walks[i][s])}`); break; }
     pos = r;
   }
@@ -207,29 +210,128 @@ segs.forEach(([a, b], i) => {
 });
 
 // ---------------------------------------------------------------- absolute checks
-// Behaviour against the game data, not against the Python (which shares the rules).
-// Fall-through spots (worker 0053; found by a flood fill from the start: the old
-// one-sided rule with FLOOR_NY 0.6 dropped him to oldY): the ground must stay within
-// maxDrop units below the feet.
-const ABS = [
-  ['walkway rim (55-degree bevel top)', -1272, -1110, -93.8, -69.89, 1],
-  ['walkway rim (reverse-wound face)', -1331, -1106, -93.5, -74.00, 1],
-  ['stairs at x -1430, z -670 (next tread is 1.5 down)', -1430, -670, -94.2, -90.00, 2.5],
-  ['stairs at x -1428, z -694 (next tread is 1.6 down)', -1428, -694, -96.9, -91.99, 2.5],
-];
-for (const [name, x, z, fy, oldY, maxDrop] of ABS) {
+// Behaviour against the game data and Dan's reports, not against the Python
+// (which shares the rules). Worker 0061: walking is the walk-mesh walker
+// (sub-tree-0 polygons, FUN_00357d48). Moves use play.js's options (maxDrop 4).
+const PLAY = { radius: 3.5, height: 19, maxDrop: 4 };
+const ABS2 = [];
+const DECK = -98.64;                                   // walk polygon under the spawn
+for (const [name, x, z, fy] of SPOTS) {                // Vincent's dumped feet vs the walk polygon
   const g = col.groundY(x, z, fy);
-  if (g === null || g - fy > maxDrop) note('abs', `${name}: ground ${g} under feet ${fy} (old rule fell to ${oldY})`);
+  ABS2.push([`dump feet ${name}`, g !== null && Math.abs(g - fy) < 0.4, `feet ${fy} ground ${g}`]);
 }
-for (const [name, x, z, fy] of SPOTS) {                // Vincent's dumped feet vs the ground
-  const g = col.groundY(x, z, fy);
-  if (g === null || Math.abs(g - fy) >= 0.4) note('abs', `${name}: feet ${fy} ground ${g}`);
+// Walk n steps of (dx,dz); a drop (onGround false) falls like player.js to the
+// first polygon below. -> {end, minY, maxY, fell, void, hits}
+const walkFrom = (x, z, fy, dx, dz, n) => {
+  let p = { x, y: col.groundY(x, z, fy) ?? fy, z }, minY = p.y, maxY = p.y, fell = false, vd = false, hits = 0;
+  for (let s = 0; s < n; s++) {
+    let r = col.move(p, { x: dx, z: dz }, PLAY);
+    if (!r.onGround) {
+      fell = true;
+      const g = col.groundY(r.x, r.z, p.y, 0);
+      if (g === null) { vd = true; break; }
+      r = { x: r.x, y: g, z: r.z };
+    }
+    if (r.hitWall) hits++;
+    p = r; minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
+  }
+  return { end: p, minY, maxY, fell, void: vd, hits };
+};
+const f2 = (v) => v.toFixed(2);
+{ // report 20261026T175840Z-ae9d "collision missing on the bars": he walked through the
+  // north railing onto the 45-degree roof (feet -96.46 at z -1083.5). The deck's walk
+  // polygon ends at z -1094.8: walking N, NE, NW he must stop there, on the deck, sliding.
+  for (const [dx, dz, name] of [[0, 1, 'N'], [0.7, 0.7, 'NE'], [-0.7, 0.7, 'NW']]) {
+    const w = walkFrom(-1400.26, -1100, DECK, dx, dz, 40);
+    ABS2.push([`report ae9d bars, walk ${name}`, w.end.z <= -1094.7 && Math.abs(w.maxY - DECK) < 0.05 && !w.fell && w.hits > 0,
+      `end (${f2(w.end.x)}, ${f2(w.end.y)}, ${f2(w.end.z)}) maxY ${f2(w.maxY)} fell ${w.fell} slides ${w.hits}`]);
+  }
+  for (const [dx, dz, name, ok] of [[-1, 0, 'W', (e) => e.x >= -1418.0], [0, -1, 'S', (e) => e.z >= -1113.5]]) {
+    const w = walkFrom(-1400, -1105, DECK, dx, dz, 40);
+    ABS2.push([`deck railing, walk ${name}`, ok(w.end) && Math.abs(w.maxY - DECK) < 0.05 && !w.fell && w.hits > 0,
+      `end (${f2(w.end.x)}, ${f2(w.end.y)}, ${f2(w.end.z)}) fell ${w.fell} slides ${w.hits}`]);
+  }
 }
-{                                                      // the invisible railing plane (mask 0x0104) stops him
-  let pos = { x: X0, y: FY0, z: Z0 };
-  for (let s = 0; s < 30; s++) pos = col.move(pos, { x: 0, z: -1 });
-  if (pos.z < Z0 - 10 || !pos.onGround) note('abs', `walk toward -z went to z ${pos.z.toFixed(2)} (railing at -1120.1)`);
+{ // reports 20261026T175806Z-5f40 / 20261026T191925Z-7c95 "fell through the pipes" (feet
+  // -71.08 / -72.77 on the roof under them). The walk mesh lays a flat strip over the pipes
+  // (y -94.4, z -1110.8..-1106.6). Under both report spots the ground must be that strip,
+  // and walking across it (+z, -z) and along it (+x) he must stay on it.
+  for (const [name, x, z] of [['5f40', -1339.87, -1108.92], ['7c95', -1269.82, -1107.13]]) {
+    const g = col.groundY(x, z, -94.4);
+    ABS2.push([`report ${name} pipes: ground is the strip`, g !== null && Math.abs(g + 94.4) < 0.3, `ground ${g}`]);
+  }
+  for (const [dx, dz, n, name] of [[0, 1, 30, '+z'], [0, -1, 30, '-z'], [1, 0, 120, '+x']]) {
+    const w = walkFrom(-1300, -1108.2, -94.4, dx, dz, n);
+    const onStrip = w.end.z >= -1110.9 && w.end.z <= -1105.8;     // edges: z -1110.8..-1110.3 and -1106.6..-1105.9
+    ABS2.push([`report 5f40/7c95 pipes, walk ${name}`, w.maxY < -90 && !w.fell && (name === '+x' || (onStrip && w.hits > 0)),
+      `end (${f2(w.end.x)}, ${f2(w.end.y)}, ${f2(w.end.z)}) maxY ${f2(w.maxY)} fell ${w.fell} slides ${w.hits}`]);
+  }
+  const e = walkFrom(X0, Z0, DECK, 1, 0, 250);         // spawn east over the pipe walkway
+  ABS2.push(['walkway: spawn east over the pipes', e.end.x > -1210 && e.maxY < -90 && !e.fell,
+    `end (${f2(e.end.x)}, ${f2(e.end.y)}) maxY ${f2(e.maxY)} fell ${e.fell}`]);
 }
+{ // report 20261026T192011Z-a1a5 "jumped over the railings onto the street" (feet y 0 at
+  // (-1291.65, -1143.41)). In the game the airborne ground point walks the same mesh
+  // (FUN_003590c8 state 2 -> FUN_00357d48), so a jump ends on the deck. Jump (0057's
+  // numbers: -1.333 up, gravity 0.07/tick, no air control) at run speed 1.6 from the
+  // middle of the deck toward the south, west and north railings.
+  for (const [dx, dz, name] of [[0, -1, 'S'], [-1, 0, 'W'], [0, 1, 'N'], [0.7, -0.7, 'SE'], [-0.7, -0.7, 'SW']]) {
+    let p = { x: -1395, y: DECK, z: -1104 }, vy = -1.333, landed = null;
+    for (let t = 0; t < 120 && !landed; t++) {
+      const r = col.move(p, { x: dx * 1.6, z: dz * 1.6 }, { air: true });
+      const g = col.groundY(r.x, r.z, p.y, 0);
+      let y = p.y + vy; vy += 0.07;
+      if (g !== null && vy > 0 && y >= g) { y = g; landed = { x: r.x, y, z: r.z }; }
+      p = { x: r.x, y, z: r.z };
+    }
+    const ok = landed && Math.abs(landed.y - DECK) < 0.05 && landed.x >= -1418 && landed.z >= -1113.5 && landed.z <= -1094.7;
+    ABS2.push([`report a1a5 jump ${name} stays on the deck`, !!ok,
+      landed ? `landed (${f2(landed.x)}, ${f2(landed.y)}, ${f2(landed.z)})` : `never landed (${f2(p.x)}, ${f2(p.y)}, ${f2(p.z)})`]);
+  }
+}
+{ // the ladder by the deck (records 35/34, face x -1106..-1109.7) is a 0x10 walk polygon
+  // joining the bottom landing (y -90.6) to the top one (y -146). The 0x10 rule
+  // (FUN_00357d48): from the bottom it is a wall (no walking up the ladder); from the top
+  // the body drops off (onGround false).
+  const up = walkFrom(-1115, -1107, -90.6, 1, 0, 20);
+  ABS2.push(['ladder 35 from the bottom is a wall', up.end.x <= -1109.6 && Math.abs(up.maxY + 90.6) < 0.05 && Math.abs(up.minY + 90.6) < 0.05 && !up.fell && up.hits > 0,
+    `end (${f2(up.end.x)}, ${f2(up.end.y)}) minY ${f2(up.minY)} fell ${up.fell} slides ${up.hits}`]);
+  let p = { x: -1104.5, y: -146, z: -1105.9 }, drop = null;
+  for (let s = 0; s < 10 && !drop; s++) {
+    const r = col.move(p, { x: -0.5, z: 0 }, PLAY);
+    if (!r.onGround) drop = r; else p = r;
+  }
+  ABS2.push(['ladder 35 from the top drops off', !!drop && drop.x < -1105.9 && drop.x > -1106.6,
+    drop ? `drop at (${f2(drop.x)}, ${f2(drop.y)}, ${f2(drop.z)})` : `no drop, end x ${f2(p.x)}`]);
+}
+{ // flood fill from the spawn in 2-unit steps (drops fall to the first polygon below): no
+  // report spot is reachable (roof under the bars and the pipes, the street).
+  const SPOTS_OFF = [['ae9d roof', -1400.26, -96.46, -1083.54], ['5f40 roof', -1339.87, -71.08, -1108.92],
+                     ['7c95 roof', -1269.82, -72.77, -1107.13], ['a1a5 street', -1291.65, 0, -1143.41]];
+  const key = p => `${Math.round(p.x / 2)},${Math.round(p.z / 2)},${Math.round(p.y / 3)}`;
+  const start = { x: X0, y: DECK, z: Z0 };
+  const seen = new Set([key(start)]), q = [start];
+  let bad = null;
+  for (let i = 0; i < q.length && seen.size < 20000 && !bad; i++) {
+    const p = q[i];
+    for (let k = 0; k < 8; k++) {
+      const dx = Math.cos(k * Math.PI / 4) * 2, dz = Math.sin(k * Math.PI / 4) * 2;
+      let n = col.move(p, { x: dx, z: dz }, PLAY);
+      if (!n.onGround) {
+        const g = col.groundY(n.x, n.z, p.y, 0);
+        if (g === null) continue;
+        n = { x: n.x, y: g, z: n.z };
+      }
+      for (const [nm, sx, sy, sz] of SPOTS_OFF)
+        if (Math.hypot(n.x - sx, n.z - sz) < 3 && Math.abs(n.y - sy) < 3) bad = `${nm} at (${f2(n.x)}, ${f2(n.y)}, ${f2(n.z)})`;
+      const k2 = key(n);
+      if (!seen.has(k2)) { seen.add(k2); q.push(n); }
+    }
+  }
+  ABS2.push(['flood from the spawn reaches no report spot', !bad && seen.size < 20000, bad ?? `${seen.size} states`]);
+}
+const ABS = [];
+for (const [name, ok, msg] of ABS2) if (!ok) note('abs', `${name}: ${msg}`);
 
 // ---------------------------------------------------------------- timing
 const time = (fn, n) => { for (let i = 0; i < 2000; i++) fn(i); const s = performance.now(); for (let i = 0; i < n; i++) fn(i); return (performance.now() - s) / n * 1000; };
@@ -248,12 +350,13 @@ const nbad = Object.values(bad).reduce((a, b) => a + b, 0);
 const hits = py.ground.filter(g => g !== null).length;
 console.log(`module ${path.relative(root, modPath)}`);
 console.log(`player-set tris js ${col.ntris} py ${py.ntris}; cells js ${col.ncells} py ${py.ncells}; build ${loadMs.toFixed(0)} ms (py run ${(pyMs / 1000).toFixed(1)} s)`);
-console.log(`checks ${total} + ${ABS.length + SPOTS.length + 1} absolute: groundY ${ground.length} (${hits} with a floor), capsule ${pushes.length}, move ${moveCalls} (self-test walk + ${walks.length} random walks), segment ${segs.length}`);
+console.log(`walk polygons js ${col.npolys} py ${py.npolys}; cells js ${col.npcells} py ${py.npcells}`);
+console.log(`checks ${total} + ${ABS2.length} absolute: groundY ${ground.length} (${hits} with a floor), capsule ${pushes.length}, move ${moveCalls} (self-test walk + ${walks.length} random walks), segment ${segs.length}`);
 console.log(`self-test walk travelled: ${selfTravel.join(' ')}`);
 console.log(`mismatches ${nbad}  ${JSON.stringify(bad)}  max |js-py| over matched values ${maxErr.toExponential(2)}`);
 for (const e of examples) console.log('  ' + e);
 console.log(`timing per call: groundY ${usG.toFixed(2)} us, move ${usM.toFixed(2)} us, segment ${usS.toFixed(2)} us`);
-const tcount = col.ntris !== py.ntris || col.ncells !== py.ncells
+const tcount = col.ntris !== py.ntris || col.ncells !== py.ncells || col.npolys !== py.npolys || col.npcells !== py.npcells
   || !(col.ntris > 0) || !(hits > 0) || !(walks.length > 0);   // an empty player set would otherwise pass
 if (tcount) console.log('MISMATCH: triangle/cell counts differ, or nothing was tested (ntris/hits/walks = 0)');
 console.log(nbad || tcount ? 'FAIL' : 'PASS');

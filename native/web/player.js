@@ -229,7 +229,10 @@ export class PlayerController {
   fall() {
     const { radius, height } = this.opts, p = this.pos;
     let nx = p.x + this.vel.x, nz = p.z + this.vel.z, hit = false;
-    if (this.col.capsulePush) [nx, nz, hit] = this.col.capsulePush(nx, p.y, nz, radius, height);
+    if (typeof this.col.navMove === 'function') {   // z128 airborne body keeps walking the navmesh (FORMAT.md §3d)
+      const r = this.col.move(p, { x: this.vel.x, z: this.vel.z }, { air: true });
+      nx = r.x; nz = r.z; hit = r.hitWall;
+    } else if (this.col.capsulePush) [nx, nz, hit] = this.col.capsulePush(nx, p.y, nz, radius, height);
     this.vy = Math.min(this.vy + this.gravity, this.maxFall);
     const g = this.col.groundY(nx, nz, p.y, 0);   // no step up while falling
     let y = p.y + this.vy;

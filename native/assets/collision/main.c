@@ -47,6 +47,7 @@ int main(int argc, char **argv) {
         } else {
             printf("indexed lvs : %d (tag-0, decoded to triangles)\n", m.n_nodes_tag0);
             printf("vu lvs      : %d (tag-2, VU-packed)\n", m.n_nodes_tag2);
+            printf("prim nodes  : %d (tag-1 box/cylinder/sphere, tessellated)\n", m.n_nodes_tag1);
             printf("vu packets  : %d total, %d decoded -> %d tris, %d boxed (fallback)\n",
                    m.n_tag2_packets, m.n_tag2_pkts_decoded, m.n_tag2_tris,
                    m.n_tag2_pkts_boxed);
