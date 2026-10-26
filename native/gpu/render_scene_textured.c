@@ -53,7 +53,7 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-#define MAXG 64
+#define MAXG 256   /* room groups; the z128 file binding has 134 + sky (was 64) */
 #define MAXRUNS 64
 
 typedef struct { RVertex *v; size_t n; float bbmin[3], bbmax[3];
@@ -310,7 +310,7 @@ int main(int argc, char **argv) {
     char nofog[MAXG][256]; int nnofog = 0; int lineno = 0, bad_directive = 0;
     float rmin[3] = { 1e30f, 1e30f, 1e30f }, rmax[3] = { -1e30f, -1e30f, -1e30f };
     char line[2048];
-    while (fgets(line, sizeof line, lf) && ng < MAXG) {
+    while (ng < MAXG && fgets(line, sizeof line, lf)) {
         lineno++;
         const char *ln = line;
         while (*ln == ' ' || *ln == '\t') ln++;
@@ -391,6 +391,12 @@ int main(int argc, char **argv) {
             if (bbmx[k] > rmax[k]) rmax[k] = bbmx[k];
         }
         ng++;
+    }
+    while (ng == MAXG && fgets(line, sizeof line, lf) && strspn(line, " \t\r\n") == strlen(line)) {}
+    if (ng == MAXG && !feof(lf)) {
+        /* the loop stops at MAXG: a longer list used to lose its tail silently */
+        fprintf(stderr, "%s: more than %d groups; raise MAXG\n", listpath, MAXG);
+        fclose(lf); return 2;
     }
     fclose(lf);
     if (bad_directive) {

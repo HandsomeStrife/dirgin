@@ -22,9 +22,10 @@ from collections import defaultdict
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from export_bmd_textured import find_bmd_payload, decode_packets, EXTRACT
-from export_bmd_bound import build_flat, emit_group, tex_png_for
+from export_bmd_bound import emit_group, tex_png_for, packet_tris, _norm
 from bmd_env import read_env, fog_directive
-from bmd_chains import packet_chains
+from bmd_chains import packet_chains, chain_headers
+from room_overlap import PlaneIndex
 
 # Packets dropped by name (2026-10-24 investigation, review 27): big flat quads at
 # x=-829 with generic 0..1 UVs. They sit in front of the real x=-760 wall/roof, and
@@ -166,6 +167,60 @@ SKY_FC = '0680ff35'   # TBP 11504 sky-dome texture (correlation 1.000), see expo
 # ramp F = 254.56 - 0.3150*w (far 810). Not by triangle count, not by glob order.
 ENV_CHUNK = '06800012'
 
+# Texture binding read from the game files (--bind file, the default; worker 0051, 2026-10-26).
+# Each chain's draw-object header holds the texture slot at +0x98 into the BMD's texture
+# table (header +0x10); the entry's low byte is the FileCode's last byte (bmd_chains.
+# chain_headers has the decode). Checked against the GS dumps with UV triple + vertex colour
+# within 12 + all three vertices within 2 world units (dump vertices unprojected with each
+# dump's fitted camera): 720 of 762 dump-seen packets get the dump's texture; 41 of the 42
+# others are animation frames (below). All 30 BIND_OVERRIDE entries agree with it after
+# HERO_FRAME. The pf binding (UV-triple oracle + fills) is still there as --bind pf.
+LEVEL_TEX = '0680ff'
+
+# Flipbook textures: the table names the first frame, the game swaps frames into the same
+# VRAM block at runtime. 0680ff04/05/06 are 128x128 frames of one animation (corr between
+# frames ~0.12; the dump textures equal 0680ff05 and 0680ff06 at corr 1.000 in different
+# dumps), 0680ff07/08/09 256x256. The hero dump (163235) shows 0680ff05 where the table
+# says 0680ff04 (32 packets, position-checked) and 0680ff07 where it says 0680ff06 (pkt
+# 06800112/585, the deck wash). We draw the hero frame. The animation table itself is not
+# decoded. Weaker swaps seen once or twice (0680ff23 -> 24, 54 -> 46, 7a -> 05) are left.
+HERO_FRAME = {'0680ff04': '0680ff05', '0680ff06': '0680ff07'}
+
+# Visibility groups the game hides in the sea-of-flames state. FUN_0026ccc8 skips a chain
+# whose header byte +0xaa has its bit set in the 128-bit mask at EE 0x004e8710 (=
+# 0x004e86f0 | 0x004e8700; set/cleared by FUN_00269368 / FUN_002693a8 from scripts, saved
+# by FUN_00269178). Read from save-states/sea-of-flames.p2s eeMemory.bin: 0x004e86f0 =
+# 0x0300000002080001 -> bits 0, 19, 25, 56, 57 (0x004e8700 = 0). Check: 0 of 1043 packets
+# in groups 0/19/56/57 and 1 of 124 in group 25 match any dump triangle. Game state, not
+# level data: another point in the story can have another mask. --show-hidden-groups.
+HIDDEN_GROUPS = {0, 19, 25, 56, 57}
+
+
+def tri_key(pk, t):
+    """Position (1/16 unit, the V3-16 grid) + UV (1/4096) of a triangle, order-free."""
+    return tuple(sorted((round(pk['verts'][j][0] * 16), round(pk['verts'][j][1] * 16),
+                         round(pk['verts'][j][2] * 16), round(pk['uv'][j][0] * 4096),
+                         round(pk['uv'][j][1] * 4096)) for j in t))
+
+
+def build_flat_kept(packets, idxs, kept):
+    """export_bmd_bound.build_flat restricted to the kept triangles of each packet."""
+    flat = []; ntri = 0
+    for pi in idxs:
+        pk = packets[pi]; V = pk['verts']; UV = pk['uv']; C = pk['col']
+        for (i0, i1, i2) in kept[pi]:
+            a, b, c = V[i0], V[i1], V[i2]
+            e1 = (b[0]-a[0], b[1]-a[1], b[2]-a[2]); e2 = (c[0]-a[0], c[1]-a[1], c[2]-a[2])
+            n = _norm((e1[1]*e2[2]-e1[2]*e2[1], e1[2]*e2[0]-e1[0]*e2[2], e1[0]*e2[1]-e1[1]*e2[0]))
+            if n == (0.0, 0.0, 0.0):
+                continue
+            for idx in (i0, i1, i2):
+                p3 = V[idx]; uv = UV[idx]; rgba = C[idx]
+                flat.extend((p3[0], p3[1], p3[2], n[0], n[1], n[2], uv[0], uv[1],
+                             rgba[0]/255.0, rgba[1]/255.0, rgba[2]/255.0, rgba[3]/255.0))
+            ntri += 1
+    return flat, ntri
+
 
 def main():
     ap = argparse.ArgumentParser()
@@ -177,7 +232,16 @@ def main():
                     '(default %s, the one the hero dump confirms; see ENV_CHUNK)' % ENV_CHUNK)
     ap.add_argument('--env-slot', type=int, default=0, help='BMD env slot (0 = level default)')
     ap.add_argument('--no-chain-fill', action='store_true', help='leave unbound packets unbound '
-                    'even when their chain agrees on one FileCode')
+                    'even when their chain agrees on one FileCode (--bind pf only)')
+    ap.add_argument('--bind', choices=('file', 'pf'), default='file', help='file (default): '
+                    'texture slot from each chain header (see LEVEL_TEX); pf: the old per-packet '
+                    'binding from --pf + BIND_OVERRIDE + chain fill')
+    ap.add_argument('--no-hero-frame', action='store_true', help='draw flipbook textures at the '
+                    'frame the table names, not the hero-dump frame (HERO_FRAME)')
+    ap.add_argument('--show-hidden-groups', action='store_true', help='keep chains whose '
+                    'visibility group the game hides in this state (HIDDEN_GROUPS)')
+    ap.add_argument('--keep-duplicates', action='store_true', help='keep every copy of a triangle '
+                    'that several chunks/packets store at the same position and UVs')
     a = ap.parse_args()
 
     cids = [os.path.basename(p)[3:11]
@@ -188,6 +252,9 @@ def main():
     abe_by = defaultdict(bool);  npk_by = defaultdict(int)
     ntri_chunk = defaultdict(int)
     overrides_applied = set()
+    seen_tris = set(); seen_tris_fc = {}; cover = PlaneIndex()          # dedupe keys, global across chunks (chunk order, packet order)
+    stats = defaultdict(int); dup_xtex = defaultdict(int); ovr_check = {}
+    hidden_by = defaultdict(int)
     chain_filled = {}; chain_mixed = []; chain_single = {}; chain_skipped = []
     for cid in cids:
         binp = os.path.join(EXTRACT, cid + '.bin')
@@ -199,17 +266,44 @@ def main():
         packets = decode_packets(buf, pay)
         pf = json.load(open(os.path.join(a.pf, 'pf_%s.json' % cid)))
         pf = [f if f else None for f in pf]
-        n = min(len(pf), len(packets))
+        n = len(packets) if a.bind == 'file' else min(len(pf), len(packets))
+        pf = pf + [None] * (n - len(pf))
         for (ecid, pi) in EXCLUDE_PACKETS | set(BIND_OVERRIDE):
             if ecid == cid and pi >= n:
                 sys.exit('named packet %s/%d out of range (%d packets)' % (cid, pi, n))
         cwarn = []
         chain = packet_chains(buf, pay, packets, cwarn)
+        hdrs, _table = chain_headers(buf, pay, cwarn)
         for w in cwarn:
             print('warning: chains %s: %s' % (cid, w), file=sys.stderr)
         groups = defaultdict(list); final = {}; not_applied = set()
         for i in range(n):
             if (cid, i) in EXCLUDE_PACKETS:
+                continue
+            h = hdrs.get(chain[i])
+            if h is not None and h['group'] in HIDDEN_GROUPS and not a.show_hidden_groups:
+                hidden_by[h['group']] += len(packet_tris(packets[i])); stats['hidden_packets'] += 1
+                continue
+            if a.bind == 'file':
+                fc = None
+                if h is None:
+                    stats['file_no_header'] += 1
+                elif h['entry'] is not None:
+                    if h['entry'] > 0xff:
+                        print('warning: %s/%d texture table entry 0x%x is not a FileCode byte; '
+                              'unbound' % (cid, i, h['entry']), file=sys.stderr)
+                    else:
+                        fc = '%s%02x' % (LEVEL_TEX, h['entry'])
+                        if not a.no_hero_frame and fc in HERO_FRAME:
+                            fc = HERO_FRAME[fc]; stats['hero_frame_packets'] += 1
+                else:
+                    stats['file_slot_none'] += 1
+                if (cid, i) in BIND_OVERRIDE:
+                    ovr_check['%s/%d' % (cid, i)] = {'override': BIND_OVERRIDE[(cid, i)][0], 'file': fc,
+                                                     'agree': BIND_OVERRIDE[(cid, i)][0] == fc}
+                if pf[i]:
+                    stats['pf_agree' if pf[i] == fc else 'pf_differ'] += 1
+                final[i] = fc
                 continue
             fc = pf[i]
             if (cid, i) in BIND_OVERRIDE:
@@ -228,7 +322,7 @@ def main():
         for c, idxs in members.items():
             fcs = sorted({final[i] for i in idxs if final[i]})
             unb = [i for i in idxs if not final[i]]
-            if not unb or not fcs:
+            if not unb or not fcs or a.bind == 'file':
                 continue
             if len(fcs) > 1:
                 chain_mixed.append({'chunk': cid, 'packets': idxs, 'unbound': unb,
@@ -248,13 +342,34 @@ def main():
                     final[i] = fcs[0]; chain_filled['%s/%d' % (cid, i)] = fcs[0]
                     if len(anchors) == 1:
                         chain_single['%s/%d' % (cid, i)] = '%s/%d' % (cid, anchors[0])
+        kept = {}
+        for i in sorted(final):
+            ks = []
+            for t in packet_tris(packets[i]):
+                key = tri_key(packets[i], t)
+                if key in seen_tris and not a.keep_duplicates:
+                    stats['dup_tris_dropped'] += 1
+                    if seen_tris_fc.get(key) != final[i]:
+                        dup_xtex[(seen_tris_fc.get(key), final[i])] += 1
+                    continue
+                V = packets[i]['verts']
+                if (not a.keep_duplicates and not packets[i]['abe']
+                        and cover.covered(V[t[0]], V[t[1]], V[t[2]])):
+                    stats['covered_tris_dropped'] += 1; continue
+                seen_tris.add(key); seen_tris_fc.setdefault(key, final[i]); ks.append(t)
+            kept[i] = ks
+        for i in sorted(final):      # this chunk's opaque triangles cover later chunks only
+            if not packets[i]['abe']:
+                V = packets[i]['verts']
+                for t in kept[i]:
+                    cover.add(V[t[0]], V[t[1]], V[t[2]])
         for i in sorted(final):
             fc = final[i]
             if fc in ALPHA_TEST and packets[i]['abe']:
                 fc += ATEST_SUFFIX
             groups[fc if fc else 'unbound'].append(i)
         for key, idxs in groups.items():
-            flat, ntri = build_flat(packets, idxs)
+            flat, ntri = build_flat_kept(packets, idxs, kept)
             if ntri == 0:
                 continue
             flat_by[key].extend(flat); ntri_by[key] += ntri; npk_by[key] += len(idxs)
@@ -272,10 +387,27 @@ def main():
             print('warning: ALPHA_TEST %s matched no blended (ABE) packet; entry does nothing '
                   '(%s)' % (fc, ALPHA_TEST[fc][1]), file=sys.stderr)
 
-    manifest = {'method': 'z128 whole-room union; per-packet FileCode from 8-dump '
-                'UV-triple oracle (seed+grow, 99.6%) + spatial recovery of '
-                'dump-unseen surfaces (recover_z128_deck.py)',
-                'pf_dir': a.pf, 'chunks': cids, 'groups': []}
+    manifest = {'method': ('z128 whole-room union; FileCode from each chain header slot '
+                           '(+0x98 into the BMD texture table, bmd_chains.chain_headers)'
+                           if a.bind == 'file' else
+                           'z128 whole-room union; per-packet FileCode from 8-dump '
+                           'UV-triple oracle (seed+grow, 99.6%) + spatial recovery of '
+                           'dump-unseen surfaces (recover_z128_deck.py)'),
+                'bind': a.bind, 'pf_dir': a.pf, 'chunks': cids, 'groups': []}
+    manifest['file_binding'] = {'stats': dict(stats), 'hero_frame': None if a.no_hero_frame else HERO_FRAME,
+                                'bind_override_check': ovr_check}
+    manifest['hidden_groups'] = {'groups': sorted(HIDDEN_GROUPS), 'applied': not a.show_hidden_groups,
+                                 'tris_by_group': {str(k): v for k, v in sorted(hidden_by.items())}}
+    manifest['duplicates'] = {'dropped_tris': stats['dup_tris_dropped'], 'applied': not a.keep_duplicates,
+                              'rule': 'exact position (1/16) + UV (1/4096) repeat; first copy in '
+                                      'chunk then packet order kept',
+                              'covered_tris_dropped': stats['covered_tris_dropped'],
+                              'cover_rule': 'opaque tri inside opaque coplanar tris of earlier '
+                                            'chunks (room_overlap.py)',
+                              'texture_differs': {'%s -> %s' % k: v for k, v in sorted(dup_xtex.items(), key=lambda kv: -kv[1])}}
+    if ovr_check and not all(v['agree'] for v in ovr_check.values()):
+        print('warning: file binding disagrees with BIND_OVERRIDE on %s'
+              % [k for k, v in ovr_check.items() if not v['agree']], file=sys.stderr)
     total = bound = 0
     def add_group(gi, key):
         nonlocal total, bound
@@ -366,6 +498,10 @@ def main():
             f.write('%s\t%s\t%d\t%g\n' % (g['mesh'], g['texture_container'] or 'NONE',
                                           1 if g['abe'] else 0, g.get('alpha_ref', -1)))
     nb = len({g['filecode'] for g in manifest['groups'] if g['filecode'] and not g.get('sky')})
+    print('binding %s: %s; hidden groups %s: %d packets; duplicates dropped: %d tris (%d with '
+          'another texture), %d covered by earlier chunks' % (a.bind, dict(stats),
+          'off' if a.show_hidden_groups else 'on', stats['hidden_packets'], stats['dup_tris_dropped'],
+          sum(dup_xtex.values()), stats['covered_tris_dropped']))
     print('chain fill: %s, %d packets filled (%d on a single anchor); %d mixed chains with '
           'unbound packets left alone; %d chains skipped (override not applied)'
           % ('on' if not a.no_chain_fill else 'OFF', len(chain_filled), len(chain_single),

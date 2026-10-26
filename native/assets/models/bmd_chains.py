@@ -85,3 +85,41 @@ def packet_chains(buf, pay, packets, warn=None):
             raise ValueError('packet %d (off %s) is not a raw chain packet start' % (i, p.get('off')))
         out.append(ids[p['off']])
     return out
+
+
+def chain_headers(buf, pay, warn=None):
+    """{chain index: header} read from the draw object in front of each chain's first packet.
+
+    Decoded from the game code (2026-10-26, worker 0051):
+    - FUN_0026ccc8 walks the bone tree's draw objects; each chain's object sits 0xb0 bytes
+      before its first packet: 9 V4-32 bbox points, then +0x90 qword count (DMA ref, sent by
+      FUN_00265bf0 as 0x30000000|count to obj+0xb0), +0x96 byte, +0x97 sort bucket,
+      +0x98 s16 texture slot (-1 = none), +0x9a s16, +0x9c (runtime: BMD header +0x10 table),
+      +0xa4 self pointer, +0xa9 second-pass mode, +0xaa visibility group, +0xab 2nd slot.
+    - FUN_0026ce60 binds TEX = table[+0x98], the table at BMD header +0x10 holding
+      u16 +0x0c entries; each entry's low byte is the FileCode's last byte (<level>ffNN).
+    - FUN_0026ccc8 skips a chain when FUN_00269450(+0xaa) is true: bit (+0xaa) of the global
+      128-bit mask DAT_004e8710 (= DAT_004e86f0 | DAT_004e8700). Ids >= 0x80 always draw.
+    - FUN_00265bf0: +0xa9 == 1 or 2 resends the chain with ALPHA 0x58 (Cs*Ad + Cd) and
+      TEST 0x51001; texture = global TEX0 (1) or table[+0xab] (2). 0 = single pass.
+    The self pointer (+0xa4 == object offset) is checked; a mismatch is a warning and the
+    chain gets no header (its packets stay unbound)."""
+    ntex = struct.unpack_from('<H', buf, pay + 0x0c)[0]
+    tab = pay + _u32(buf, pay + 0x10)
+    table = [_u32(buf, tab + 4 * i) for i in range(ntex)]
+    ids = raw_chain_ids(buf, pay, warn)
+    first = {}
+    for q in sorted(ids):
+        first.setdefault(ids[q], q)
+    out = {}
+    for c, q in first.items():
+        o = q - 0xb0
+        if o < pay or _u32(buf, o + 0xa4) + pay != o:
+            if warn is not None:
+                warn.append('chain %d at 0x%x: no draw-object header (self pointer mismatch)' % (c, q))
+            continue
+        slot = struct.unpack_from('<h', buf, o + 0x98)[0]
+        out[c] = dict(slot=slot, entry=(table[slot] if 0 <= slot < ntex else None),
+                      group=buf[o + 0xaa], pass2=buf[o + 0xa9], slot2=buf[o + 0xab],
+                      flags=struct.unpack_from('<H', buf, o + 0x94)[0], bucket=buf[o + 0x97])
+    return out, table
