@@ -32,6 +32,7 @@
  *   render_scene_textured [-l ENV.list] [-m CHAR.mesh] [-t CHAR_TEX] [-o OUTDIR]
  *                         [-s scale] [-yaw deg] [-x cx] [-y feetY] [-z cz]
  *                         [-colscale f] [-neutralcol] [-flipy] [-notex] [-tag T]
+ *                         [-charprop PROP.mesh PROP_TEX.rgba]  (attached prop, e.g. the gun)
  *
  * Additive: links renderer_gl/gl_api/gfx_context/libdtex READ-ONLY, modifies none.
  */
@@ -233,6 +234,7 @@ int main(int argc, char **argv) {
     float glow_bias = 0.0f;   /* -charglowbias N (polygon offset). 0 measured best: a bias lets
                                  the dump-positioned glow tris spill past our boots */
     int char_two_sided = 0;   /* -chartwosided 1|2: see rgl_scene_draw.two_sided */
+    const char *propmesh = NULL, *proptex = NULL;   /* -charprop MESH TEX: attached prop (gun) */
 
     for (int i = 1; i < argc; i++) {
         if      (!strcmp(argv[i], "-l")  && i+1<argc) listpath = argv[++i];
@@ -258,6 +260,7 @@ int main(int argc, char **argv) {
             have_crig = 1;
         }
         else if (!strcmp(argv[i], "-charglow") && i+2<argc) { glowmesh = argv[++i]; glowtex = argv[++i]; }
+        else if (!strcmp(argv[i], "-charprop") && i+2<argc) { propmesh = argv[++i]; proptex = argv[++i]; }
         else if (!strcmp(argv[i], "-charglowbias") && i+1<argc) glow_bias = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "-chartwosided") && i+1<argc) char_two_sided = atoi(argv[++i]);
         else if (!strcmp(argv[i], "-ambient") && i+1<argc) {
@@ -471,7 +474,7 @@ int main(int argc, char **argv) {
     }
 
     /* draws: every env group PRELIT + its texture, then the character LIT + body */
-    rgl_scene_draw draws[MAXG + 2];
+    rgl_scene_draw draws[MAXG + 3];
     memset(draws, 0, sizeof draws);
     for (int i = 0; i < ng; i++) {
         draws[i].verts = g[i].v; draws[i].vcount = g[i].n;
@@ -546,6 +549,33 @@ int main(int argc, char **argv) {
         ndraws++;
     }
 
+    /* -charprop: a prop attached to the character (export_cerberus.py: the gun, already in
+     * the character's MODEL space through its attach marker), placed exactly like the
+     * character (pivot = the CHARACTER mesh bbox) and shaded like the body (same shade
+     * mode, rig, two-sided rule; opaque, no alpha test). Drawn after the body, as the game
+     * draws attached children right after it (FUN_005ab8f0). */
+    RVertex *pplaced = NULL; unsigned char *ptex = NULL;
+    if (propmesh) {
+        RVertex *pv = NULL; size_t pn = 0; float pmn[3], pmx[3], dmn[3], dmx[3]; char perr[256] = {0};
+        int pw = 0, ph = 0; char pname[64] = {0};
+        if (mesh_load(propmesh, &pv, &pn, pmn, pmx, perr, sizeof perr)) {
+            fprintf(stderr, "charprop: %s\n", perr); return 2; }
+        if (tex_load_raw(proptex, &ptex, &pw, &ph, pname, sizeof pname)) {
+            fprintf(stderr, "charprop: texture %s failed\n", proptex); return 2; }
+        if (flipy)
+            for (size_t k = 0; k < pn; k++) { pv[k].py = -pv[k].py; pv[k].ny = -pv[k].ny; }
+        pplaced = place_character(pv, pn, cbmn, cbmx, scale, yaw, TX, FY, TZ, cam_up[1], dmn, dmx);
+        free(pv);
+        if (!pplaced) { fprintf(stderr, "charprop: place failed\n"); return 2; }
+        draws[ndraws].verts = pplaced; draws[ndraws].vcount = pn;
+        draws[ndraws].shade_mode = draws[ng].shade_mode; draws[ndraws].two_sided = char_two_sided;
+        draws[ndraws].tfx = RGL_TFX_MODULATE;
+        draws[ndraws].tex_rgba = ptex; draws[ndraws].tex_w = pw; draws[ndraws].tex_h = ph;
+        printf("prop  : %s  (%zu tris)  %s\n", propmesh, pn / 3,
+               draws[ndraws].shade_mode == RGL_SHADE_PRELIT ? "prelit" : "lit");
+        ndraws++;
+    }
+
     /* frame on the CHARACTER box, pull the eye back to show the room around it */
     struct { const char *tag; float az, el, zoom; } views[] = {
         { "hero",   44.f, 11.f, 1.85f },
@@ -585,7 +615,7 @@ int main(int argc, char **argv) {
         printf("wrote %-44s (az=%.0f el=%.0f zoom=%.1f)\n", path, views[i].az, views[i].el, views[i].zoom);
     }
 
-    free(ctex); free(placed); free(gplaced); free(gtex);
+    free(ctex); free(placed); free(gplaced); free(gtex); free(pplaced); free(ptex);
     for (int i = 0; i < ng; i++) { free(g[i].v); free(g[i].tex); }
     gfx_context_destroy(ctx);
     return fail ? 1 : 0;

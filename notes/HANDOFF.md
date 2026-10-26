@@ -157,6 +157,21 @@ Read this first instead of re-deriving. Review images: notes/review/ (README exp
   attempts used. Unproven: clip frames per game tick (assumed 1). Next evidence: a PCSX2
   capture of Vincent walking. --cape-cloth with --frame past the clip length loops the cape
   but not the body.
+- Cerberus gun (2026-10-26, review 58): export_cerberus.py <dump> <p000_export_dir> <outdir> [--cam CAM.json]
+  -> cerberus.mesh / cerberus_tex.rgba / cerberus.json (Vincent model space). Render: add
+  -charprop OUT/cerberus.mesh OUT/cerberus_tex.rgba (lit/prelit like the body; opt-in).
+  Attach DECODED: FUN_00316270 weapon slot N -> marker N+0xf (gun: 15); FUN_005ab8f0 draws
+  slots after the body with child world = player world x FUN_0030bef8(palette[bone] x
+  T(marker xyz)). mk2: +4 u16 count, +8 -> {f32 xyz, s32 bone}. Vincent marker 15 = bone 56
+  (socket under hand 55, no verts, offset 0). Palette56 = bone 55's bind->posed rigid fit
+  from vincent_p000.mesh x bind56 (hook: export_p000_gpu2 could write per-bone matrices).
+  Parts drawn: frame0 + barrel0 + barrel1 (dump UV triples + geometry; barrel3/4 share UVs).
+  Textures = 07770582 w022_1..3, identical to the dump uploads.
+  Vertex error vs dump gun tris (median world units): hero 0.085, 185138 0.114, 185126 0.078
+  (bone-55 mutation: 2.6). Grade: cerberus_grade.py (region SSIM drops with the gun:
+  the background dominates the region). Hero: hair hides most of the gun.
+  Gun's own skeleton is bind (motions 07770580 not decoded).
+  --cam takes a capture's _cam.json (tools/gsdump/dumps); default is the hero camera.
 
 ## Room
 - out/ is gitignored. Rebuild (in native/assets/models, run -I):
