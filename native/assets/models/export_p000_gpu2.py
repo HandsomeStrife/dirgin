@@ -200,7 +200,7 @@ def clip_pose_cape(args, sk, cbuf, CP, trs, cape, pl, piv):
 
 def parse_args(argv):
     a = dict(dump=None, out=None, clip=None, frame=0.0, cont=CLIP_CONT, in_place=False, no_cape=False,
-             cape_flat=False, cape_cloth=False, dump_camera=None)
+             cape_flat=False, cape_cloth=False, dump_camera=None, bind_from_file=False)
     pos = []; i = 0
     while i < len(argv):
         k = argv[i]
@@ -212,6 +212,7 @@ def parse_args(argv):
         elif k == '--cape-flat-normals': a['cape_flat'] = True; i += 1
         elif k == '--cape-cloth': a['cape_cloth'] = True; i += 1
         elif k == '--dump-camera': a['dump_camera'] = argv[i + 1]; i += 2
+        elif k == '--bind-from-file': a['bind_from_file'] = True; i += 1
         elif k.startswith('--'): sys.exit(f"unknown option {k}")
         else: pos.append(k); i += 1
     if len(pos) != 2: sys.exit(__doc__)
@@ -278,6 +279,66 @@ def apply_bind_ref(tris, tri_tex0, how, path):
     return dict(n)
 
 
+def bind_from_file(buf, NB, Wm, bc, tris, tri_tex0, how):
+    """--bind-from-file: each triangle's TEX0 (texture + CLUT) from the game files
+    (smd_material.py: draw-descriptor material byte -> FUN_00259058's material table
+    over 07700002.bin). Replaces tri_tex0 in place; `how` (the dump evidence) is kept
+    for placement/pose. VRAM addresses are runtime: the table is laid out from this
+    capture's body TBP - 4 (p000_glow.BODY_TBP, set by --dump-camera). Keys stay the
+    dump's TEX0 ints where the dump drew that material (so the glow/pose lookups by
+    TEX0 work); textures come from the file. Returns stats + cape/texture hooks."""
+    import smd_material as SM
+    import p000_glow as GL
+    mats = SM.material_table(TEXC, 0, GL.BODY_TBP - 4)
+    tm = SM.tri_materials(buf, NB, Wm, bc, tris)
+    K = ('tbp0', 'tbw', 'psm', 'tw', 'th', 'cbp', 'cpsm')
+    fkey = lambda f: tuple(f[k] for k in K)
+    dump_key = {}
+    for x in tri_tex0:
+        if x is not None: dump_key.setdefault(fkey(tex0_fields(x)), x)
+    key_mat = {}
+    def key(m):
+        k = dump_key.get(fkey(mats[m]['fields']), mats[m]['tex0']); key_mat[k] = m
+        return k
+    st = collections.Counter(); per_how = collections.Counter(); old = list(tri_tex0)
+    for i, (m, _fl) in enumerate(tm):
+        if m == 0xff or m >= len(mats) or mats[m].get('ipu'):
+            st['no_material'] += 1; continue
+        tri_tex0[i] = key(m)
+        same = old[i] is not None and fkey(tex0_fields(old[i])) == fkey(mats[m]['fields'])
+        per_how[(how[i] or 'unbound', 'agree' if same else ('was_none' if old[i] is None else 'differs'))] += 1
+    stats = dict(materials=dict(sorted(collections.Counter(m for m, _ in tm).items())),
+                 vs_dump_binding={f"{h}:{a}": n for (h, a), n in sorted(per_how.items())}, **st)
+
+    def cape(cape_tex0):
+        m, _fl = SM.block_material(buf, 0x19f70)          # p000_L02 cape block
+        k = key(m)
+        stats['cape'] = dict(material=m, agrees_with_dump=fkey(tex0_fields(cape_tex0)) == fkey(mats[m]['fields']))
+        return k
+
+    def textures(tc):
+        cache = {}
+        class FileTex:
+            def get(self, x):
+                if x not in key_mat: return tc.get(x)
+                if x not in cache:
+                    rgba = SM.texture_rgba(TEXC, mats[key_mat[x]]).astype(np.float64)
+                    # dtex alpha is a*255/128; the dump (and the cape alpha code) use GS 0..128
+                    rgba[:, :, 3] = np.round(rgba[:, :, 3] * 128 / 255)
+                    cache[x] = rgba
+                return cache[x]
+        ft = FileTex(); tst = {}
+        for x, m in sorted(key_mat.items(), key=lambda kv: kv[1]):
+            a, d = ft.get(x), tc.get(x)
+            tst[m] = (f"{mats[m]['image_name']}+{mats[m]['name']}: "
+                      + ("no dump texture" if d is None or d.shape[:2] != a.shape[:2] else
+                         "max|file-dump| rgb %d a %d" % (np.abs(a[:, :, :3] - np.asarray(d[:, :, :3], float)).max(),
+                                                          np.abs(a[:, :, 3] - np.asarray(d[:, :, 3], float)).max())))
+        stats['textures'] = tst
+        return ft
+    return dict(stats=stats, cape=cape, textures=textures, mat=[m for m, _ in tm])
+
+
 def main():
     args = parse_args(sys.argv[1:])
     dumppath, outdir = args['dump'], args['out']; os.makedirs(outdir, exist_ok=True)
@@ -330,6 +391,10 @@ def main():
         if tri_tex0[i] is None and t[6] in gmaj: tri_tex0[i] = gmaj[t[6]]; how[i] = 'group'
     hc = collections.Counter(h or 'unbound' for h in how)
     print("body binding per triangle:", dict(hc), "of", len(tris))
+    fb = None
+    if args['bind_from_file']:
+        fb = bind_from_file(buf, NB, Wm, bc, tris, tri_tex0, how)
+        print("bind-from-file:", fb['stats'])
 
     # ---- placement from exact-matched corners (model bind pose -> dump world)
     used_idx = sorted({i for t in tris for i in t[:3]})
@@ -358,12 +423,17 @@ def main():
     # ---- cape (block 0x19f70) posed from the dump
     cape, cape_tex0, cst = C.posed_cape(buf, NB, dumppath)
     print("cape:", cst)
+    texsrc = tc
+    if fb is not None:
+        cape_tex0 = fb['cape'](cape_tex0)
+        texsrc = fb['textures'](tc)
+        print("bind-from-file textures:", fb['stats']['textures'])
 
     # ---- atlas: every distinct runtime texture, stacked vertically
     used = []
     for x in tri_tex0 + [cape_tex0]:
-        if x is not None and x not in used and tc.get(x) is not None: used.append(x)
-    imgs = {x: np.asarray(tc.get(x)[:, :, :3], np.uint8) for x in used}
+        if x is not None and x not in used and texsrc.get(x) is not None: used.append(x)
+    imgs = {x: np.asarray(texsrc.get(x)[:, :, :3], np.uint8) for x in used}
     Wc = max(im.shape[1] for im in imgs.values()); region = {}; rows = []; yoff = 0
     for x in used:
         im = imgs[x]; h, w = im.shape[:2]
@@ -484,7 +554,7 @@ def main():
     # renderer's GS alpha test uses ref CAPE_AREF_GL (placement.json char_alpha_ref).
     alpha = np.full(combined.shape[:2], 255, np.uint8)
     yo, rh, rw = region[cape_tex0]
-    ca = np.asarray(tc.get(cape_tex0)[:, :, 3], np.float64)
+    ca = np.asarray(texsrc.get(cape_tex0)[:, :, 3], np.float64)
     alpha[yo:yo + rh, :rw] = np.clip(np.round(ca * 255 / 128), 0, 255).astype(np.uint8)
     rgba = np.dstack([combined, alpha])
     with open(os.path.join(outdir, "vincent_p000_tex.rgba"), 'wb') as f:
@@ -503,10 +573,12 @@ def main():
         with open(os.path.join(outdir, "vincent_p000_glow_tex.rgba"), 'wb') as f:
             f.write(struct.pack('<II', gatlas.shape[1], gatlas.shape[0])); f.write(gatlas.tobytes())
     json.dump([dict(g=int(t[6]), name=gmeta[t[6]][0], tex0=(None if tri_tex0[i] is None else int(tri_tex0[i])),
-                    how=how[i], uv=uvn(t), v=[int(k) for k in t[:3]]) for i, t in enumerate(tris)],
+                    how=how[i], uv=uvn(t), v=[int(k) for k in t[:3]],
+                    **({} if fb is None else dict(src='file', mat=fb['mat'][i]))) for i, t in enumerate(tris)],
               open(os.path.join(outdir, "binding.json"), 'w'))
     json.dump(dict(placement=pl, binding=dict(hc), cape=cst, pose=pose_stats, clip=clip_stats,
                    **({} if glow_stats is None else dict(glow=glow_stats)),
+                   **({} if fb is None else dict(bind_from_file=fb['stats'])),
                    char_alpha_ref=CAPE_AREF_GL,
                    render_args=f"-s {pl['s']:.4f} -yaw {pl['yaw']:.2f} -x {pl['x']:.2f} -y {pl['y']:.2f} -z {pl['z']:.2f}",
                    # Vincent is placed in this camera's world: render with exactly it.

@@ -211,6 +211,17 @@ Read this first instead of re-deriving. Review images: notes/review/ (README exp
   Open: the last descriptor of a group still parses to EOF (can leak into the next group; fix
   touches p000_cape/p000_cloth call sites). Group header carries per-vertex blend weights
   (0.8, 0.6...) that our skinning ignores (shared slots are overwritten): unexplored.
+- Binding from files (2026-10-26, review 63): export_p000_gpu2.py ... --bind-from-file (opt-in;
+  default unchanged). smd_material.py: draw-descriptor byte 0 = material slot (FUN_005b19b8: TEX0
+  = table[byte] @0x5b37c0; +4 bit 1 = alpha test AREF 100, desc[2] = env-map slot). Table =
+  FUN_00259058 over the texture container's entries in order (skip rst whose +0x22 mask has the
+  variant bit; palette-only entries, 0 images / +0x2f parent, reuse the parent image with their
+  own CLUT; VRAM bump allocator FUN_00414730, CLUT 4 blocks then image). p000: 0-3 = p000_1_a
+  with CLUT a/b/c/d, 4 = p000_2, 5 = p000_3 (cape). Agrees with 100% of 'exact' tris in
+  hero/185126/185138 (slot+1 mutation: 0%); file textures = dump texels. Hero Vincent region
+  6.25/0.8161 -> 6.25/0.8167. Uncaptured models: smd_material.py --render CONT TEX OUT (p005
+  7348/7348 bound; Dan: face/head/hair look wrong there, hair maybe missing transparency).
+  Open: glow TEX0 = envmap1 at p000_ta's in-order address; the glow may be env-mapped (desc 0x40).
 
 ## Room
 - out/ is gitignored. Rebuild (in native/assets/models, run -I):
