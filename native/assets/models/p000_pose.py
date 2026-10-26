@@ -9,6 +9,15 @@ poses every vertex of that bone, matched or not. A matched vertex takes its dump
 position directly when it agrees with its bone's prediction (within TOL).
 A bone is solved only with >= MIN_PTS matches whose 2nd principal spread is >= MIN_SPREAD;
 otherwise it takes its twist from the nearest solved ancestor, keeping its own direction/position (colinear bones), or copies it outright (too few points) (stats list which bones and why).
+
+Mirrored parts (legs, arms, boots) share UVs, so a vertex gets candidates from BOTH
+sides of the body; nearest-to-prediction alone can put a whole bone on the wrong limb
+(185138: the right thigh, bone 87, took the left thigh's points). So candidates are first
+filtered by SIDE: the body midline plane is found from mirrored vertex pairs (two vertices
+with the same candidate set), each vertex keeps its bind-pose side of it, and the plane
+is carried into the frame by the vertex's nearest central ancestor bone (pelvis 81, chest 3).
+Candidates on the other side are dropped when the vertex is clearly off the midline and
+some candidate is on its own side; for limb bones, also when all of them are well across.
 """
 import collections
 import numpy as np
@@ -20,6 +29,16 @@ MIN_SPREAD = 0.05  # min 2nd principal spread (RMS, world units) to solve a bone
                    # the twist about the points' line is unconstrained. Data (frame 163235):
                    # 6 bones are exactly 0 (24,32,34,38,67,75); the next is 0.058 (bone 26) and
                    # the hand bones 53-61 are >= 0.087, so 0.05 sits in the gap.
+SIDE_MARGIN = 0.1  # |bind offset| from the midline (world units) below which a vertex's
+                   # side isn't trusted (no side filter). Legs sit at +-0.7..0.9.
+STRICT = True      # also drop a limb vertex's candidates when ALL are across the midline
+STRICT_MARGIN = 0.5  # ... by more than this. The other copy of a mirrored UV is often missing
+                   # (hero/185126: 8 right-thigh vertices had only left-thigh candidates).
+                   # Walking feet land near the midline, so near-midline candidates are kept:
+                   # 0.1/0.3 dropped real left-shin points (fringe on bone 84); 0.5 still does
+                   # a little in 185126. Central bones (torso) are never strict-filtered.
+CENTRAL = 0.3      # a bone is "central" (carries the midline plane) if its vertices' mean
+                   # bind offset is below this: 3,4,5,9,10,16,32,33,47,81; next is 91 at 0.5.
 
 
 def slot_bones(buf, NB, bc, P, G):
@@ -84,6 +103,28 @@ def _fit_line(Rp, A, B):
     return Rm, cb - Rm @ ca
 
 
+def _midline(placed, cands, vbone):
+    """Body midline plane (n, h: n.x = h) in the bind (placed) frame, from mirrored
+    vertex pairs: exactly two vertices with the same candidate set. None if too few."""
+    g = collections.defaultdict(list)
+    for v, cs in cands.items():
+        if cs and v in vbone and v in placed:
+            g[tuple(sorted({tuple(np.round(c, 2)) for c in cs}))].append(v)
+    D, M = [], []
+    for vs in g.values():
+        if len(vs) == 2:
+            a, b = placed[vs[0]], placed[vs[1]]
+            if np.linalg.norm(a - b) > 0.2:
+                D.append(a - b); M.append((a + b) / 2)
+    if len(D) < 20:
+        return None
+    D = np.array(D); M = np.array(M); n = np.linalg.svd(D)[2][0]
+    mir = abs(D @ n) / np.linalg.norm(D, axis=1) > 0.95     # true mirror pairs only
+    if mir.sum() < 20:
+        return None
+    return n, float(np.median(M[mir] @ n))
+
+
 def pose(placed, cands, vbone, parent, iters=4, src=None):
     """placed: {v: bind world pos (placed)}; cands: {v: [dump world pos]}.
     Returns (posed {v: pos}, rot {v: R}, stats). If `src` is a dict, it is filled
@@ -91,13 +132,38 @@ def pose(placed, cands, vbone, parent, iters=4, src=None):
     bones = sorted(set(vbone.values()))
     T = {b: (np.eye(3), np.zeros(3)) for b in bones}
     pred = lambda v: T[vbone[v]][0] @ placed[v] + T[vbone[v]][1]
+    # side of the midline per vertex, and the central bone that carries the plane
+    mid = _midline(placed, cands, vbone); vside, ref, central = {}, {}, set()
+    if mid is not None:
+        n, h = mid
+        off = collections.defaultdict(list)
+        for v in placed:
+            if v in vbone:
+                vside[v] = float(placed[v] @ n - h); off[vbone[v]].append(vside[v])
+        central = {b for b, o in off.items() if abs(np.mean(o)) < CENTRAL}
+        for b in bones:
+            a = b
+            while a >= 0 and a not in central:
+                a = parent[a] if a < len(parent) else -1
+            ref[b] = a if a >= 0 else None
+    side_dropped = 0
     pick = {}
     for it in range(iters):
-        # choose each vertex's candidate nearest its current prediction
-        pick = {}
+        # choose each vertex's candidate nearest its current prediction, among those on
+        # the vertex's own side of the (posed) midline when the side is clear
+        pick = {}; side_dropped = 0
         for v, cs in cands.items():
             if v not in vbone or not cs:
                 continue
+            if mid is not None and abs(vside[v]) > SIDE_MARGIN and ref[vbone[v]] is not None and len(cs) > 1:
+                Rr, tr = T[ref[vbone[v]]]
+                nr = Rr @ n; hr = h + nr @ tr                     # plane moved by the ref bone
+                same = [c for c in cs if (c @ nr - hr) * vside[v] > 0]
+                if same and len(same) < len(cs):
+                    side_dropped += 1; cs = same
+                elif STRICT and not same and vbone[v] not in central and \
+                        all(abs(c @ nr - hr) > STRICT_MARGIN for c in cs):
+                    side_dropped += 1; continue
             p = pred(v); d = [np.linalg.norm(c - p) for c in cs]; k = int(np.argmin(d))
             if it == 0 or d[k] < TOL * (3 if it == 1 else 1.5):
                 pick[v] = cs[k]
@@ -146,4 +212,89 @@ def pose(placed, cands, vbone, parent, iters=4, src=None):
     # stats describe the final pass
     return posed, rot, dict(how=dict(how), bones=len(bones), bones_solved=len(solved),
                             bones_copied_parent=sorted(copied),
-                            bones_colinear=sorted(flat), bones_unposed=sorted(unposed))
+                            bones_colinear=sorted(flat), bones_unposed=sorted(unposed),
+                            side_filtered=side_dropped)
+
+
+# ---- mirrored pieces missing from the decode ------------------------------------------
+# The game draws Vincent's knee pad on BOTH knees (same UVs), but our decode has it only on
+# the left knee (bone 83, inner half in L01.g0 + outer half in L01.g1); the right knee
+# (bone 87) has none of it (review 59: "missing a section near the knee"). Root cause is
+# in the skinned decode (render_skinned), not found. Here: where the dump draws a UV triple
+# on one side of the body and our mesh has it only on the OTHER side, the missing copy is
+# rebuilt by mirroring ours across the model midline (x = 0; the skeleton is exactly
+# mirrored there, e.g. bone 83 at x +0.858, 87 at -0.858) onto the mirror bone.
+MIRROR_MARGIN = 0.3   # model |x| the dump copy must clear on the mirror side. A tri's side is
+                      # its BONE's side (origin x): the inner half of the knee pad sits at
+                      # x 0.05-0.2, on the midline, but its bone 83 is at +0.858.
+
+
+def mirror_bones(Wm, tol=1e-3):
+    """{bone: mirror bone} from the bind matrices (origin x negated); central bones omitted."""
+    O = np.array([np.asarray(m)[:3, 3] for m in Wm]); out = {}
+    for b, o in enumerate(O):
+        if abs(o[0]) < tol:
+            continue
+        d = np.linalg.norm(O - o * [-1, 1, 1], axis=1); m = int(np.argmin(d))
+        if d[m] < tol and m != b:
+            out[b] = m
+    return out
+
+
+def mirror_plan(V, tris, sig, vbone, mbone, dump_x, Wm):
+    """Indices of tris to mirror. tris[i] qualifies when its vertices share one bone b with a
+    mirror bone, none of our tris with the same UV triple sits on the mirror bone, and the
+    dump has a copy of that UV triple clearly on the mirror bone's side (model x).
+    sig(t) -> UV-triple key; dump_x: {key: [model x of each dump copy]}."""
+    on = collections.defaultdict(set)
+    for t in tris:
+        bs = {vbone.get(v) for v in t[:3]}
+        if len(bs) == 1:
+            on[sig(t)] |= bs
+    plan = []
+    for i, t in enumerate(tris):
+        bs = {vbone.get(v) for v in t[:3]}
+        if len(bs) != 1:
+            continue
+        b = bs.pop()
+        if b not in mbone:
+            continue
+        side = np.sign(np.asarray(Wm[b])[0, 3]); k = sig(t)
+        if mbone[b] in on[k]:
+            continue
+        if any(dx * side < -MIRROR_MARGIN for dx in dump_x.get(k, ())):
+            plan.append(i)
+    return plan
+
+
+def apply_mirror(V, N, tris, plan, vbone, mbone, Wm, W):
+    """Append the mirrored copies of tris[plan] for a decode posed with bone matrices W
+    (bind: W = Wm). A source vertex on bone b is taken to b's local frame under W, mirrored
+    in the bind frame, and re-posed on the mirror bone. Deterministic order, so a clip
+    decode gets the same new indices. Returns (V, N, new tris, {new vertex: bone})."""
+    W = [np.asarray(m, float) for m in W]; Wm = [np.asarray(m, float) for m in Wm]
+    F = np.diag([-1.0, 1, 1]); newv, nb, P, Q = {}, {}, [], []
+    base = len(V)
+    def mv(v):
+        if v not in newv:
+            b = vbone[v]; m = mbone[b]
+            loc = np.linalg.solve(W[b], np.r_[V[v], 1.0])                 # b-local
+            bind = F @ (Wm[b] @ loc)[:3]                                  # mirrored, bind
+            lm = np.linalg.solve(Wm[m], np.r_[bind, 1.0])
+            P.append((W[m] @ lm)[:3])
+            if N is not None:
+                nl = np.linalg.solve(W[b][:3, :3], N[v])
+                nm = np.linalg.solve(Wm[m][:3, :3], F @ (Wm[b][:3, :3] @ nl))
+                Q.append(W[m][:3, :3] @ nm)
+            newv[v] = base + len(newv); nb[newv[v]] = m
+        return newv[v]
+    out = []
+    for i in plan:
+        t = tris[i]; a, b_, c = (mv(v) for v in t[:3])
+        # mirroring flips handedness: swap two corners (and their per-corner data) to keep winding
+        out.append((a, c, b_, t[3], t[5], t[4], t[6]) + ((t[7], t[9], t[8]) if len(t) >= 10 else ()))
+    if P:
+        V = np.vstack([V, np.array(P, dtype=V.dtype)])
+        if N is not None:
+            N = np.vstack([N, np.array(Q, dtype=N.dtype)])
+    return V, N, out, nb

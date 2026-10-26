@@ -172,6 +172,42 @@ Read this first instead of re-deriving. Review images: notes/review/ (README exp
   the background dominates the region). Hero: hair hides most of the gun.
   Gun's own skeleton is bind (motions 07770580 not decoded).
   --cam takes a capture's _cam.json (tools/gsdump/dumps); default is the hero camera.
+- Walk dumps (2026-10-25, reviews 55-57): tools/gsdump/dumps/z128_walk_185126/185138 (.bin/.png/_cam.json).
+  Same room z128, other cameras: fit_dump_camera.py (RANSAC on UV-matched room tris vs the hero
+  dump; 0.03 px, fov 59.27, depth scale 1.000). Vincent's TBPs move per capture (185126 body
+  0x2e60 / cape 0x2ff4 / glow 0x3074; 185138 0x2d4c / 0x2ee0 / 0x2f60): export with
+  --dump-camera <dump>_cam.json. Its "bind_ref" (out/p000_gpu3/binding.json) lets the hero's
+  stronger exact/uvmap CLUT evidence override a capture's weaker one (mirror entries skipped).
+  Textures are read as they were at draw time (DrawTimeTex): in 185126 the arm/boots CLUT 0x2f60
+  and head CLUT 0x2e5c are overwritten later in the frame (the old largest-upload pick was garbage).
+  Vincent is STANDING in both (body static over the 4 vsyncs): h_st f160 (0.06) / f94 (0.03);
+  h_wk best 0.43. The hero frame is h_st f91 too (0.059 vs h_swtch f58 0.109; cape 0.25 vs 0.46).
+  p000_clip_scan.py ranks clip frames (approximate, rigid per bone).
+- Cape vs cloth: the dump cape sits 0.08-0.35 off the skinned target and closes ~15%/vsync.
+  The decoded sim either sags (up to 2.5) or snaps in 1-2 ticks; it only fits in its last 2-4
+  window ticks. Sim vs skinned: hero 0.167 vs 0.296, 185126 0.116 vs 0.154, 185138 0.085 vs
+  0.068. Gravity off improves the sim (hero 0.127). So the stiffness is likely a porting error
+  (suspects: gravity units, blend step). Cloth steps every vsync; body ~2 clip frames per 3
+  vsyncs (unproven).
+- Lit+glow, Vincent region: 185126 8.17/0.815, 185138 9.40/0.712. Our room is wrong from the
+  185138 view (a near facade where the game shows rooftops); glow reads too strong in 185126.
+- Mirrored-UV pose fix (2026-10-26, review 59): legs/arms share UVs, so p000_pose could take the
+  LEFT thigh's dump points for bone 87 (right thigh), in all three dumps (bone 87 at 102-117 deg
+  vs its parent; visible only in 185138). `_midline()` finds the body midline from mirrored vertex
+  pairs; each vertex keeps its bind side, the plane moves with the nearest central bone (81, 3).
+  Wrong-side candidates are dropped when the vertex has some on its own side, and on limb bones
+  also when ALL are > STRICT_MARGIN=0.5 across. Bone 87 now 27-28 deg. Silhouette IoU: 185138
+  0.856 -> 0.908, hero 0.847 -> 0.860, 185126 0.831 -> 0.830. Cost: thin fringe on the near shin
+  (bone 84) in hero/185126 (walking feet land near the midline; margins 0.1/0.3 were worse).
+- Right knee pad (2026-10-26, review 60): the game draws the knee pad on both knees (same UVs);
+  our decode has it only on the left knee (bone 83: L01.g0 inner, L01.g1 outer), none on 87.
+  Root cause in the skinned decode, NOT found. Workaround: p000_pose.mirror_plan/apply_mirror,
+  called after the placement solve (and in clip_pose): a tri on one lateral bone whose UV triple
+  the dump draws > MIRROR_MARGIN=0.3 across on the mirror bone's side, with no copy of ours there,
+  is mirrored across model x=0 onto the mirror bone (mirror_bones). 27-33 tris per dump, appended
+  LAST to binding.json (how="mirror"; readers expecting the plain decode skip them: bind_ref,
+  export_cerberus). Legs |d|/SSIM: hero 5.64/0.828 -> 5.61/0.830, 185138 8.98/0.750 -> 8.81/0.762.
+  Dan (review 60): "may be missing some additional textures near the top of the legs".
 
 ## Room
 - out/ is gitignored. Rebuild (in native/assets/models, run -I):

@@ -29,6 +29,11 @@ hero-frame GS dump.
   --cape-cloth uses the game's cloth sim instead (run from clip frame 0 to --frame,
   last frame). Without --clip the cape stays dump-posed (unchanged).
 
+- Other dumps (optional): --dump-camera CAM.json for a dump taken from another camera
+  (same room). JSON: eye, at, up, fov (fitted to the dump's room vertices, see
+  fit_dump_camera.py) and Vincent's TBPs in that dump: body_tbp, cape_tbp, glow_tbp
+  (VRAM layout differs per capture). Without it: the hero camera/TBPs (unchanged).
+
 Run: python3 -I export_p000_gpu2.py <dump.bin> <outdir> [--clip h_swtch --frame 58]
 """
 import sys, os, struct, array, collections, json
@@ -195,7 +200,7 @@ def clip_pose_cape(args, sk, cbuf, CP, trs, cape, pl, piv):
 
 def parse_args(argv):
     a = dict(dump=None, out=None, clip=None, frame=0.0, cont=CLIP_CONT, in_place=False, no_cape=False,
-             cape_flat=False, cape_cloth=False)
+             cape_flat=False, cape_cloth=False, dump_camera=None)
     pos = []; i = 0
     while i < len(argv):
         k = argv[i]
@@ -206,6 +211,7 @@ def parse_args(argv):
         elif k == '--no-cape': a['no_cape'] = True; i += 1
         elif k == '--cape-flat-normals': a['cape_flat'] = True; i += 1
         elif k == '--cape-cloth': a['cape_cloth'] = True; i += 1
+        elif k == '--dump-camera': a['dump_camera'] = argv[i + 1]; i += 2
         elif k.startswith('--'): sys.exit(f"unknown option {k}")
         else: pos.append(k); i += 1
     if len(pos) != 2: sys.exit(__doc__)
@@ -213,9 +219,69 @@ def parse_args(argv):
     return a
 
 
+class DrawTimeTex:
+    """TexCache.get(tex0) as the texture was when the last frame drew with it: the live
+    upload at that draw, not TexCache's legacy 'largest upload anywhere'. In walk dump
+    185126 the arm/boots CLUT (0x2f60) and head CLUT (0x2e5c) are overwritten later in
+    the frame by 64x128 / 128x128 textures, which the legacy pick took (garbage palettes).
+    TEX0s never drawn fall back to the legacy pick."""
+    def __init__(self, dumppath):
+        from gsparse import read_header
+        from gsrender2 import build
+        buf = open(dumppath, 'rb').read(); g = build(buf, read_header(buf))
+        last = max(ctx['vframe'] for *_x, ctx in g.tris)
+        self.seq = {}
+        for i, (_a, _b, _c, ctx) in enumerate(g.tris):
+            if ctx['vframe'] == last and ctx['tme']:
+                self.seq.setdefault(ctx['tex0'], i)
+        self.tc = TexCache(dumppath, uploads=g.uploads)
+
+    def get(self, tex0):
+        return self.tc.get(tex0, self.seq.get(tex0))
+
+
+def use_dump_camera(path):
+    """Point every dump reader at another capture: its camera (HERO_CAM is updated in
+    place, so gs_to_world/world_to_drawable defaults follow) and its Vincent TBPs."""
+    import p000_glow as GL
+    j = json.load(open(path))
+    C.HERO_CAM.update(eye=tuple(j['eye']), at=tuple(j['at']), up=tuple(j['up']), fov=j['fov'])
+    C.CAPE_TBP = j['cape_tbp']; GL.GLOW_TBP = j['glow_tbp']; GL.BODY_TBP = j['body_tbp']
+    global BIND_REF
+    BIND_REF = j.get('bind_ref')
+
+
+# Optional (--dump-camera JSON "bind_ref"): binding.json of the hero export. A triangle's
+# CLUT is a property of the model, not of the capture, but a capture from another angle
+# has less dump evidence (walk 185138: 63 group-majority tris vs 15, 184 tris on another
+# CLUT than the hero, 37 of them group-bound where the hero has an exact UV match).
+BIND_REF = None
+BIND_RANK = {'exact': 0, 'uvmap': 1, 'neighbour': 2, 'group': 3, None: 4}
+
+
+def apply_bind_ref(tris, tri_tex0, how, path):
+    """Where the reference has stronger evidence (exact/uvmap over this capture's
+    uvmap/none), take its CLUT, translated to this capture's TEX0 through the TEX0
+    pairs of triangles bound 'exact' in both. Returns counts."""
+    ref = [r for r in json.load(open(path)) if r['how'] != 'mirror']   # mirrored copies are appended last
+    if len(ref) != len(tris) or any(r['v'] != [int(k) for k in t[:3]] for r, t in zip(ref, tris)):
+        raise ValueError("bind_ref triangles do not match this decode")
+    m = collections.defaultdict(collections.Counter)
+    for r, x, h in zip(ref, tri_tex0, how):
+        if r['how'] == 'exact' and h == 'exact': m[r['tex0']][x] += 1
+    xl = {k: v.most_common(1)[0][0] for k, v in m.items()}
+    n = collections.Counter()
+    for i, r in enumerate(ref):
+        if r['how'] in ('exact', 'uvmap') and BIND_RANK[r['how']] < BIND_RANK[how[i]] and r['tex0'] in xl:
+            n[f"{how[i]}->ref_{r['how']}"] += 1
+            tri_tex0[i] = xl[r['tex0']]; how[i] = 'ref_' + r['how']
+    return dict(n)
+
+
 def main():
     args = parse_args(sys.argv[1:])
     dumppath, outdir = args['dump'], args['out']; os.makedirs(outdir, exist_ok=True)
+    if args['dump_camera']: use_dump_camera(args['dump_camera'])
     P.CONT = CONT; P.TEXC = TEXC
     buf, NB = P.R.load_container(CONT); sk = P.load_skeleton(CONT, trans_scale=1.0)
     bc = sk['bone_count']; Wm = [np.array(m, float) for m in sk['world_bind']]
@@ -228,7 +294,7 @@ def main():
     uvn = lambda t: [(t[3 + k][0] / 4096, t[3 + k][1] / 4096) for k in range(3)]
 
     # ---- 1. exact UV-triple binding
-    sig2tex0 = dump_sig2tex0(dumppath); tc = TexCache(dumppath)
+    sig2tex0 = dump_sig2tex0(dumppath); tc = DrawTimeTex(dumppath)
     tri_tex0 = [sig2tex0.get(tri_sig(uvn(t))) for t in tris]
     how = ['exact' if x is not None else None for x in tri_tex0]
     gvote = collections.defaultdict(collections.Counter)
@@ -245,11 +311,13 @@ def main():
         if tri_tex0[i] is None and t[6] in gtbp:
             x = uvmap_lookup(cov.get(gtbp[t[6]], {}), uvn(t))
             if x is not None: tri_tex0[i] = x; how[i] = 'uvmap'
+    if BIND_REF:
+        print("bind_ref:", apply_bind_ref(tris, tri_tex0, how, BIND_REF))
     # ---- 3. nearest dump-bound neighbour (shared vertex, same group), BFS rounds
     for _ in range(4):
         byv = collections.defaultdict(list)
         for i, t in enumerate(tris):
-            if how[i] in ('exact', 'uvmap'):
+            if how[i] in ('exact', 'uvmap', 'ref_exact', 'ref_uvmap'):
                 for k in range(3): byv[t[k]].append(tri_tex0[i])
         changed = 0
         for i, t in enumerate(tris):
@@ -284,6 +352,23 @@ def main():
     pl = solve_placement(*exact_pairs(Pn), piv)
     print("placement:", {k: round(v, 3) if isinstance(v, float) else v for k, v in pl.items()})
 
+    # ---- mirrored pieces the decode lacks (right knee pad; p000_pose.mirror_plan). Added
+    # after the placement solve so they can't move it; bound like their source tris.
+    import p000_pose as PZ
+    mbone = PZ.mirror_bones(Wm); vb0 = PZ.vertex_bones(buf, NB, bc, gmeta)
+    dump_x = collections.defaultdict(list)
+    for t0, vs in dtris:
+        dump_x[tri_sig([v[1] for v in vs])].append(
+            float(world_to_model(np.mean([v[0] for v in vs], 0)[None], pl, piv)[0][0]))
+    mplan = PZ.mirror_plan(V, tris, lambda t: tri_sig(uvn(t)), vb0, mbone, dump_x, Wm)
+    V, N, mtris, mvb = PZ.apply_mirror(V, N, tris, mplan, vb0, mbone, Wm, Wm)
+    tris = tris + mtris; tri_tex0 = tri_tex0 + [tri_tex0[i] for i in mplan]
+    how = how + ['mirror'] * len(mtris)
+    Pn = V.astype(np.float64); used_idx = sorted({i for t in tris for i in t[:3]})
+    mirror_stats = dict(tris=len(mtris), vertices=len(mvb),
+                        bones=dict(collections.Counter(int(vb0[tris[i][0]]) for i in mplan)))
+    print("mirrored:", mirror_stats)
+
     # ---- cape (block 0x19f70) posed from the dump
     cape, cape_tex0, cst = C.posed_cape(buf, NB, dumppath)
     print("cape:", cst)
@@ -307,7 +392,6 @@ def main():
     # ---- pose the body to this frame from the dump (p000_pose.py); POSE=0 = bind pose
     pose_stats = None; clip_stats = None; src = {}; posed = None; clip_cape = None
     if os.environ.get('POSE', '1') != '0' or args['clip']:
-        import p000_pose as PZ
         yr = np.radians(pl['yaw']); cy, sy = np.cos(yr), np.sin(yr)
         Ry = np.array([[cy, 0, sy], [0, 1, 0], [-sy, 0, cy]])      # place_character's yaw
         fwd = lambda X: pl['s'] * (np.asarray(X) - piv) @ Ry.T + np.array([pl['x'], pl['y'], pl['z']])
@@ -321,7 +405,7 @@ def main():
         cands = collections.defaultdict(list); src = collections.Counter()
         for i, t in enumerate(tris):
             uvs = uvn(t)
-            if how[i] == 'exact':
+            if how[i] in ('exact', 'mirror'):
                 for dmap in dall.get(tri_sig(uvs), []):
                     for k in range(3):
                         w = dmap.get(q(uvs[k]))
@@ -329,7 +413,7 @@ def main():
             elif tri_tex0[i] is not None:
                 for k in range(3):
                     cands[t[k]].extend(byuv.get((tri_tex0[i], q(uvs[k])), []))
-        vb = PZ.vertex_bones(buf, NB, bc, gmeta)
+        vb = dict(vb0); vb.update(mvb)
         posed, rot, pose_stats = PZ.pose(placed, dict(cands), vb, sk['parent'], src=src)
         pose_stats['vertices'] = len(used_idx)
         pose_stats['with_dump_candidates'] = sum(1 for v in used_idx if cands.get(v))
@@ -353,7 +437,10 @@ def main():
         def clip_pose(**kw):
             Wc = AR.compose(sk, trs, root_motion=not args['in_place'], **kw)
             Vc, Nc, tris_c, _g = P.decode_groups(buf, NB, Wc, bc)
-            assert len(Vc) == len(V) and [t[:3] for t in tris_c if t[6] in keep] == [t[:3] for t in tris]
+            tris_c = [t for t in tris_c if t[6] in keep]
+            Vc, Nc, mt_c, _mb = PZ.apply_mirror(Vc, Nc, tris_c, mplan, vb0, mbone, Wm, Wc)
+            tris_c = tris_c + mt_c
+            assert len(Vc) == len(V) and [t[:3] for t in tris_c] == [t[:3] for t in tris]
             Pc = Vc.astype(np.float64); pv = Pc[used_idx]
             pc = np.array([(pv[:, 0].min() + pv[:, 0].max()) / 2, pv[:, 1].max(), (pv[:, 2].min() + pv[:, 2].max()) / 2])
             plc = solve_placement(*exact_pairs(Pc), pc)
@@ -435,7 +522,7 @@ def main():
     json.dump([dict(g=int(t[6]), name=gmeta[t[6]][0], tex0=(None if tri_tex0[i] is None else int(tri_tex0[i])),
                     how=how[i], uv=uvn(t), v=[int(k) for k in t[:3]]) for i, t in enumerate(tris)],
               open(os.path.join(outdir, "binding.json"), 'w'))
-    json.dump(dict(placement=pl, binding=dict(hc), cape=cst, pose=pose_stats, clip=clip_stats,
+    json.dump(dict(placement=pl, binding=dict(hc), mirrored=mirror_stats, cape=cst, pose=pose_stats, clip=clip_stats,
                    **({} if glow_stats is None else dict(glow=glow_stats)),
                    char_alpha_ref=CAPE_AREF_GL,
                    render_args=f"-s {pl['s']:.4f} -yaw {pl['yaw']:.2f} -x {pl['x']:.2f} -y {pl['y']:.2f} -z {pl['z']:.2f}",
