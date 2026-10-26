@@ -208,6 +208,12 @@ Read this first instead of re-deriving. Review images: notes/review/ (README exp
   LAST to binding.json (how="mirror"; readers expecting the plain decode skip them: bind_ref,
   export_cerberus). Legs |d|/SSIM: hero 5.64/0.828 -> 5.61/0.830, 185138 8.98/0.750 -> 8.81/0.762.
   Dan (review 60): "may be missing some additional textures near the top of the legs".
+- Top of the legs (2026-10-26, review 61): the unmatched dump tris over hips/groin/upper thighs
+  were all crotch/inner-hip mirror cases (decode has them on bone 82 or 81+82 only). mirror_plan
+  also takes pelvis/central + leg tris (central vertices mirror onto their own bone) and
+  near-midline tris when the dump draws both sides; only under bone 81 (RELAX_ROOT; on torso/mantle
+  bones 5, 34-37, 67-70 it would also fire, not checked). +8-11 tris per dump. Visible unmatched
+  hip tris: hero 7->4, 185126 1->0, 185138 7->3. No missing CLUTs or props there.
 
 ## Room
 - out/ is gitignored. Rebuild (in native/assets/models, run -I):

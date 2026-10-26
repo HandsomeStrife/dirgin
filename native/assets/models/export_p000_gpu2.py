@@ -360,7 +360,7 @@ def main():
     for t0, vs in dtris:
         dump_x[tri_sig([v[1] for v in vs])].append(
             float(world_to_model(np.mean([v[0] for v in vs], 0)[None], pl, piv)[0][0]))
-    mplan = PZ.mirror_plan(V, tris, lambda t: tri_sig(uvn(t)), vb0, mbone, dump_x, Wm)
+    mplan = PZ.mirror_plan(V, tris, lambda t: tri_sig(uvn(t)), vb0, mbone, dump_x, Wm, sk['parent'])
     V, N, mtris, mvb = PZ.apply_mirror(V, N, tris, mplan, vb0, mbone, Wm, Wm)
     tris = tris + mtris; tri_tex0 = tri_tex0 + [tri_tex0[i] for i in mplan]
     how = how + ['mirror'] * len(mtris)

@@ -241,28 +241,50 @@ def mirror_bones(Wm, tol=1e-3):
     return out
 
 
-def mirror_plan(V, tris, sig, vbone, mbone, dump_x, Wm):
-    """Indices of tris to mirror. tris[i] qualifies when its vertices share one bone b with a
-    mirror bone, none of our tris with the same UV triple sits on the mirror bone, and the
-    dump has a copy of that UV triple clearly on the mirror bone's side (model x).
-    sig(t) -> UV-triple key; dump_x: {key: [model x of each dump copy]}."""
+RELAX_ROOT = 81       # the near-midline / central-bone mirror rules apply only to this bone
+                      # (pelvis) and its descendants: the hips and legs. Elsewhere (torso,
+                      # mantle bones 5, 34-37, 67-70) they would also fire; not checked.
+
+
+def mirror_plan(V, tris, sig, vbone, mbone, dump_x, Wm, parent=None):
+    """Indices of tris to mirror. A tri qualifies when its bones are lateral (with a mirror
+    bone, all on one side) plus optionally central ones (origin x = 0, e.g. pelvis 81,
+    mirrored onto themselves), none of our tris with the same UV triple has the mirrored
+    bone set, and the dump shows a copy on the mirror side: either clearly across
+    (x beyond MIRROR_MARGIN on the mirror bone's side), or, near the midline (crotch),
+    nearer the tri's mirrored x than its own x while another dump copy is nearer its own
+    x (so the dump draws BOTH sides). sig(t) -> UV-triple key;
+    dump_x: {key: [model x of each dump copy]}."""
+    central = {b for b in range(len(Wm)) if abs(np.asarray(Wm[b])[0, 3]) < 1e-3}
+    def under(b):
+        while b is not None and b >= 0:
+            if b == RELAX_ROOT:
+                return True
+            b = parent[b] if parent is not None and b < len(parent) else -1
+        return False
     on = collections.defaultdict(set)
     for t in tris:
-        bs = {vbone.get(v) for v in t[:3]}
-        if len(bs) == 1:
-            on[sig(t)] |= bs
+        on[sig(t)].add(frozenset(vbone.get(v) for v in t[:3]))
     plan = []
     for i, t in enumerate(tris):
         bs = {vbone.get(v) for v in t[:3]}
-        if len(bs) != 1:
+        lat = [b for b in bs if b in mbone]
+        relax = all(under(b) for b in bs)
+        if not lat or (not relax and len(bs) != 1) or \
+                any(b not in mbone and (b not in central or not relax) for b in bs):
             continue
-        b = bs.pop()
-        if b not in mbone:
+        sides = {np.sign(np.asarray(Wm[b])[0, 3]) for b in lat}
+        if len(sides) != 1:
             continue
-        side = np.sign(np.asarray(Wm[b])[0, 3]); k = sig(t)
-        if mbone[b] in on[k]:
+        side = sides.pop(); k = sig(t)
+        if frozenset(mbone.get(b, b) for b in bs) in on[k]:
             continue
-        if any(dx * side < -MIRROR_MARGIN for dx in dump_x.get(k, ())):
+        dxs = dump_x.get(k, ())
+        if any(dx * side < -MIRROR_MARGIN for dx in dxs):
+            plan.append(i); continue
+        x = float(np.mean([V[v][0] for v in t[:3]]))
+        if relax and abs(x) > 1e-3 and any(abs(dx + x) < abs(dx - x) for dx in dxs) \
+                and any(abs(dx - x) < abs(dx + x) for dx in dxs):
             plan.append(i)
     return plan
 
@@ -277,7 +299,7 @@ def apply_mirror(V, N, tris, plan, vbone, mbone, Wm, W):
     base = len(V)
     def mv(v):
         if v not in newv:
-            b = vbone[v]; m = mbone[b]
+            b = vbone[v]; m = mbone.get(b, b)              # central bones mirror onto themselves
             loc = np.linalg.solve(W[b], np.r_[V[v], 1.0])                 # b-local
             bind = F @ (Wm[b] @ loc)[:3]                                  # mirrored, bind
             lm = np.linalg.solve(Wm[m], np.r_[bind, 1.0])
