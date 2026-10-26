@@ -382,6 +382,8 @@ Read this first instead of re-deriving. Review images: notes/review/ (README exp
 - Suspect: 06800912/171 is pf-bound to the sky texture 0680ff35 (small ABE object, off-screen);
   chain fill spreads it to 168-170. Unverified.
 
+- Browser client (2026-10-26, workers 0046 + 0048, review 67/70): `python3 native/assets/models/export_web_room.py` writes `native/web/data/` (gitignored via `native/web/data/**`): scene.json, float32 12-float .bin meshes, raw .rgba textures (formats in the script docstring). Viewer `native/web/index.html` + `main.js`: three.js 0.169.0 (jsdelivr), RawShaderMaterial copying SHADE_FS (MODULATE x2, per-vertex screen-linear fog, two-pass GS ATE, native draw order). Served by `/srv/tools/dirge-play` (nginx; port 8796 on LAN + tailnet only). Hero camera vs render_scene_textured -colscale 1.0 -charprelit -charatest 0.77734: mean |d| 0.15, SSIM 0.998. The HUD shows eye/dir/yaw/pitch; `?cam=ex,ey,ez,yaw,pitch` restores a view. The Report button (R; `report.js`) saves to /srv/shared/dirge-port/reports/<id>/ (marked.png, plain.png, meta.json with the camera, box, note and GPU/ray picks of draw + triangle). The backend is the dirge-report container (report_api.py, application/json only), behind nginx at /api/report. Flicker: unbound room_g41 is coplanar with textured walls (g19/g04/g11/g25) and z-fights (natively too, just outside the hero view); main.js pushes untextured draws back with polygon offset (1, 4), and `?zprio=0` turns it off. Remaining: overlapping same-texture triangles within one group (~0.03% of the screen).
+
 ## Open
 - Post foot vs cape (review 40, left on purpose by Dan): the dump draws the near post
   (54050-54113) before the cape, and the hem triangles over its foot (= ours exactly, texel

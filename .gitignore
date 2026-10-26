@@ -35,6 +35,10 @@
 !README*
 !LICENSE*
 !.gitignore
+# browser client source (native/web; its data/ is re-excluded in section 5)
+!native/web/*.html
+!native/web/*.js
+!native/web/*.mjs
 
 # ----------------------------------------------------------------------------
 # 4) Re-exclude DERIVATIVES OF THE COPYRIGHTED GAME BINARY (never public):
@@ -62,6 +66,7 @@ downloads-ref/**
 native/assets/models/out/**
 native/assets/models/doc_model/**
 native/movie/out/**
+native/web/data/**
 
 # ----------------------------------------------------------------------------
 # 6) Re-exclude BUILD TREES + generated build files the whitelist re-admits
