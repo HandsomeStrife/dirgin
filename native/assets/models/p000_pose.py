@@ -18,6 +18,9 @@ with the same candidate set), each vertex keeps its bind-pose side of it, and th
 is carried into the frame by the vertex's nearest central ancestor bone (pelvis 81, chest 3).
 Candidates on the other side are dropped when the vertex is clearly off the midline and
 some candidate is on its own side; for limb bones, also when all of them are well across.
+On central bones (head, torso) a vertex whose own-side copy was not drawn keeps only the
+candidates nearer its prediction than its mirrored prediction (MIRROR_CENTRAL): without
+it the face halves (L01 g3/g4, bone 5) collapsed onto one side at the mouth/collar.
 """
 import collections
 import numpy as np
@@ -37,6 +40,12 @@ STRICT_MARGIN = 0.5  # ... by more than this. The other copy of a mirrored UV is
                    # Walking feet land near the midline, so near-midline candidates are kept:
                    # 0.1/0.3 dropped real left-shin points (fringe on bone 84); 0.5 still does
                    # a little in 185126. Central bones (torso) are never strict-filtered.
+MIRROR_CENTRAL = True  # central-bone vertex with only across-midline candidates: drop those
+                   # nearer its mirrored prediction than its own (frame 163235: the head's
+                   # two face halves (L01 g3/g4) collapsed onto one side at the mouth, TOL is
+                   # wider than the face). Not on the first pass (bind prediction).
+MIRROR_MIN = 0.03  # ... applied from this |bind offset| (the mirror test needs no side sign;
+                   # face pairs at 0.05-0.1 collapsed too).
 CENTRAL = 0.3      # a bone is "central" (carries the midline plane) if its vertices' mean
                    # bind offset is below this: 3,4,5,9,10,16,32,33,47,81; next is 91 at 0.5.
 
@@ -155,15 +164,26 @@ def pose(placed, cands, vbone, parent, iters=4, src=None):
         for v, cs in cands.items():
             if v not in vbone or not cs:
                 continue
-            if mid is not None and abs(vside[v]) > SIDE_MARGIN and ref[vbone[v]] is not None and len(cs) > 1:
+            cen = vbone[v] in central
+            if mid is not None and ref[vbone[v]] is not None and \
+                    abs(vside[v]) > (MIRROR_MIN if cen and MIRROR_CENTRAL else SIDE_MARGIN):
                 Rr, tr = T[ref[vbone[v]]]
                 nr = Rr @ n; hr = h + nr @ tr                     # plane moved by the ref bone
                 same = [c for c in cs if (c @ nr - hr) * vside[v] > 0]
-                if same and len(same) < len(cs):
+                if abs(vside[v]) > SIDE_MARGIN and same and len(same) < len(cs):
                     side_dropped += 1; cs = same
-                elif STRICT and not same and vbone[v] not in central and \
+                elif STRICT and not same and vbone[v] not in central and len(cs) > 1 and \
                         all(abs(c @ nr - hr) > STRICT_MARGIN for c in cs):
                     side_dropped += 1; continue
+                elif MIRROR_CENTRAL and cen and it > 0:
+                    # central bone (face, torso), side not settled above: keep a candidate
+                    # only if it is nearer the vertex's own prediction than its mirror image
+                    p = pred(v); pm = p - 2 * (p @ nr - hr) * nr
+                    keep = [c for c in cs if np.linalg.norm(c - p) <= np.linalg.norm(c - pm)]
+                    if len(keep) < len(cs):
+                        side_dropped += 1
+                        if not keep: continue
+                        cs = keep
             p = pred(v); d = [np.linalg.norm(c - p) for c in cs]; k = int(np.argmin(d))
             if it == 0 or d[k] < TOL * (3 if it == 1 else 1.5):
                 pick[v] = cs[k]
