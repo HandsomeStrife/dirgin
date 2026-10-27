@@ -19,16 +19,17 @@ triangles fall back to their group's majority TEX0.
 Run: python3 -I render_p000_bound.py <dump.bin> <outdir>
 """
 import sys, os, collections
+_REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".."))  # repo root
 import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, "/srv/games/dirge-port/tools/gsdump/src")
+sys.path.insert(0, _REPO + "/tools/gsdump/src")
 import render_p005 as P
 from gsparse import read_header
 from gsrender2 import build, TexCache, tex0_fields
 from char_dumpbind import tri_sig
 
-CONT = "/srv/games/dirge-port/extract/_KEL/noPath/07700001.bin"
-TEXC = "/srv/games/dirge-port/extract/_KEL/noPath/07700002.bin"
+CONT = _REPO + "/extract/_KEL/noPath/07700001.bin"
+TEXC = _REPO + "/extract/_KEL/noPath/07700002.bin"
 QMIN = 1e-6
 
 def dump_sig2tex0(dumppath):

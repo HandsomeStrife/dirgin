@@ -16,9 +16,10 @@ runtime texture.
 Run: python3 -I char_dumpbind.py <dump.bin> [outdir]
 """
 import sys, os, json, math, collections
+_REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".."))  # repo root
 import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, "/srv/games/dirge-port/tools/gsdump/src")
+sys.path.insert(0, _REPO + "/tools/gsdump/src")
 import render_p005 as P
 from gsparse import read_header
 from gsrender2 import build, tex0_fields

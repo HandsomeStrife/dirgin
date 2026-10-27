@@ -58,11 +58,12 @@ Trusted inputs only: reads the raw BMD bytes directly (bounds-checked, python3 -
 and shells out to the trusted `dtex` decoder for textures.
 """
 import os, sys, struct, glob, subprocess, math, array, json
+_REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".."))  # repo root
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 OUT  = os.path.join(HERE, "out")
-DTEX = "/srv/games/dirge-port/native/assets/textures/dtex"
-EXTRACT = "/srv/games/dirge-port/extract/_KEL/noPath"
+DTEX = _REPO + "/native/assets/textures/dtex"
+EXTRACT = _REPO + "/extract/_KEL/noPath"
 
 MESH_MAGIC = b"DMSH"
 MESH_VERSION = 1

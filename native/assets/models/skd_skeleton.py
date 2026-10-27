@@ -39,6 +39,8 @@ symmetric upright humanoid (arms/legs/spine/head) -- see
 native/renderer/out/skel_e000_*.png.
 """
 import struct, math, json, sys
+import os
+_REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".."))  # repo root
 
 SKD_MAGIC = 0x00324b53  # "SK2\0"
 BONE_STRIDE = 0xd0
@@ -109,7 +111,7 @@ def load_skeleton(path, trans_scale=TRANS_SCALE):
 
 if __name__ == "__main__":
     path = sys.argv[1] if len(sys.argv) > 1 else \
-        "/srv/games/dirge-port/extract/_KEL/noPath/07650001.bin"
+        _REPO + "/extract/_KEL/noPath/07650001.bin"
     sk = load_skeleton(path)
     js = sys.argv[2] if len(sys.argv) > 2 else "out/skeleton_bind.json"
     import os

@@ -43,12 +43,13 @@ Run: python3 -I export_cerberus.py <dump.bin> <p000_export_dir> <outdir> [--cam 
      (--cam: the capture's _cam.json; default the hero camera)
 """
 import sys, os, json, struct, array, collections, glob, subprocess, tempfile
+_REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".."))  # repo root
 import numpy as np
 from PIL import Image
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
-sys.path.insert(0, "/srv/games/dirge-port/tools/gsdump/src")
+sys.path.insert(0, _REPO + "/tools/gsdump/src")
 import render_p005 as P
 import char_dumpbind
 char_dumpbind.ROUND = 4096                      # native UV grid (see export_p000_gpu2.py)
@@ -60,10 +61,10 @@ import p000_cape as C
 from gsparse import read_header
 from gsrender2 import build, tex0_fields, TexCache
 
-KEL = "/srv/games/dirge-port/extract/_KEL/noPath/"
+KEL = _REPO + "/extract/_KEL/noPath/"
 GUN_CONT = KEL + "07770581.bin"
 GUN_TEX = KEL + "07770582.bin"
-DTEX = "/srv/games/dirge-port/native/assets/textures/dtex"
+DTEX = _REPO + "/native/assets/textures/dtex"
 WEAPON_SLOT = 0
 MARKER = WEAPON_SLOT + 0xf                       # FUN_00316270
 UVQ = 4096

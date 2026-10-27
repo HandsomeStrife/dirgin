@@ -3,6 +3,8 @@
 three.js web viewer, plus a JSON sidecar. Output is game-derived: write it only into a
 gitignored directory (default native/web/data/vincent/, checked with git check-ignore).
 
+  <dump.bin> may be --no-dump: the reference run is export_p000_gpu2.py --no-dump (game files
+  only; same glb/json bytes, see that script). This is how tools/byo/build_web.sh runs it.
   export:  python3 -I export_web_vincent.py export <dump.bin> [--out DIR] [--mutate-parents]
                                                    [--clips all|NAME,NAME,...] [--sets c,h]
   verify:  python3 -I export_web_vincent.py verify <dump.bin> [--out DIR] [--glb FILE]
@@ -10,6 +12,9 @@ gitignored directory (default native/web/data/vincent/, checked with git check-i
            A clip that isn't in vincent.json is looked up in the vincent_<pack>.json sidecars;
            it is then skinned with vincent.glb's mesh and the pack glb's tracks.
   catalogue: python3 -I export_web_vincent.py catalogue [--out DIR]   -> DIR/motions.json
+  cloth:   python3 -I export_web_vincent.py cloth [--out DIR]       -> DIR/cloth.json
+           The cape cloth data for native/web/cloth.js, from the game files only (no dump).
+           Also run at the end of every export without --pack.
 
   --clips: default h_st,h_wk,h_rn (byte-identical to the original 3-clip export). 'all' =
   every clip of the clip sets in --sets (default c,h = 07700000 common + 0770000b handgun;
@@ -47,19 +52,20 @@ How it is built
   one-shots end on their last key (nf - 1), so they hold their last pose.
 """
 import sys, os, json, struct, subprocess, io
+_REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".."))  # repo root
 import numpy as np
 from PIL import Image
 HERE = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, HERE); sys.path.insert(0, "/srv/games/dirge-port/tools/gsdump/src")
+sys.path.insert(0, HERE); sys.path.insert(0, _REPO + "/tools/gsdump/src")
 import render_p005 as P
 import anim_rot as AR
 from render_p000_bound import CONT, TEXC
 
 REPO = os.path.abspath(os.path.join(HERE, "../../.."))
 DEFAULT_OUT = os.path.join(REPO, "native/web/data/vincent")
-CLIP_CONT = "/srv/games/dirge-port/extract/_KEL/noPath/0770000b.bin"   # h_* (handgun) clips
+CLIP_CONT = _REPO + "/extract/_KEL/noPath/0770000b.bin"   # h_* (handgun) clips
 CLIPS = ["h_st", "h_wk", "h_rn"]
-NOPATH = "/srv/games/dirge-port/extract/_KEL/noPath/"
+NOPATH = _REPO + "/extract/_KEL/noPath/"
 CLIP_SETS = {'c': ['07700000'], 'h': ['0770000b'], 'm': ['0770000c'], 'r': ['0770000d'],
              'ev': ['0770000f', '07700011']}            # p000's motion containers (0a = copy of 00)
 DEFAULT_SETS = ['c', 'h']
@@ -224,7 +230,10 @@ def qmat(q):
 
 
 def run_ref(dump, outdir, clip, frame, cont=None):
-    cmd = [sys.executable, "-I", os.path.join(HERE, "export_p000_gpu2.py"), dump, outdir,
+    # dump None (--no-dump): export_p000_gpu2 --no-dump; the mesh/atlas/runs this script reads
+    # are byte-identical to the dump run (file binding), only binding/placement.json differ
+    cmd = [sys.executable, "-I", os.path.join(HERE, "export_p000_gpu2.py")] + \
+          ([dump] if dump else ["--no-dump"]) + [outdir,
            "--clip", clip, "--frame", str(frame), "--in-place"] + (["--clip-cont", cont] if cont else [])
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0: sys.exit(r.stdout[-2000:] + r.stderr[-2000:])
@@ -510,6 +519,79 @@ def export(dump, out, mutate_parents=False, clip_spec=None, sets=DEFAULT_SETS, p
               [round(x, 3) for x in toY(d['root'][-1])])
 
 
+# ---------------------------------------------------------------- cloth
+def cloth(out):
+    """OUT/cloth.json: everything native/web/cloth.js reads, from the game files only (no
+    dump). Worker 0073's generator (gen_cloth_json.py), moved here as a step. Reads
+    p000_cloth.Cape (07700001.bin cape block 0x19f70), the skeleton's world_bind, the body
+    decode (for the glb's first cape triangle) and each clip's cloth-window bytes."""
+    import p000_cloth as CL
+    p = os.path.join(out, 'cloth.json')
+    # the output file itself (check_ignored's probe.glb is ignored anywhere by *.glb)
+    if subprocess.run(["git", "-C", REPO, "check-ignore", "-q", p]).returncode != 0:
+        sys.exit(f"REFUSING: {p} is not gitignored (game-derived output)")
+    os.makedirs(out, exist_ok=True)
+    cp = CL.Cape()
+    buf, NB, sk = load()
+    Wb = [np.array(m, float) for m in sk['world_bind']]
+    g = cp.groups[0]
+    # skin records (FUN_005b06d0): per influence the vertex, bone, weight, bone-local xyz, and
+    # the same point in bind model space (= glb POSITION space) for three.js's skinning formula
+    # q in plain floats with an exact fused multiply-add, in the order OpenBLAS's gemv used
+    # under numpy 2.2.6 when 0073 wrote the first cloth.json (all 552 floats match). numpy's
+    # own matmul differs in the last bit between versions (1.21 vs 2.2), and the file must
+    # not depend on which numpy runs it.
+    from fractions import Fraction as Fr
+    fma = lambda a, b, c: float(Fr(a) * Fr(b) + Fr(c))
+    skin = []
+    for v, b, w, loc, _n in cp.skin:
+        M = Wb[b].tolist(); l = [float(x) for x in loc]
+        q = [fma(M[r][2], l[2], fma(M[r][0], l[0], M[r][1] * l[1])) + M[r][3] for r in range(3)]
+        skin.append([int(v), int(b), float(w), *l, *q])
+    # cloth group (FUN_005b0d30 / b38 / 09f8 / 0c50); indices are cloth-buffer vertex numbers
+    lst = [int(v) | (0x8000 if pin else 0) for v, pin in zip(g['verts'], g['pinned'])]
+    # constraints as the game stores them (group +0x20, 8 bytes): u8 a, u8 b = indices into
+    # the vertex list (not vertex numbers), f32 rest length
+    Pc = CL.CAPE_BLOCK + 0x10; cb = cp.buf
+    G = Pc + CL._u32(cb, Pc + CL._u32(cb, Pc + 0x24))
+    cons = [[cb[G + 0x20 + 8 * k], cb[G + 0x21 + 8 * k], CL._f32(cb, G + 0x24 + 8 * k)]
+            for k in range(CL._s16(cb, G + 0x12))]
+    assert [lst[a] & 0x7fff for a, _x, _r in cons] == [int(x) for x in g['ca']]
+    assert [lst[b] & 0x7fff for _x, b, _r in cons] == [int(x) for x in g['cb']]
+    # glb cape corners -> cloth vertex (export(): cape corners last, cp.tris order)
+    cvi = [int(v) for vs, _u, _c in cp.tris for v in vs]
+    # the glb's first cape triangle = the body triangle count (export(): body first)
+    first = len(body_skin(buf, NB, sk)[3])
+    vj = os.path.join(out, 'vincent.json')
+    if os.path.exists(vj):
+        assert json.load(open(vj))['body_triangles'] == first, "vincent.json is from another body decode"
+    # clip cloth windows (FUN_005a95f0): flag 0 -> window cleared, 2 -> 2 x u16, else unchanged
+    windows = {}
+    for st, cids in CLIP_SETS.items():
+        for cid in cids:
+            path = NOPATH + cid + '.bin'
+            if not os.path.exists(path):
+                continue
+            b = open(path, 'rb').read()
+            for name, _f in list_clips(path):
+                if name in windows:
+                    continue
+                _cb, CP = find_clip(path, name)
+                flag = b[CP + 0x19]; n16 = struct.unpack_from('<H', b, CP + 0x1a)[0]
+                windows[name] = [int(flag), int(n16)]
+    side = dict(
+        note='cloth.js data (worker 0073 generator; game-derived, never commit). See cloth.js header.',
+        N=int(cp.N), mesh_scale=float(cp.mesh_scale),
+        group=dict(gravity=float(g['gravity']), blend=float(g['blend']), damping=float(g['damping']),
+                   list=lst, constraints=cons),
+        skin_fields='vertex, bone, weight, local x y z (x meshScale/4096), bind-model x y z',
+        skin=skin, corner_vertex=cvi, cape_first_tri=int(first),
+        clip_windows=windows, clip_windows_fields='[flag +0x19, u16 +0x1a]; window = 2 x u16 when flag == 2')
+    json.dump(side, open(p, 'w'), separators=(',', ':'))
+    print("wrote", p, os.path.getsize(p), 'bytes;', len(skin), 'influences;', len(cons), 'constraints;',
+          sum(1 for x in lst if x & 0x8000), 'pinned;', len(windows), 'clips')
+
+
 # ---------------------------------------------------------------- verify
 def skin_glb(path, clip, frame, anim_path=None):
     """Skin the glb's own data at an integer clip frame (keys sit on frames), model space.
@@ -710,8 +792,13 @@ def main(argv):
     if argv[:1] == ['catalogue']:
         out = DEFAULT_OUT if '--out' not in argv else os.path.abspath(argv[argv.index('--out') + 1])
         return catalogue(out)
+    if argv[:1] == ['cloth']:
+        out = DEFAULT_OUT if '--out' not in argv else os.path.abspath(argv[argv.index('--out') + 1])
+        return cloth(out)
     if len(argv) < 2 or argv[0] not in ('export', 'verify'): sys.exit(__doc__)
-    mode, dump = argv[0], argv[1]; out = DEFAULT_OUT; glb = None; clip = 'h_wk'; frames = [0, 13, 27]
+    mode, dump = argv[0], argv[1]; out = DEFAULT_OUT
+    if dump == '--no-dump': dump = None          # everything from the game files (tools/byo)
+    glb = None; clip = 'h_wk'; frames = [0, 13, 27]
     mutate = False; i = 2; clip_spec = None; sets = DEFAULT_SETS; pack = None
     while i < len(argv):
         k = argv[i]
@@ -724,7 +811,9 @@ def main(argv):
         elif k == '--sets': sets = argv[i + 1].split(','); i += 2
         elif k == '--pack': pack = argv[i + 1]; i += 2
         else: sys.exit(f"unknown option {k}")
-    if mode == 'export': export(dump, out, mutate, clip_spec, sets, pack)
+    if mode == 'export':
+        export(dump, out, mutate, clip_spec, sets, pack)
+        if pack is None: cloth(out)
     else: verify(dump, out, glb or os.path.join(out, 'vincent.glb'), clip, frames)
 
 

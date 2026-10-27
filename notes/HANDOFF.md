@@ -407,6 +407,13 @@ Read this first instead of re-deriving. Review images: notes/review/ (README exp
 - Fidelity audit (worker 0070): notes/fidelity-audit.md, 54 behaviours: 15 decoded, 4 data, 8 guess, 24 invented, 3 missing. Player path: mode dispatch FUN_0034c388 (char+0x1c8: 10 walk, 0xb air, 0xc physics body -> FUN_003590c8 -> FUN_00357d48 -> FUN_0035a440); intent FUN_005747a0 -> FUN_005786e8 -> FUN_00578748 (move) and FUN_00579570 (weapon); input FUN_00333150/FUN_003320c0. z128's jump takes the physics-body branch of FUN_00575768 (gravity ~0.065, height from cfg+0xc4, air control in FUN_00578748), so jump.js's walk-mode values are wrong for z128.
 - Worker 0065's shoot-layer changes (aim layer, overlays, weapon values) were NOT committed: mostly invented. They are saved as /srv/shared/dirge-port/patches/w0065-shoot-layer.patch, and the decoded parts get re-applied via the weapon state machine translation (FUN_00579570).
 
+- **Bring-your-own-ISO build** (worker 0071): `tools/byo/build_web.sh /path/to/your.iso` builds
+  native/web/data from a user's own PAL disc (no GS dumps, no PCSX2); `tools/byo/serve.sh` serves it
+  on 127.0.0.1. User docs: docs/BROWSER.md; instructions to hand an agent: docs/AGENT-SETUP.md.
+  The model scripts take repo-relative paths and a `--no-dump` path. Differences from the capture
+  build: no sky, and Vincent's placement is a GUESS (`NODUMP_PLACEMENT`, 3.5% larger); both listed
+  in notes/fidelity-audit.md. The build runs `python3 -I` (a pip --user install is not seen).
+
 ## Open
 - Post foot vs cape (review 40, left on purpose by Dan): the dump draws the near post
   (54050-54113) before the cape, and the hem triangles over its foot (= ours exactly, texel

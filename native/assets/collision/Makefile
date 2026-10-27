@@ -8,7 +8,7 @@ OBJS     = main.o cid.o obj_export.o
 WEB      = cidweb
 
 # Real samples (adjust KEL if your extract lives elsewhere)
-KEL     ?= /srv/games/dirge-port/extract/_KEL/noPath
+KEL     ?= ../../../extract/_KEL/noPath
 OUT      = out
 
 .PHONY: all clean check validate z128web
@@ -21,7 +21,7 @@ $(WEB): web_export.o cid.o
 # z128 (FileCode 0680, sea of flames) -> browser collision
 z128web: $(WEB)
 	@mkdir -p $(OUT)/web
-	./$(WEB) $(OUT)/web/z128_collision.bin $(KEL)/0680?[0-9a-c]11.bin
+	./$(WEB) $(OUT)/web/z128_collision.bin "$(KEL)"/0680?[0-9a-c]11.bin
 
 $(BIN): $(OBJS)
 	$(CC) $(CFLAGS) -o $@ $(OBJS) -lm

@@ -59,6 +59,7 @@ CLI:
   p000_cloth.py run <clip> <first> <last> <out.npz> [--prev-clip NAME --prev-frame F]
 """
 import sys, os, struct, json, collections
+_REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".."))  # repo root
 import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -67,8 +68,8 @@ import render_skinned as R
 import skd_skeleton as SK
 import anim_rot as AR
 
-CONT = "/srv/games/dirge-port/extract/_KEL/noPath/07700001.bin"
-CLIP_CONT = "/srv/games/dirge-port/extract/_KEL/noPath/0770000b.bin"
+CONT = _REPO + "/extract/_KEL/noPath/07700001.bin"
+CLIP_CONT = _REPO + "/extract/_KEL/noPath/0770000b.bin"
 CAPE_BLOCK = 0x19f70
 CONSTRAINT_ITERS = 4          # FUN_005b0d30: iVar4 = 3 .. 0
 CONSTRAINT_GAIN = 0.8         # FUN_005b09f8: 0x3f4ccccd
@@ -260,7 +261,7 @@ def run_clip(cape, sk, clip, frames, cont=CLIP_CONT, in_place=False, prev=None, 
 
 def dump_cape_by_uv(dumppath, quant=256):
     """Last dump frame's cape (tbp 0x2e68) corners: {uv key: world position}."""
-    sys.path.insert(0, "/srv/games/dirge-port/tools/gsdump/src")
+    sys.path.insert(0, _REPO + "/tools/gsdump/src")
     import p000_cape as PC
     from gsparse import read_header
     from gsrender2 import build, tex0_fields

@@ -44,13 +44,23 @@ hero-frame GS dump.
   fit_dump_camera.py) and Vincent's TBPs in that dump: body_tbp, cape_tbp, glow_tbp
   (VRAM layout differs per capture). Without it: the hero camera/TBPs (unchanged).
 
+- No dump (--no-dump, needs --clip; the dump-free build in tools/byo): everything comes from
+  the game files. Textures/CLUTs from the file binding (the default anyway), body pose from
+  the clip, cape = its skinned target, cape UVs/colours from the file block. Skipped: the
+  dump binding and its stats, the dump pose reference, the glow pass. The placement can't
+  be solved without a dump, so render_args uses NODUMP_PLACEMENT (GUESS) or --placement.
+  The mesh, atlas and draw runs are byte-identical to the dump run with the same --clip
+  (the file binding does not read the dump's textures); binding.json/placement.json differ.
+
 Run: python3 -I export_p000_gpu2.py <dump.bin> <outdir> [--clip h_swtch --frame 58]
+     python3 -I export_p000_gpu2.py --no-dump <outdir> --clip h_st --frame 91 [--placement s,yaw,x,y,z]
 """
 import sys, os, struct, array, collections, json
+_REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".."))  # repo root
 import numpy as np
 from PIL import Image
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, "/srv/games/dirge-port/tools/gsdump/src")
+sys.path.insert(0, _REPO + "/tools/gsdump/src")
 import render_p005 as P
 from gsrender2 import TexCache, tex0_fields
 import char_dumpbind
@@ -64,7 +74,17 @@ from render_p000_bound import CONT, TEXC, dump_sig2tex0
 import p000_cape as C
 import anim_rot as AR
 
-CLIP_CONT = "/srv/games/dirge-port/extract/_KEL/noPath/0770000b.bin"   # h_* (handgun) clips
+CLIP_CONT = _REPO + "/extract/_KEL/noPath/0770000b.bin"   # h_* (handgun) clips
+
+# GUESS: Vincent's world placement without a dump (--no-dump) (not decoded; see docs/BROWSER.md
+# "Known limitations"). These are the numbers solve_placement gives for `--clip h_st --frame 91`
+# against the hero dump 163235 (HANDOFF: the hero frame is h_st f91). The game's own start
+# position is not decoded (lead: stage 06800001 section 1, record 0 is named 'p_Vin').
+# It reaches gameplay: web scene.json char.s scales Vincent in play.js (size, and today's
+# speed), so a --no-dump build plays 3.5% larger than the dump build (s 0.9625). Listed
+# in notes/fidelity-audit.md.
+NODUMP_PLACEMENT = dict(s=0.9960733921600916, yaw=-170.97349547051755, x=-1395.6337101573731,
+                        y=-98.68731132760155, z=-1110.280308356314)
 
 UVRES = 128                     # UV-coverage map resolution (texels of a 256 atlas / 2)
 UVMAP_MIN_SHARE = 0.6           # a CLUT must own >=60% of the sampled coverage
@@ -203,14 +223,16 @@ def clip_pose_cape(args, sk, cbuf, CP, trs, cape, pl, piv):
         st = dict(mode='skinned')
     tm = [P[list(v)] for v, _u, _c in cp.tris]
     # vs the dump-posed cape (world units; dump corners are UV-matched, some interpolated)
-    D = np.concatenate([world_to_model(np.array(ws), pl, piv) for ws, _u, _c in cape])
-    st['vs_dump_cape'] = err_stats(np.concatenate(tm) * pl['s'], D * pl['s'])
+    if cape and cape[0][0] is not None:          # no dump (--no-dump): no dump cape to compare
+        D = np.concatenate([world_to_model(np.array(ws), pl, piv) for ws, _u, _c in cape])
+        st['vs_dump_cape'] = err_stats(np.concatenate(tm) * pl['s'], D * pl['s'])
     return tm, st
 
 
 def parse_args(argv):
     a = dict(dump=None, out=None, clip=None, frame=0.0, cont=CLIP_CONT, in_place=False, no_cape=False,
-             cape_flat=False, cape_cloth=False, dump_camera=None, bind_from_file=True)
+             cape_flat=False, cape_cloth=False, dump_camera=None, bind_from_file=True,
+             no_dump=False, placement=None)
     pos = []; i = 0
     while i < len(argv):
         k = argv[i]
@@ -224,8 +246,21 @@ def parse_args(argv):
         elif k == '--dump-camera': a['dump_camera'] = argv[i + 1]; i += 2
         elif k == '--bind-from-file': a['bind_from_file'] = True; i += 1        # the default
         elif k == '--bind-from-dump': a['bind_from_file'] = False; i += 1
+        elif k == '--no-dump': a['no_dump'] = True; i += 1
+        elif k == '--placement':
+            v = [float(x) for x in argv[i + 1].split(',')]
+            if len(v) != 5: sys.exit("--placement wants s,yaw,x,y,z")
+            a['placement'] = dict(zip(('s', 'yaw', 'x', 'y', 'z'), v)); i += 2
         elif k.startswith('--'): sys.exit(f"unknown option {k}")
         else: pos.append(k); i += 1
+    if a['no_dump']:
+        if len(pos) != 1: sys.exit(__doc__)
+        if not a['clip']: sys.exit("--no-dump needs --clip (the pose comes from a clip)")
+        if not a['bind_from_file']: sys.exit("--no-dump binds from the files; --bind-from-dump needs a dump")
+        if a['dump_camera'] or a['cape_cloth']: sys.exit("--no-dump: --dump-camera / --cape-cloth not supported")
+        a['out'] = pos[0]
+        return a
+    if a['placement']: sys.exit("--placement is for --no-dump (with a dump the placement is solved)")
     if len(pos) != 2: sys.exit(__doc__)
     a['dump'], a['out'] = pos
     return a
@@ -340,14 +375,15 @@ def bind_from_file(buf, NB, Wm, bc, tris, tri_tex0, how):
     def cape(cape_tex0):
         m, _fl = SM.block_material(buf, 0x19f70)          # p000_L02 cape block
         k = key(m)
-        stats['cape'] = dict(material=m, agrees_with_dump=fkey(tex0_fields(cape_tex0)) == fkey(mats[m]['fields']))
+        stats['cape'] = dict(material=m, agrees_with_dump=None if cape_tex0 is None else
+                             fkey(tex0_fields(cape_tex0)) == fkey(mats[m]['fields']))
         return k
 
     def textures(tc):
         cache = {}
         class FileTex:
             def get(self, x):
-                if x not in key_mat: return tc.get(x)
+                if x not in key_mat: return tc.get(x) if tc is not None else None
                 if x not in cache:
                     rgba = SM.texture_rgba(TEXC, mats[key_mat[x]]).astype(np.float64)
                     # dtex alpha is a*255/128; the dump (and the cape alpha code) use GS 0..128
@@ -356,7 +392,7 @@ def bind_from_file(buf, NB, Wm, bc, tris, tri_tex0, how):
                 return cache[x]
         ft = FileTex(); tst = {}
         for x, m in sorted(key_mat.items(), key=lambda kv: kv[1]):
-            a, d = ft.get(x), tc.get(x)
+            a, d = ft.get(x), (tc.get(x) if tc is not None else None)
             tst[m] = (f"{mats[m]['image_name']}+{mats[m]['name']}: "
                       + ("no dump texture" if d is None or d.shape[:2] != a.shape[:2] else
                          "max|file-dump| rgb %d a %d" % (np.abs(a[:, :, :3] - np.asarray(d[:, :, :3], float)).max(),
@@ -388,48 +424,54 @@ def main():
     tris = [tris[i] for i in sel]
     uvn = lambda t: [(t[3 + k][0] / 4096, t[3 + k][1] / 4096) for k in range(3)]
 
-    # ---- 1. exact UV-triple binding
-    sig2tex0 = dump_sig2tex0(dumppath); tc = DrawTimeTex(dumppath)
-    tri_tex0 = [sig2tex0.get(tri_sig(uvn(t))) for t in tris]
-    how = ['exact' if x is not None else None for x in tri_tex0]
-    gvote = collections.defaultdict(collections.Counter)
-    for t, x in zip(tris, tri_tex0):
-        if x is not None: gvote[t[6]][x] += 1
-    gmaj = {g: v.most_common(1)[0][0] for g, v in gvote.items()}
-    gtbp = {g: collections.Counter(tex0_fields(x)['tbp0'] for x in v.elements()).most_common(1)[0][0]
-            for g, v in gvote.items()}
+    nodump = dumppath is None
+    if nodump:
+        # no dump: no dump binding/evidence; every triangle is bound from the files below
+        tri_tex0 = [None] * len(tris); how = [None] * len(tris); tc = None; dtris = []; fvd = None
+        hc = collections.Counter(no_dump=len(tris))
+    else:
+        # ---- 1. exact UV-triple binding
+        sig2tex0 = dump_sig2tex0(dumppath); tc = DrawTimeTex(dumppath)
+        tri_tex0 = [sig2tex0.get(tri_sig(uvn(t))) for t in tris]
+        how = ['exact' if x is not None else None for x in tri_tex0]
+        gvote = collections.defaultdict(collections.Counter)
+        for t, x in zip(tris, tri_tex0):
+            if x is not None: gvote[t[6]][x] += 1
+        gmaj = {g: v.most_common(1)[0][0] for g, v in gvote.items()}
+        gtbp = {g: collections.Counter(tex0_fields(x)['tbp0'] for x in v.elements()).most_common(1)[0][0]
+                for g, v in gvote.items()}
 
-    # ---- 2. UV-coverage lookup (texture = group's dump texture, CLUT per triangle)
-    dtris = C.dump_tris(dumppath, set(gtbp.values()))
-    cov = uv_coverage(dtris)
-    for i, t in enumerate(tris):
-        if tri_tex0[i] is None and t[6] in gtbp:
-            x = uvmap_lookup(cov.get(gtbp[t[6]], {}), uvn(t))
-            if x is not None: tri_tex0[i] = x; how[i] = 'uvmap'
-    # bind_ref only matters for the dump binding: with the file binding it changes
-    # nothing but the 'how' labels (185138: mesh/atlas/glow byte-identical either way).
-    if BIND_REF and not args['bind_from_file']:
-        print("bind_ref:", apply_bind_ref(tris, tri_tex0, how, BIND_REF))
-    # ---- 3. nearest dump-bound neighbour (shared vertex, same group), BFS rounds
-    for _ in range(4):
-        byv = collections.defaultdict(list)
+        # ---- 2. UV-coverage lookup (texture = group's dump texture, CLUT per triangle)
+        dtris = C.dump_tris(dumppath, set(gtbp.values()))
+        cov = uv_coverage(dtris)
         for i, t in enumerate(tris):
-            if how[i] in ('exact', 'uvmap', 'ref_exact', 'ref_uvmap'):
-                for k in range(3): byv[t[k]].append(tri_tex0[i])
-        changed = 0
+            if tri_tex0[i] is None and t[6] in gtbp:
+                x = uvmap_lookup(cov.get(gtbp[t[6]], {}), uvn(t))
+                if x is not None: tri_tex0[i] = x; how[i] = 'uvmap'
+        # bind_ref only matters for the dump binding: with the file binding it changes
+        # nothing but the 'how' labels (185138: mesh/atlas/glow byte-identical either way).
+        if BIND_REF and not args['bind_from_file']:
+            print("bind_ref:", apply_bind_ref(tris, tri_tex0, how, BIND_REF))
+        # ---- 3. nearest dump-bound neighbour (shared vertex, same group), BFS rounds
+        for _ in range(4):
+            byv = collections.defaultdict(list)
+            for i, t in enumerate(tris):
+                if how[i] in ('exact', 'uvmap', 'ref_exact', 'ref_uvmap'):
+                    for k in range(3): byv[t[k]].append(tri_tex0[i])
+            changed = 0
+            for i, t in enumerate(tris):
+                if tri_tex0[i] is None:
+                    c = collections.Counter(x for k in range(3) for x in byv.get(t[k], []))
+                    if c: tri_tex0[i] = c.most_common(1)[0][0]; how[i] = 'neighbour'; changed += 1
+            if not changed: break
+        # ---- 4. group majority (last resort)
         for i, t in enumerate(tris):
-            if tri_tex0[i] is None:
-                c = collections.Counter(x for k in range(3) for x in byv.get(t[k], []))
-                if c: tri_tex0[i] = c.most_common(1)[0][0]; how[i] = 'neighbour'; changed += 1
-        if not changed: break
-    # ---- 4. group majority (last resort)
-    for i, t in enumerate(tris):
-        if tri_tex0[i] is None and t[6] in gmaj: tri_tex0[i] = gmaj[t[6]]; how[i] = 'group'
-    hc = collections.Counter(h or 'unbound' for h in how)
-    print("body binding per triangle:", dict(hc), "of", len(tris))
-    fvd = file_vs_dump_exact(buf, NB, Wm, bc, tris, tri_tex0, how)
-    print("file binding vs dump 'exact' triangles: %(agree)d/%(exact)d agree (%(pct)s%%)" % fvd
-          + ("" if fvd['agree'] == fvd['exact'] else "  WARNING: below 100%"))
+            if tri_tex0[i] is None and t[6] in gmaj: tri_tex0[i] = gmaj[t[6]]; how[i] = 'group'
+        hc = collections.Counter(h or 'unbound' for h in how)
+        print("body binding per triangle:", dict(hc), "of", len(tris))
+        fvd = file_vs_dump_exact(buf, NB, Wm, bc, tris, tri_tex0, how)
+        print("file binding vs dump 'exact' triangles: %(agree)d/%(exact)d agree (%(pct)s%%)" % fvd
+              + ("" if fvd['agree'] == fvd['exact'] else "  WARNING: below 100%"))
     fb = None
     if args['bind_from_file']:
         fb = bind_from_file(buf, NB, Wm, bc, tris, tri_tex0, how)
@@ -453,14 +495,19 @@ def main():
                 w = d.get(q(uv))
                 if w is not None: Ms.append(Pm[t[k]]); Ws.append(w)
         return np.array(Ms), np.array(Ws)
-    pl = solve_placement(*exact_pairs(Pn), piv)
+    pl = (dict(args['placement'] or NODUMP_PLACEMENT, guess=True) if nodump
+          else solve_placement(*exact_pairs(Pn), piv))
     print("placement:", {k: round(v, 3) if isinstance(v, float) else v for k, v in pl.items()})
 
     import p000_pose as PZ
     vb0 = PZ.vertex_bones(buf, NB, bc, gmeta)
 
     # ---- cape (block 0x19f70) posed from the dump
-    cape, cape_tex0, cst = C.posed_cape(buf, NB, dumppath)
+    if nodump:      # the file block's topology/UV/colour; positions come from the clip below
+        cape = [(None, uvs, cols) for uvs, cols in C.decode_cape_block(buf, NB)]
+        cape_tex0 = None; cst = dict(file_tris=len(cape), posed='clip (no dump)')
+    else:
+        cape, cape_tex0, cst = C.posed_cape(buf, NB, dumppath)
     print("cape:", cst)
     texsrc = tc
     if fb is not None:
@@ -492,7 +539,7 @@ def main():
 
     # ---- pose the body to this frame from the dump (p000_pose.py); POSE=0 = bind pose
     pose_stats = None; clip_stats = None; src = {}; posed = None; clip_cape = None
-    if os.environ.get('POSE', '1') != '0' or args['clip']:
+    if not nodump and (os.environ.get('POSE', '1') != '0' or args['clip']):
         yr = np.radians(pl['yaw']); cy, sy = np.cos(yr), np.sin(yr)
         Ry = np.array([[cy, 0, sy], [0, 1, 0], [-sy, 0, cy]])      # place_character's yaw
         fwd = lambda X: pl['s'] * (np.asarray(X) - piv) @ Ry.T + np.array([pl['x'], pl['y'], pl['z']])
@@ -523,7 +570,26 @@ def main():
             for v in used_idx:
                 Pn[v] = world_to_model(posed[v][None], pl, piv)[0]
                 Nn[v] = Rinv @ (rot[v] @ (Ry @ Nn[v]))
-    if args['clip']:
+    if args['clip'] and nodump:
+        # ---- clip pose without a dump: the same compose + decode as clip_pose() below,
+        # no dump reference stats; placement = NODUMP_PLACEMENT / --placement (GUESS)
+        cbuf, CP = AR.find_clip(args['cont'], args['clip'])
+        trs = AR.decode_frame_trs(cbuf, CP, bc, args['frame'])
+        Wclip = AR.compose(sk, trs, root_motion=not args['in_place'])
+        Vc, Nc, tris_c, _g = P.decode_groups(buf, NB, Wclip, bc)
+        tris_c = [t for t in tris_c if t[6] in keep]
+        assert len(Vc) == len(V) and [t[:3] for t in tris_c] == [t[:3] for t in tris]
+        Pn = Vc.astype(np.float64); pv = Pn[used_idx]
+        piv = np.array([(pv[:, 0].min() + pv[:, 0].max()) / 2, pv[:, 1].max(), (pv[:, 2].min() + pv[:, 2].max()) / 2])
+        Nn = Nc.astype(np.float64); ln = np.linalg.norm(Nn, axis=1, keepdims=True); ln[ln < 1e-9] = 1.0; Nn = Nn / ln
+        bbmin, bbmax = pv.min(0), pv.max(0)
+        clip_stats = dict(clip=args['clip'], frame=args['frame'], container=os.path.basename(args['cont']),
+                          frames=AR.clip_frames(cbuf, CP), in_place=args['in_place'], no_dump=True)
+        print("clip pose (no dump):", clip_stats)
+        if not args['no_cape']:
+            clip_cape, cst['clip_cape'] = clip_pose_cape(args, sk, cbuf, CP, trs, cape, pl, piv)
+            print("cape (clip):", cst['clip_cape'])
+    elif args['clip']:
         # ---- pose from a clip frame instead; the dump pose above is the reference.
         cbuf, CP = AR.find_clip(args['cont'], args['clip'])
         trs = AR.decode_frame_trs(cbuf, CP, bc, args['frame'])
@@ -639,6 +705,7 @@ def main():
                    **({} if glow_stats is None else dict(glow=glow_stats)),
                    **({} if fb is None else dict(bind_from_file=fb['stats'])),
                    binding_source='file' if fb is not None else 'dump', file_vs_dump_exact=fvd,
+                   **(dict(no_dump=True) if nodump else {}),
                    char_alpha_ref=CAPE_AREF_GL,
                    alpha_tris=dict(body=int(sum(tri_alpha)), runs=[[s0, c, 'alpha' if a else 'opaque'] for s0, c, a in runs]),
                    # -charruns: draw the character's triangle ranges in this order (game order)

@@ -73,6 +73,7 @@ Usage: python3 -I anim_eval.py
 Deps: numpy + PIL (host tools), reuses render_skinned.py + skd_skeleton.py.
 """
 import struct, math, os, sys
+_REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".."))  # repo root
 import numpy as np
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -80,8 +81,8 @@ sys.path.insert(0, HERE)
 from skd_skeleton import load_skeleton, _quat_to_m3, _mul4
 import render_skinned as RS
 
-NOPATH = "/srv/games/dirge-port/extract/_KEL/noPath"
-OUT    = "/srv/games/dirge-port/native/renderer/out"
+NOPATH = _REPO + "/extract/_KEL/noPath"
+OUT    = _REPO + "/native/renderer/out"
 
 def _u16(b, o): return struct.unpack_from("<H", b, o)[0]
 def _u32(b, o): return struct.unpack_from("<I", b, o)[0]

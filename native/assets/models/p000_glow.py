@@ -25,9 +25,10 @@ decode lacks and sit at their dump position (world_to_model), drawn only where t
 depth-equal-or-in-front of our body (no bias: a bias let them spill past our boots).
 """
 import sys, os, collections
+_REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".."))  # repo root
 import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, "/srv/games/dirge-port/tools/gsdump/src")
+sys.path.insert(0, _REPO + "/tools/gsdump/src")
 from gsparse import read_header
 from gsrender2 import build, pick_frame, tex0_fields
 from char_dumpbind import tri_sig

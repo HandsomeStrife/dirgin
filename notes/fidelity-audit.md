@@ -169,3 +169,13 @@ decode exists), the aim-blend / state-class motion requests.
 - cfg+0xc4 (jump height) and rec+0x70 / +0x74 (max / walk speed): runtime fields, sources not traced.
 - Per-state motion requests for the ground states 2–5 (which clip, which rate): the state class
   table DAT_004eedf0 was not dumped.
+
+## Bring-your-own-ISO build stand-ins (worker 0071, tools/byo)
+
+| behaviour | our code | source | game function | difficulty | notes |
+|---|---|---|---|---|---|
+| Vincent's start placement (s, yaw, x, y, z) without a capture | export_p000_gpu2.py `NODUMP_PLACEMENT` | GUESS (solved against hero dump 163235, h_st f91) | the stage start record (lead: 06800001 section 1, record 0 'p_Vin') | M | Reaches gameplay: scene.json char.s scales Vincent in play.js (0.9961 vs the dump build's 0.9625) |
+| Static Vincent pose in the viewer | build_web.sh `STATIC_CLIP`/`STATIC_FRAME` (h_st f91) | GUESS | the stage start motion | S | Viewer only |
+| Gun parts shown | export_web_gun.py `NODUMP_PARTS` (frame0, barrel0, barrel1) | GUESS | the weapon-parts loadout (bgd.bin section 13: handgun = parts #20 + #52) | S | Should come from the decoded default loadout |
+| Start camera | p000_cape.py `HERO_CAM` (label only) | GUESS | the stage camera setup | M | |
+| Sky dome | left out of the BYO build | missing | the sky container is not in the decoded room path | M | Only the capture build has it |

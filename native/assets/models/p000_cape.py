@@ -13,9 +13,10 @@ Dump -> world uses the hero camera that render_scene_textured is run with
 w = k/q lands them on our z128 mesh with a sharp peak at k = 1.00.
 """
 import sys, os, collections
+_REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".."))  # repo root
 import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, "/srv/games/dirge-port/tools/gsdump/src")
+sys.path.insert(0, _REPO + "/tools/gsdump/src")
 import render_skinned as R
 from gsparse import read_header
 from gsrender2 import build, tex0_fields
@@ -31,6 +32,10 @@ QMIN = 1e-6
 # (eye -1419,-116,-1130 / at -631,-77,-515 / up 0.030,-0.999,0.023 / fov 59.28) was
 # fine far away but 4.7 px off at depth ~25, so the dump-posed cape landed ~3 px
 # off the railing posts and poked through them.
+# Fitted to the hero dump's room vertices (measured, for the dump tools). The dump-free web
+# build (tools/byo) also uses it as the viewer's start camera there:
+# GUESS: start camera of index.html/play.html (not decoded; the game's camera is FUN_0032ace0,
+# see notes/fidelity-audit.md "Follow camera").
 HERO_CAM = dict(eye=(-1419.227, -115.571, -1129.797), at=(-631.348, -77.227, -515.163),
                 up=(0.03023, -0.99926, 0.02358),
                 fov=59.2749, W=2628, H=2048, crop_w=2592, crop_x=36, dw=432, dh=512)

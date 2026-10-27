@@ -17,7 +17,15 @@ Outputs (outdir, default native/web/data/vincent/; git-ignored, game-derived):
   cerberus_web.png   texture atlas (the three 128x128 07770582 textures stacked)
   cerberus_web.json  {corners, stride, atlas, parts, marker_offset, bbox}
 
+No dump (--no-dump, the dump-free build in tools/byo): each triangle's texture comes from
+the files instead (smd_material.py: draw-descriptor material slot -> 07770582 texture; on
+the hero dump this agrees with all 165 gun triangles the dump draws with our UV triple),
+and the parts are NODUMP_PARTS (GUESS: which parts the game draws for the equipped
+Cerberus is not decoded; these are the ones the hero dump shows). With a cerberus.json
+the output is unchanged (one texture per group, from the dump).
+
 Run: python3 -I native/assets/models/export_web_gun.py [cerberus.json] [outdir]
+     python3 -I native/assets/models/export_web_gun.py --no-dump [outdir]
 """
 import os, sys, json
 import numpy as np
@@ -29,12 +37,42 @@ import export_cerberus as EC
 
 ROOT = os.path.abspath(os.path.join(HERE, '..', '..', '..'))
 
+# GUESS: the Cerberus parts drawn, frame0 + barrel0 + barrel1 (not decoded; see
+# notes/actions-research.md "Part records": the weapon's part state picks them).
+# Taken from the hero dump (export_cerberus.py: parts with >= 3 dump corners). --no-dump only.
+NODUMP_PARTS = ('barrel0', 'barrel1', 'frame0_0')
+
+
+def file_tex_index(tris, names):
+    """Per triangle: index into gun_textures() names, from the file material slot."""
+    import smd_material as SM
+    from skd_skeleton import load_skeleton
+    buf, NB = EC.P.R.load_container(EC.GUN_CONT)
+    sk = load_skeleton(EC.GUN_CONT, trans_scale=1.0)
+    Wm = [np.array(m, float) for m in sk['world_bind']]
+    mats = SM.material_table(EC.GUN_TEX, 0, 0x2000)   # VRAM base: only used as a key
+    out = []
+    for m, _fl in SM.tri_materials(buf, NB, Wm, sk['bone_count'], tris):
+        if m >= len(mats):
+            raise SystemExit(f"gun triangle material slot {m} not in the table ({len(mats)})")
+        hit = [i for i, n in enumerate(names) if n.endswith('_' + mats[m]['image_name'] + '.png')]
+        if len(hit) != 1:
+            raise SystemExit(f"gun material {mats[m]['image_name']}: {len(hit)} dtex images match")
+        out.append(hit[0])
+    return out
+
 
 def main(argv):
-    info_path = argv[0] if argv else os.path.join(HERE, 'out', 'cerberus_hero', 'cerberus.json')
-    outdir = argv[1] if len(argv) > 1 else os.path.join(ROOT, 'native', 'web', 'data', 'vincent')
-    info = json.load(open(info_path))
-    sel = set(info['parts'])
+    nodump = '--no-dump' in argv
+    if nodump:
+        argv = [a for a in argv if a != '--no-dump']
+        outdir = argv[0] if argv else os.path.join(ROOT, 'native', 'web', 'data', 'vincent')
+        info = dict(group_texture={}); sel = set(NODUMP_PARTS)
+    else:
+        info_path = argv[0] if argv else os.path.join(HERE, 'out', 'cerberus_hero', 'cerberus.json')
+        outdir = argv[1] if len(argv) > 1 else os.path.join(ROOT, 'native', 'web', 'data', 'vincent')
+        info = json.load(open(info_path))
+        sel = set(info['parts'])
 
     vm = EC.markers(open(EC.VIN_CONT, 'rb').read())
     moff, mbone = vm[EC.MARKER]
@@ -55,11 +93,12 @@ def main(argv):
         atlas[y:y + f.shape[0], :f.shape[1]] = f; yo.append(y); y += f.shape[0]
     atlas[:, :, 3] = 255
 
+    ftex = file_tex_index(gtris, names) if nodump else None
     flat = []
-    for t in gtris:
+    for i, t in enumerate(gtris):
         p = part[t[6]]
         if p not in sel: continue
-        ti = gtex.get(gm[t[6]][0], by_part.get(p, 0)); fh, fw = files[ti].shape[:2]
+        ti = ftex[i] if nodump else gtex.get(gm[t[6]][0], by_part.get(p, 0)); fh, fw = files[ti].shape[:2]
         uvs = EC.uvn(t)
         for k in range(3):
             v = X[t[k]]; col = t[7 + k]
@@ -72,7 +111,9 @@ def main(argv):
     meta = dict(source='export_web_gun.py', corners=len(a), stride=9, atlas='cerberus_web.png',
                 parts=sorted(sel), bone=56, marker=EC.MARKER, marker_offset=moff.tolist(),
                 bbox=[a[:, :3].min(0).round(3).tolist(), a[:, :3].max(0).round(3).tolist()],
-                note='j56-local (game model space, -Y up); colour 1.0 = 0x80')
+                note='j56-local (game model space, -Y up); colour 1.0 = 0x80',
+                **(dict(texture_binding='file, per triangle (smd_material)', parts_source='GUESS NODUMP_PARTS')
+                   if nodump else {}))
     json.dump(meta, open(os.path.join(outdir, 'cerberus_web.json'), 'w'), indent=1)
     print(f"wrote {outdir}/cerberus_web.bin ({len(a) // 3} tris), .png {W}x{H}, .json; bbox {meta['bbox']}")
 

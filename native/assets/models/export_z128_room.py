@@ -27,6 +27,10 @@ from bmd_env import read_env, fog_directive
 from bmd_chains import packet_chains, chain_headers
 from room_overlap import PlaneIndex
 
+# z128's 13 room geometry chunks (FileCodes 06800012..06800c12; the collision build uses the
+# matching 0680xx11 files). Used when no --pf dir lists them (dump-free build, tools/byo).
+Z128_CHUNKS = tuple('0680%02x12' % i for i in range(13))
+
 # Packets dropped by name (2026-10-24 investigation, review 27): big flat quads at
 # x=-829 with generic 0..1 UVs. They sit in front of the real x=-760 wall/roof, and
 # no hero-dump (163235) vertex lies within 3 units of them though 70-79% are in view,
@@ -250,7 +254,9 @@ def build_flat_kept(packets, idxs, kept):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument('--pf', required=True, help='dir of per-packet FileCode pf_<chunk>.json')
+    ap.add_argument('--pf', help='dir of per-packet FileCode pf_<chunk>.json (required for --bind pf; '
+                    'with --bind file it only lists the chunks and feeds the pf_agree/pf_differ stats, '
+                    'and without it the chunks are Z128_CHUNKS: the dump-free build, tools/byo)')
     ap.add_argument('-o', '--out', required=True, help='output prefix, e.g. out/z128_room_v2/room')
     ap.add_argument('--sky', help='sky mesh from export_z128_sky.py (basename, next to the '
                     '.list); appended as the last group, textured with ' + SKY_FC)
@@ -275,8 +281,10 @@ def main():
                     'partly share a plane with an earlier chunk (UNDER_SUFFIX groups, list col 5)')
     a = ap.parse_args()
 
-    cids = [os.path.basename(p)[3:11]
-            for p in sorted(glob.glob(os.path.join(a.pf, 'pf_*.json')))]
+    if a.pf is None and a.bind != 'file':
+        sys.exit('--bind pf needs --pf')
+    cids = ([os.path.basename(p)[3:11] for p in sorted(glob.glob(os.path.join(a.pf, 'pf_*.json')))]
+            if a.pf is not None else list(Z128_CHUNKS))
     os.makedirs(os.path.dirname(os.path.abspath(a.out)), exist_ok=True)
 
     flat_by = defaultdict(list); ntri_by = defaultdict(int)
@@ -296,7 +304,7 @@ def main():
         if pay is None:
             continue
         packets = decode_packets(buf, pay)
-        pf = json.load(open(os.path.join(a.pf, 'pf_%s.json' % cid)))
+        pf = json.load(open(os.path.join(a.pf, 'pf_%s.json' % cid))) if a.pf is not None else []
         pf = [f if f else None for f in pf]
         n = len(packets) if a.bind == 'file' else min(len(pf), len(packets))
         pf = pf + [None] * (n - len(pf))

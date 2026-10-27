@@ -39,6 +39,7 @@ relative to `base`. To compare with a capture, pass base = that capture's first
 texture block (Vincent: body TBP - 4).
 """
 import os, sys, struct, subprocess, tempfile, glob
+_REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".."))  # repo root
 import numpy as np
 from PIL import Image
 
@@ -46,7 +47,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import render_skinned as R
 
-DTEX = "/srv/games/dirge-port/native/assets/textures/dtex"
+DTEX = _REPO + "/native/assets/textures/dtex"
 T_RST, T_IPU = 0x747372, 0x757069
 BPP = {0x00: 32, 0x01: 24, 0x02: 16, 0x0a: 16, 0x13: 8, 0x14: 4, 0x1b: 8, 0x24: 4, 0x2c: 4}
 

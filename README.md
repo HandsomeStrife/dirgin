@@ -9,6 +9,13 @@ in the decompilation/reauthor tradition — **no emulation, no game data include
 > code. To build or run anything here you must supply your own legally-owned copy
 > of the game and extract its data yourself.
 
+## Try the browser prototype
+
+One room (the "sea of flames" walkway) with a playable Vincent, in the browser, built from
+your own disc: `tools/byo/build_web.sh /path/to/your.iso`. The supported disc,
+prerequisites, controls and limitations are in [docs/BROWSER.md](docs/BROWSER.md). If you'd
+rather have a coding agent set it up for you, see [docs/AGENT-SETUP.md](docs/AGENT-SETUP.md).
+
 ## What's here
 
 | Path | What it is |

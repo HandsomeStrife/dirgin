@@ -44,6 +44,7 @@ HONEST CAVEATS (do not over-claim):
 Usage:  python3 -I render_p005.py [out_dir]
 """
 import sys, os, glob, tempfile, subprocess
+_REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".."))  # repo root
 import numpy as np
 import math
 from PIL import Image
@@ -54,9 +55,9 @@ sys.path.insert(0, HERE)
 import render_skinned as R
 from skd_skeleton import load_skeleton
 
-CONT = "/srv/games/dirge-port/extract/_KEL/noPath/07700141.bin"
-TEXC = "/srv/games/dirge-port/extract/_KEL/noPath/07700142.bin"
-DTEX = "/srv/games/dirge-port/native/assets/textures/dtex"
+CONT = _REPO + "/extract/_KEL/noPath/07700141.bin"
+TEXC = _REPO + "/extract/_KEL/noPath/07700142.bin"
+DTEX = _REPO + "/native/assets/textures/dtex"
 RIP  = ("/tmp/claude-1000/-srv-games-dirge-port/"
         "9bdd650d-972a-4ab8-9c5a-73a606c34b4a/scratchpad/viprip/"
         "Vincent Valentine/Vincent.dae")

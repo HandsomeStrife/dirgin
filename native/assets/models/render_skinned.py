@@ -38,6 +38,7 @@ All geometry/UVs/texture are REAL file data. Deps: numpy + PIL (host tools).
 Usage: python3 -I render_skinned.py [container.bin] [texture.png]
 """
 import struct, math, sys, os, subprocess, glob, tempfile
+_REPO = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", ".."))  # repo root
 import numpy as np
 from PIL import Image
 
@@ -46,9 +47,9 @@ sys.path.insert(0, HERE)
 from skd_skeleton import load_skeleton
 
 CONT = sys.argv[1] if len(sys.argv) > 1 else \
-    "/srv/games/dirge-port/extract/_KEL/noPath/07650001.bin"
-OUT  = "/srv/games/dirge-port/native/renderer/out"
-DTEX = "/srv/games/dirge-port/native/assets/textures/dtex"
+    _REPO + "/extract/_KEL/noPath/07650001.bin"
+OUT  = _REPO + "/native/renderer/out"
+DTEX = _REPO + "/native/assets/textures/dtex"
 
 SM2_MAGIC = 0x00324d53
 

@@ -4,7 +4,7 @@
     python3 -I native/assets/models/export_web_ladders.py [stage.bin] [collision.bin] [out.json]
 
 Defaults: extract/_KEL/noPath/06800001.bin (z128 stage file, "bzd048"),
-native/web/data/z128_collision.bin (DCOL v1), native/web/data/z128_ladders.json.
+native/web/data/z128_collision.bin (DCOL v1 or v2), native/web/data/z128_ladders.json.
 
 Source (notes/actions-research.md section 3, worker 0057): section 8 of the stage
 file = gimmick records, 0xC0 bytes each. +0x00 4x4 float matrix (row vectors;
@@ -74,8 +74,8 @@ def box(rec):
 def class01_tris(path):
     b = open(path, 'rb').read()
     magic, ver, nv, nt = struct.unpack_from('<4sIII', b, 0)
-    if magic != b'DCOL' or ver != 1:
-        raise ValueError('not a DCOL v1 file')
+    if magic != b'DCOL' or ver not in (1, 2):      # v2 = v1 + a walk-mesh section after these
+        raise ValueError('not a DCOL v1/v2 file')
     o = 0x30
     v = struct.unpack_from(f'<{nv * 3}f', b, o); o += nv * 12
     tri = struct.unpack_from(f'<{nt * 3}I', b, o); o += nt * 12
