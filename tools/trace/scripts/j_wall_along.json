@@ -1,0 +1,1 @@
+{"name": "j_wall_along", "frames": 200, "log_from": 10, "doc": "wall-slide research (worker 0096): full stick 45 deg into the deck edge for 30 frames, then parallel to it (spawn camera) and held", "events": [{"from": 10, "to": 40, "lx": 0.1225, "ly": 0.9925}, {"from": 40, "to": 200, "lx": -0.6148, "ly": 0.7887}]}

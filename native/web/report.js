@@ -86,16 +86,30 @@ export function initReport(ctx) {
   function bufferSize() {
     return new THREE.Vector2(canvas.width, canvas.height);   // drawing-buffer pixels
   }
-
-  // render `what` into an offscreen RGBA8 target at canvas size; return {rt, w, h}
-  function renderToTarget(what, clear) {
+  // ID renders and rays use the pick buffer: the game's 432x512 framebuffer in native mode
+  // (output.js), the canvas in full res (the default). toPick: canvas px (top-first) -> pick px, or null
+  // outside the 4:3 picture.
+  function pickSize() {
     const { x: w, y: h } = bufferSize();
+    return ctx.output ? ctx.output.pickSize(w, h) : { w, h };
+  }
+  function toPick(x, y) {
+    const { x: w, y: h } = bufferSize();
+    return ctx.output ? ctx.output.toPick(x, y, w, h) : { x, y };
+  }
+
+  // render `what` into an offscreen RGBA8 target (the root at canvas size through the output
+  // stage = what is shown; ID renders at the pick size); return {rt, w, h}
+  function renderToTarget(what, clear) {
+    const { w, h } = what === root ? (({ x, y }) => ({ w: x, h: y }))(bufferSize()) : pickSize();
     const rt = new THREE.WebGLRenderTarget(w, h, { depthBuffer: true, type: THREE.UnsignedByteType });
     const oldColor = renderer.getClearColor(new THREE.Color()), oldAlpha = renderer.getClearAlpha();
     if (clear) renderer.setClearColor(new THREE.Color(0, 0, 0), 0);
     renderer.setRenderTarget(rt);
     renderer.clear();
-    renderer.render(what, camera);
+    // the frame goes through the page's output stage (output.js) so it matches the canvas;
+    // ID/pick renders stay raw
+    if (what === root && ctx.output) ctx.output.render(what, camera, rt); else renderer.render(what, camera);
     renderer.setRenderTarget(null);
     renderer.setClearColor(oldColor, oldAlpha);
     return { rt, w, h };
@@ -119,12 +133,15 @@ export function initReport(ctx) {
     return c;
   }
 
+  // points are pick-buffer px (toPick); null points stay null
   function gpuPick(points) {
     if (!pickRoot) buildPickRoot();
-    const { rt, h } = renderToTarget(pickRoot, true);
+    const { rt, w, h } = renderToTarget(pickRoot, true);
     const px = new Uint8Array(4);
-    const out = points.map(([x, y]) => {
-      renderer.readRenderTargetPixels(rt, Math.round(x), h - 1 - Math.round(y), 1, 1, px);
+    const out = points.map(p => {
+      if (!p) return null;
+      const x = Math.min(Math.floor(p[0]), w - 1), y = Math.min(Math.floor(p[1]), h - 1);
+      renderer.readRenderTargetPixels(rt, x, h - 1 - y, 1, 1, px);
       if (px[0] === 0) return null;
       const draw = px[0] - 1, d = scene.draws[draw];
       return { draw, name: d.name, mesh: d.mesh, tex: d.tex, kind: d.kind,
@@ -135,8 +152,9 @@ export function initReport(ctx) {
   }
 
   // ---- CPU ray cast over every draw (no alpha test: cut-out texels still count as hits)
+  // x, y in pick-buffer px (the camera's projection spans exactly that buffer)
   function rayFor(x, y) {
-    const { x: w, y: h } = bufferSize();
+    const { w, h } = pickSize();
     const ndc = new THREE.Vector3(x / w * 2 - 1, 1 - y / h * 2, -1);
     const o = camera.position.clone();
     const p = ndc.unproject(camera);
@@ -291,11 +309,14 @@ export function initReport(ctx) {
         if (!(fx === 1 / 2 && fy === 1 / 2)) pts.push([px.x + px.w * fx, px.y + px.h * fy]);
       const clampPt = ([x, y]) => [Math.min(Math.max(x, 0), W - 1), Math.min(Math.max(y, 0), H - 1)];
       const ptsC = pts.map(clampPt);
-      const gpu = gpuPick(ptsC);
+      // canvas px -> picked pixel of the pick buffer (the framebuffer in native mode)
+      const ptsP = ptsC.map(([x, y]) => { const q = toPick(x + 0.5, y + 0.5); return q && [q.x, q.y]; });
+      const gpu = gpuPick(ptsP);
       const picks = ptsC.map((p, i) => {
-        const { o, d } = rayFor(p[0] + 0.5, p[1] + 0.5);
+        const q = ptsP[i], fb = q && [Math.floor(q[0]), Math.floor(q[1])];
+        const ray = q ? (({ o, d }) => rayCast(o, d))(rayFor(fb[0] + 0.5, fb[1] + 0.5)) : null;
         return { px: p.map(v => Math.round(v)), norm: [+(p[0] / W).toFixed(4), +(p[1] / H).toFixed(4)],
-                 gpu: gpu[i], ray: rayCast(o, d) };
+                 fb, gpu: gpu[i], ray };
       });
 
       const gl = renderer.getContext();
@@ -310,6 +331,7 @@ export function initReport(ctx) {
         rect: { px, norm },
         canvas: { w: W, h: H, css_w: canvas.clientWidth, css_h: canvas.clientHeight,
                   dpr: devicePixelRatio, pixel_ratio: renderer.getPixelRatio() },
+        output: ctx.output ? ctx.output.info() : null,   // picks[].fb = pixel in this buffer
         webgl: { renderer: dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER),
                  vendor: dbg ? gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL) : gl.getParameter(gl.VENDOR),
                  depth_bits: gl.getParameter(gl.DEPTH_BITS), max_texture: gl.getParameter(gl.MAX_TEXTURE_SIZE),
@@ -361,6 +383,12 @@ export function initReport(ctx) {
     rt.dispose();
     return { px, w, h };
   };
-  window.__pick = (x, y) => ({ gpu: gpuPick([[x, y]])[0], ray: rayCast(...Object.values(rayFor(x + .5, y + .5))) });
+  // canvas px -> {fb: picked pixel, gpu, ray}; __idBuffer is at the pick size (432x512 in native mode)
+  window.__pick = (x, y) => {
+    const q = toPick(x + 0.5, y + 0.5);
+    if (!q) return { fb: null, gpu: null, ray: null };
+    const fb = [Math.floor(q.x), Math.floor(q.y)];
+    return { fb, gpu: gpuPick([fb])[0], ray: rayCast(...Object.values(rayFor(fb[0] + .5, fb[1] + .5))) };
+  };
   return { open, close, isActive: () => active };
 }

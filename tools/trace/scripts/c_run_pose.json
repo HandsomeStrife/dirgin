@@ -1,0 +1,2 @@
+{"name": "c_run_pose", "frames": 150, "log_from": 90, "doc": "TRACE_FIELDSET=pose: run (full stick up) from frame 10; logs frames 90-149 (steady h_rn) with the bone matrices",
+ "events": [{"from": 10, "to": 150, "ly": -1.0}]}

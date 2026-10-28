@@ -1,0 +1,2 @@
+{"name": "j_stand", "frames": 90, "log_from": 5, "doc": "worker 0095: standing jump, cross held 10-16 (TRACE_FIELDSET=jump)",
+ "events": [{"from": 10, "to": 16, "buttons": ["cross"]}]}

@@ -125,6 +125,29 @@ def _parse_batch(buf, NB, rawstart, qwc, num):
     return pos, nrm
 
 
+def _batch_weights(buf, NB, rawstart, qwc):
+    """The batch's per-vertex skin weights: its S-32 UNPACK (FUN_005b1260 patches it to
+    0x6000xxxx at raw+0x10, then the V3-16 positions as 0x79 = masked, so each position
+    quadword keeps the S-32 value in w = vf09.w, the weight VU0 0x120 multiplies by).
+    None if the batch has no S-32 stream."""
+    p = rawstart; end = min(rawstart + qwc * 16, NB)
+    while p < end and p + 4 <= NB:
+        code = _u32(buf, p); vn = (code >> 16) & 0xff; cmd = (code >> 24) & 0xff
+        if cmd in (0x20, 0x30, 0x31):          # STMASK/STROW/STCOL (+1 data word), as _parse_batch
+            p += 8
+        elif 0x60 <= cmd <= 0x7f:
+            vl = cmd & 3; bits = {0: 32, 1: 16, 2: 8, 3: 16}[vl]
+            nc = ((code >> 26) & 3) + 1; nb = nc * bits // 8 * vn
+            if p + 4 + nb > NB:
+                return None
+            if nc == 1 and bits == 32:
+                return np.frombuffer(buf[p + 4:p + 4 + nb], dtype='<f4').astype(float)
+            p = (p + 4 + nb + 3) & ~3
+        else:
+            p += 4
+    return None
+
+
 def build_group_pool(buf, NB, Wm, bc, P, G, sc):
     """Skin a group's batches into the scatter-indexed posed vertex pool.
     Returns (pool[N,3], normals[N,3], seen[N]) or None.
@@ -132,7 +155,16 @@ def build_group_pool(buf, NB, Wm, bc, P, G, sc):
     (signed int8 /128, then rotated by the bone), w = the scatter-pool slot
     (VU0 0x120 output index). We keep the normal so the renderer can light the
     mesh from the game's own normals instead of a winding heuristic (the S-8/
-    strip winding is not globally consistent)."""
+    strip winding is not globally consistent).
+
+    Weighted skin (FUN_005b1190 + VU0 0x120, port/vu/disasm/vu0_skin_micro.txt): per
+    batch, the first cntA vertices are written fresh (vf10/vf11 = vf00), the next cntB
+    vertices load the slot's current position/normal into vf10/vf11 and ADD to it:
+        slot = w * M_bone . (local, 1)            (cntA)
+        slot += w * M_bone . (local, 1)           (cntB)
+    w = the batch's S-32 weight (_batch_weights). p000: every slot's weights sum to 1,
+    no cntB slot is written before its cntA, 994 of 2037 slots have 2-5 bones. At the
+    bind pose this equals the old last-write-wins pool (max 0.0016)."""
     pc_off = _u32(buf, G + 0x0c)
     if not (0 < pc_off < NB) or P + pc_off + 0x10 > NB:
         return None
@@ -153,7 +185,8 @@ def build_group_pool(buf, NB, Wm, bc, P, G, sc):
             raw += max(stride, 0); continue
         if not (0 <= bone < bc) or qwc <= 0 or raw + 2 > NB:
             raw += max(stride, 0); continue
-        pos, nrm = _parse_batch(buf, NB, raw, qwc, num); raw += stride
+        pos, nrm = _parse_batch(buf, NB, raw, qwc, num); wt = _batch_weights(buf, NB, raw, qwc)
+        raw += stride
         if pos is None or nrm is None or len(pos) < num or len(nrm) < num:
             continue
         P4 = np.c_[pos[:num] * sc, np.ones(num)]
@@ -161,8 +194,19 @@ def build_group_pool(buf, NB, Wm, bc, P, G, sc):
         nloc = nrm[:num, :3].astype(np.int8).astype(float) / 128.0   # packed normal
         wn = (Wm[bone][:3, :3] @ nloc.T).T                           # bone-rotated
         slot = (nrm[:num, 3].astype(int) + 0x80) & 0xff   # VU0 0x120 output index
+        if wt is None or len(wt) < num:
+            # GUESS: no S-32 weight stream -> last write wins at weight 1 (old rule; not
+            # seen in p000; see notes/fidelity-audit.md "Body skin weights")
+            wt = None
         for k in range(num):
-            s = slot[k]; pool[s] = world[k]; nrmp[s] = wn[k]; seen[s] = True
+            s = slot[k]
+            if wt is None:
+                pool[s] = world[k]; nrmp[s] = wn[k]
+            elif k < cA:                                   # FUN_005b1190 loop 1: fresh
+                pool[s] = wt[k] * world[k]; nrmp[s] = wt[k] * wn[k]
+            else:                                          # loop 2: vf10/vf11 = slot, add
+                pool[s] += wt[k] * world[k]; nrmp[s] += wt[k] * wn[k]
+            seen[s] = True
             if s > maxslot:
                 maxslot = s
     if maxslot < 0:

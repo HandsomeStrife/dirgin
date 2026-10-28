@@ -157,12 +157,12 @@ theirs:
 - **The standing Vincent in `index.html`** uses the decoded idle clip (`h_st`, frame 91) with
   the cape on its skinned target. Its position and facing are fixed numbers marked GUESS:
   Vincent's start position in the stage file is not decoded yet.
-- **Vincent's scale** comes from that same GUESS placement (0.996), so in `play.html` he is
-  about 3.5% taller and walks 3.5% faster than in the maintainers' build (0.9625, fitted to a
-  capture).
+- **Vincent's scale** is the game's own: unit scale, with his model origin at the character
+  position (decoded from the motion player's matrix). It is the same in this build and in the
+  maintainers' build, in `play.html` and in `index.html`.
 - **The gun** (Cerberus) takes each triangle's texture from the files. The capture-based
-  build picks one texture per part, so some small faces show a different texture. Which gun
-  parts are drawn is a GUESS (frame0, barrel0, barrel1).
+  build picks one texture per part, so some small faces show a different texture. It draws frame0
+  and barrel1, the parts the game's GS dumps show; the short barrel0 is never drawn.
 
 See `notes/HANDOFF.md` for the research state.
 

@@ -185,8 +185,14 @@ step "Vincent for play.html: skinned glb + walk/run/idle clips + cape cloth data
 # cloth.json, the cape's cloth group, skin and clip windows for native/web/cloth.js
 run vincent $PY export_web_vincent.py export --no-dump
 [ -s "$DATA/vincent/cloth.json" ] || fail "data/vincent/cloth.json missing after the vincent export (log: $LOGS/vincent.log)"
+# the locomotion clips' local TRS (player.js builds the pose the game's way, FUN_005a9db0)
+[ -s "$DATA/vincent/vincent_local.bin" ] || fail "data/vincent/vincent_local.bin missing after the vincent export (log: $LOGS/vincent.log)"
 grep 'cloth.json' "$LOGS/vincent.log" | tail -n 1 | sed "s#$REPO/##" | cut -c1-160
 echo "ok"
+
+step "Vincent's light rig (env slot + room BMD light grids -> data/vincent/light.json)"
+run light $PY export_web_light.py "$DATA/vincent"
+tail -n 1 "$LOGS/light.log" | sed "s#$REPO/##"
 for p in jump ladder shoot; do
   case $p in jump) clips=$PACK_JUMP ;; ladder) clips=$PACK_LADDER ;; shoot) clips=$PACK_SHOOT ;; esac
   step "clip pack: $p"
@@ -197,6 +203,10 @@ done
 step "Vincent's gun (Cerberus)"
 run gun $PY export_web_gun.py --no-dump "$DATA/vincent"
 echo "ok"
+
+step "weapon stats + reticle tables (bgd.bin parts, ELF from the disc) -> data/aim"
+run aim $PY export_web_aim.py --iso "$ISO" -o "$DATA/aim"
+tail -n 1 "$LOGS/aim.log"
 
 if [ $MOTIONS -eq 1 ]; then
   step "motion catalogue (data/vincent/motions.json, reference only)"

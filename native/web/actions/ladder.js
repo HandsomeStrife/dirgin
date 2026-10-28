@@ -1,5 +1,7 @@
-// Ladder action (play.html): E at a ladder's bottom or top trigger gets on, W / S climb
-// in 4.5-unit rungs, climbing past the top or bottom gets off, Space jumps off.
+// Ladder action (play.html): Space (the game's ✕, id 0xd) at a ladder's bottom or top
+// trigger gets on, W / S climb in 4.5-unit rungs, climbing past the top or bottom gets
+// off, Space jumps off. In the game ✕ is also jump, with the ladder first (FUN_00333150);
+// the page has no jump yet (removed by worker 0078; FUN_00575768 is a later job).
 // Data: data/z128_ladders.json (native/assets/models/export_web_ladders.py, stage
 // section 8 types 1/2 + the class-0x01 ladder faces). Values: notes/actions-research.md
 // section 3 (FUN_0059a5d0, FUN_00599f10, FUN_00346fc0, FUN_003470d8).
@@ -9,14 +11,14 @@
 // says how far along he is at each frame. The end points come from the game rules
 // (5.6 out from the face, 4.5 per rung, feet on col.groundY after getting off), so the
 // curve's shape is the clip's and its length is the game's. Game space, -Y up.
-export const KEY = 'KeyE';
-export const HELP = 'E ladder (W/S climb, Space jump off)';
+export const KEY = 'Space';
+export const HELP = 'Space ladder (W/S climb, Space jump off)';
 
 const DATA_URL = new URL('../data/z128_ladders.json', import.meta.url);
 const SNAP = 5.6;         // game: character origin this far out from the face (Vincent, FUN_0059a5d0)
 const BODY_FWD = 5.5;     // c_ld_u's constant bone-1 offset toward the ladder (glb units). The
                           // in-place export dropped it, so the feet go SNAP - BODY_FWD * scale
-                          // (~0.3) from the face; that puts the hands and feet on the rungs.
+                          // (0.1 at the game's unit scale) from the face; that puts the hands and feet on the rungs.
 const RUNG = 4.5;         // units per climb step (FUN_00599f10); z128's ladder mesh has its
                           // rungs exactly 4.5 apart, so this is world units, not clip * scale
 const MOUNT_RISE = 6.1;   // first rung above the bottom trigger floor: c_ld_u's 6 + the game's 0.1
@@ -24,8 +26,9 @@ const STEP_TICKS = 14;    // (16 - 2) ticks per step; the 16-frame clip plays at
 const TOP_PROBE = 20.25;  // top exit: no face this far above the feet (FUN_00346fc0)
 const BOTTOM_EXIT = 6;    // c_ld_del/der drop (glb units); less than a rung + this left: get off
 const RAY = 7;            // trigger ray along the facing (FUN_00544200)
-const GRAVITY = 0.07;     // u/tick^2 (jump research section 1), used for the jump-off fall
-const MAX_FALL = 6;
+// GUESS: trigger ray origin 2 above the feet (the game casts from FUN_005635e0 /
+// FUN_00563678 points, not decoded; see notes/fidelity-audit.md "Ladder trigger").
+const RAY_UP = 2;
 
 // Test aid: play.html?ladder=N puts him at ladder N's bottom once, on load (z128's start
 // deck doesn't connect to the ladder floor on foot in the current collision).
@@ -58,22 +61,20 @@ function prep(L) {
   return { ...L, F, n, d, climb, base, faceTop, faceBottom };
 }
 
-// is p inside trigger box b (local coordinates via its axes), with a little y slack
+// is p inside trigger box b (local coordinates via its axes)
 function inBox(b, p) {
   const o = b.origin, ax = b.axes;
   const v = [p.x - o[0], p.y - o[1], p.z - o[2]];
   const l = ax.map(a => (v[0] * a[0] + v[1] * a[1] + v[2] * a[2]) / (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]));
   return l[0] >= b.min[0] && l[0] <= b.max[0] && l[2] >= b.min[2] && l[2] <= b.max[2] &&
-         l[1] >= b.min[1] - 3 && l[1] <= b.max[1] + 3;
+         l[1] >= b.min[1] && l[1] <= b.max[1];
 }
 
-// the game's test: a short ray along the facing reaches the box, and he faces its +z
+// the game's test: a short ray along the facing reaches the box (FUN_00544200)
 function triggers(b, pos, heading) {
   const dx = Math.sin(heading), dz = Math.cos(heading);
-  const az = b.axes[2];
-  if (dx * az[0] + dz * az[2] < 0.5) return false;   // within 60 deg of the box's +z
   for (let s = 0; s <= RAY; s += 1)
-    if (inBox(b, { x: pos.x + dx * s, y: pos.y - 2, z: pos.z + dz * s })) return true;
+    if (inBox(b, { x: pos.x + dx * s, y: pos.y - RAY_UP, z: pos.z + dz * s })) return true;
   return false;
 }
 
@@ -103,8 +104,8 @@ export function ladderAction() {
   let done = false;
   let log = [];           // per-rung positions, for tests (window.__play.ctrl.active.log)
 
-  function play(ctx, clip, { loop = false, rate = 1, fade = 0.12 } = {}) {
-    if (ctx.anim && ctx.anim.has(clip)) ctx.anim.play(clip, { loop, rate, fade });
+  function play(ctx, clip, { loop = false, rate = 1 } = {}) {
+    if (ctx.anim && ctx.anim.has(clip)) ctx.anim.play(clip, { loop, rate });
   }
 
   // start a move phase from the current feet to `to` over clip `clip`
@@ -118,7 +119,7 @@ export function ladderAction() {
 
   function idle(ctx) {
     ph = { kind: 'idle', t: 0 };
-    play(ctx, hand === 'l' ? 'c_ld_lid' : 'c_ld_rid', { loop: true, fade: 0.1 });
+    play(ctx, hand === 'l' ? 'c_ld_lid' : 'c_ld_rid', { loop: true });
   }
 
   function climbPos(y) { return { x: L.climb.x, y, z: L.climb.z }; }
@@ -136,7 +137,7 @@ export function ladderAction() {
   function next(ctx, at = ctx.ctrl.pos) {
     const keys = ctx.input.keys || new Set(), pressed = ctx.input.pressed || new Set();
     const y = at.y, from = { ...at };
-    if (pressed.has('Space') && ctx.anim?.has('c_ld_jp')) return jumpOff(ctx, from);
+    if (pressed.has(KEY) && ctx.anim?.has('c_ld_jp')) return jumpOff(ctx, from);
     const up = keys.has('KeyW') || keys.has('ArrowUp');
     const down = keys.has('KeyS') || keys.has('ArrowDown');
     if (up && !down) {
@@ -152,6 +153,8 @@ export function ladderAction() {
     }
     if (down && !up) {
       const floor = bottomFloor(ctx);
+      // GUESS: bottom exit test from the c_ld_der/del drop (BOTTOM_EXIT) with 0.5 margin;
+      // the game's probe (FUN_003470d8: 5.5 behind, down 8.25, class 0x01) isn't ported
       if (floor - y - RUNG < BOTTOM_EXIT - 0.5) {   // the next rung would be below the last one
         const clip = hand === 'l' ? 'c_ld_der' : 'c_ld_del';
         // c_ld_del/der step back 5.5 (glb) from the ladder and drop to the floor
@@ -165,6 +168,7 @@ export function ladderAction() {
       move(ctx, 'down', clip, climbPos(y + RUNG), { len: STEP_TICKS, rate: (frames(ctx, clip) - 1) / STEP_TICKS, from });
       return;
     }
+    // GUESS: idle clip at once; the game settles 32 ticks after a step (FUN_00599f10), not ported
     if (ph?.kind !== 'idle') idle(ctx);
   }
 
@@ -180,6 +184,7 @@ export function ladderAction() {
     const fwd = curve(ctx, clip, frames(ctx, clip) - 1)[2] * s;
     const lx = L.climb.x + L.F.x * fwd, lz = L.climb.z + L.F.z * fwd;
     const lg = ctx.col.groundY(lx, lz, L.topY - 8);
+    // GUESS: "floor near the top" = within 3 of the top trigger (not decoded)
     if (lg !== null && Math.abs(lg - L.topY) < 3) return { x: lx, y: lg, z: lz };
     const o = L.top.origin;
     const along = (o[0] - L.climb.x) * L.F.x + (o[2] - L.climb.z) * L.F.z;
@@ -267,22 +272,11 @@ export function ladderAction() {
     },
     update(dt, ctx) {
       if (!L || !ph) return { done: true };
-      if (ph.kind === 'warp') return result(ctx, ph.to, { heading: L.heading, onGround: true, vy: 0, done: true });
-      if (ph.kind === 'fall') {                   // after the jump-off: fall to the floor
-        const p = ctx.ctrl.pos;
-        let nx = p.x + ph.vx, nz = p.z + ph.vz;
-        if (typeof ctx.col.navMove === 'function') {   // navmesh: airborne body keeps walking it (FORMAT.md §3d)
-          const r = ctx.col.move(p, { x: ph.vx, z: ph.vz }, { air: true }); nx = r.x; nz = r.z;
-        } else if (ctx.col.capsulePush) [nx, nz] = ctx.col.capsulePush(nx, p.y, nz, ctx.ctrl.opts.radius, ctx.ctrl.opts.height);
-        ph.vy = Math.min(ph.vy + GRAVITY, MAX_FALL);
-        const g = ctx.col.groundY(nx, nz, p.y, 0);
-        let y = p.y + ph.vy;
-        if (g !== null && y >= g) {
-          log.push({ phase: 'landed', tick: ctx.tick, feet: [nx, g, nz] });
-          return result(ctx, { x: nx, y: g, z: nz }, { onGround: true, vy: 0, done: true });
-        }
-        if (++ph.t > 600) return result(ctx, { x: nx, y, z: nz }, { onGround: false, vy: ph.vy, done: true });
-        return result(ctx, { x: nx, y, z: nz }, { onGround: false });
+      if (ph.kind === 'warp') return result(ctx, ph.to, { heading: L.heading, onGround: true, vy: 0, done: true, teleport: true });
+      if (ph.kind === 'fall') {                   // after the jump-off: the body's own fall
+        if (!ctx.ctrl.onGround) return { locomotion: true };
+        log.push({ phase: 'landed', tick: ctx.tick, feet: [ctx.ctrl.pos.x, ctx.ctrl.pos.y, ctx.ctrl.pos.z] });
+        return { locomotion: true, done: true };
       }
       if (ph.kind === 'idle') {
         next(ctx);
@@ -298,9 +292,12 @@ export function ladderAction() {
         return res;
       }
       if (k === 'jump') {
-        const back = { x: L.n.x * 0.6, z: L.n.z * 0.6 };
-        ph = { kind: 'fall', t: 0, vx: back.x, vz: back.z, vy: 0 };
-        play(ctx, 'c_ld_fa0', { fade: 0.08 });
+        // c_ld_jp, then c_ld_fa0 while he falls (research section 3, conf. L). The fall
+        // is the physics body's (player.js startFall / FUN_00357168 with h = 0, mode-0xc
+        // gravity); FUN_00562d30's jump-off speeds aren't decoded, so no push off the ladder.
+        ph = { kind: 'fall' };
+        play(ctx, 'c_ld_fa0');
+        res.onGround = false;
         return res;
       }
       if (k === 'up' || k === 'down') hand = ph.clip.endsWith('l') ? 'l' : 'r';
@@ -311,7 +308,7 @@ export function ladderAction() {
     },
     exit(ctx) {
       ph = null; L = null; pending = null;
-      ctx.anim?.release(0.2);
+      ctx.anim?.release();
     },
   };
 }

@@ -76,14 +76,14 @@ import anim_rot as AR
 
 CLIP_CONT = _REPO + "/extract/_KEL/noPath/0770000b.bin"   # h_* (handgun) clips
 
-# GUESS: Vincent's world placement without a dump (--no-dump) (not decoded; see docs/BROWSER.md
-# "Known limitations"). These are the numbers solve_placement gives for `--clip h_st --frame 91`
-# against the hero dump 163235 (HANDOFF: the hero frame is h_st f91). The game's own start
-# position is not decoded (lead: stage 06800001 section 1, record 0 is named 'p_Vin').
-# It reaches gameplay: web scene.json char.s scales Vincent in play.js (size, and today's
-# speed), so a --no-dump build plays 3.5% larger than the dump build (s 0.9625). Listed
-# in notes/fidelity-audit.md.
-NODUMP_PLACEMENT = dict(s=0.9960733921600916, yaw=-170.97349547051755, x=-1395.6337101573731,
+# GUESS: Vincent's world position and facing without a dump (--no-dump) (not decoded; see
+# docs/BROWSER.md "Known limitations"). yaw/x/y/z are what solve_placement gives for
+# `--clip h_st --frame 91` against the hero dump 163235 (HANDOFF: the hero frame is h_st f91).
+# The game's own start position is not decoded (lead: stage 06800001 section 1, record 0 is
+# named 'p_Vin'). s is DECODED, not a fit: the game draws the model with MP+0x10, the
+# character matrix with unit rows (FUN_00343de8 -> FUN_005a6f40; worker 0083), so s = 1.0
+# (the fit gave 0.996). Listed in notes/fidelity-audit.md.
+NODUMP_PLACEMENT = dict(s=1.0, yaw=-170.97349547051755, x=-1395.6337101573731,
                         y=-98.68731132760155, z=-1110.280308356314)
 
 UVRES = 128                     # UV-coverage map resolution (texels of a 256 atlas / 2)

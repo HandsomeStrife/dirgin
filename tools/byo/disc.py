@@ -205,6 +205,8 @@ INPUTS = {
     '07770580.bin': '7be3083169b919c22f4cfe71cf775bcc44526b12fe9d2f46bc2ef291479c95c7',
     '07770581.bin': 'c9f56a9e30cc3e4676e2d856501ac140d198bed3d3262bb23e41a66c1a6f044a',
     '07770582.bin': '78ede02dcc7662df0e9e3fb1f9b0239b58a72cc46fc9b5fac49fd8bc341428f9',
+    # outside noPath (data/bgd): weapon parts for export_web_aim.py
+    '../data/bgd/bgd.bin': 'cab126367d9fb61865d03323938cc422a450f15e4ab72de5999f6d2a6e21a9a3',
 }
 
 

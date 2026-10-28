@@ -1,0 +1,2 @@
+{"name": "j_back", "frames": 120, "log_from": 5, "doc": "worker 0095: run forward 10-30, stick back from 30, cross 31-34 (move dir opposes facing: FUN_0036b058 back-jump test); then release at 80 (TRACE_FIELDSET=jump)",
+ "events": [{"from": 10, "to": 30, "ly": -1.0}, {"from": 30, "to": 80, "ly": 1.0}, {"from": 31, "to": 34, "buttons": ["cross"]}]}

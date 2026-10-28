@@ -12,6 +12,7 @@ G_OBJTAB = 0x46E880    # DAT_0046e880: object table owner (FUN_0053bb08)
 STEP = 0x4EEB24        # DAT_004eeb24: logic step in ticks (FUN_00322f88)
 DT = 0x4EEB28          # DAT_004eeb28: step in seconds = step / 60 (FUN_00322f88)
 FLAGS = 0x46E298       # DAT_0046e298: script flags (FUN_00326298)
+RETICLE = 0x471380     # DAT_00471380: reticle sprite object (FUN_003b0440 / FUN_003b0ac0)
 
 
 def u32(mem, a):
@@ -38,7 +39,10 @@ def resolve_bases(mem):
     MP2 = u32(mem, MP + 0x3E8)
     if u32(mem, CAM + 0x54) != P:
         raise RuntimeError("camera +0x54 is not the player")
-    return dict(P=P, C=C, CAM=CAM, MP=MP, MP2=MP2, **find_cape(mem))
+    HUD = u32(mem, u32(mem, G_GAME) + 0x44)     # view/HUD object (FUN_0033c060, FUN_0033c868)
+    RET = u32(mem, RETICLE)                       # reticle sprite object (FUN_003b0440)
+    BM = u32(mem, MP + 0x3F8)                     # bone matrices (FUN_005a87a0 -> FUN_005b2d58)
+    return dict(P=P, C=C, CAM=CAM, MP=MP, MP2=MP2, HUD=HUD, RET=RET, BM=BM, **find_cape(mem))
 
 
 CAPE_N = 82            # cloth vertices in Vincent's cape block (p000_cloth.py)
@@ -102,8 +106,77 @@ FIELDS = [
     ("cape_target", "CAPEBUF", ("cape", 2), "cape", "L", "FUN_005b0c50 pulls pos toward this skinned (keyed) target by max(k, blend)"),
     ("cam_matrix", "CAM", 0x60, "mat4", "L", "FUN_0032ace0: CAM+0x90 = eye (w set to 1.0 at the end), CAM+0x80 = forward (yaw from FUN_00260f00); rows +0x60 right, +0x70 up"),
     ("cam_a0", "CAM", 0xA0, "vec4", "G", "point with w=1 next to the eye (target?)"),
-    ("cam_fov_pitch_yaw", "CAM", 0x170, "vec4", "L", "FUN_0032ace0: +0x170 divided by DAT_0046e3f0 (base FOV 65) -> FOV deg; +0x174 pitch (clamped +-54 deg); +0x178 yaw"),
+    ("cam_fov_pitch_yaw", "CAM", 0x170, "vec4", "L", "FUN_0032ace0: +0x170 divided by DAT_0046e3f0 (base FOV: 73.5 in RAM, ELF 65) -> FOV deg; +0x174 pitch (clamped to DAT_0046e3f8 = +50 deg in RAM (ELF 54) / DAT_0046e3fc = -54 deg); +0x178 yaw"),
 ]
+
+# Opt-in set for aim/shoot research (TRACE_FIELDSET=aim): drops the cape, adds the weapon
+# state (P+0x290..), the camera aim ray and view mode, the HUD reticle and the camera types.
+# notes/aim-research.md explains each offset.
+AIM_FIELDS = [f for f in FIELDS if f[0] in (
+    "step", "pad_held", "p_state", "p_airshots", "matrix", "mflags", "move_mode",
+    "ground_speed", "anim_flags", "motion", "motion_flags", "mp_head", "mp_layers")] + [
+    ("p_face", "P", 0x118, "bytes:24", "D", "FUN_00562ef8: P+0x118 flags (bit 0/1), P+0x120 = face-toward point"),
+    ("p_188", "P", 0x188, "bytes:8", "D", "FUN_00565ff0 sets/clears P+0x188 bit 38"),
+    ("p_weapon", "P", 0x290, "bytes:48", "D", "FUN_00579570: +0x290 timer, +0x294 accumulator, +0x29c, +0x2a0, +0x2a4 state, +0x2a8 flags, +0x2b0 aim point (FUN_005784d8)"),
+    ("cam_view", "CAM", 0x28, "bytes:8", "D", "FUN_00337338: CAM+0x28 camera type, +0x2c transition phase"),
+    ("cam_typeptr", "CAM", 0x48, "u32", "D", "FUN_00337338: CAM+0x48 = camera type object"),
+    ("cam_60", "CAM", 0x60, "bytes:128", "L", "CAM+0x60..0xdf: basis rows, +0x90 eye, +0xa0 aim hit, +0xb0 far point, +0xc0 hit normal (FUN_00329778)"),
+    ("cam_f0", "CAM", 0xF0, "bytes:32", "L", "FUN_00329778 reads CAM+0xf0 (look-at point); FUN_0032a420 writes CAM+0x100"),
+    ("cam_170", "CAM", 0x170, "bytes:192", "D", "FUN_0032ace0 / FUN_00329778 / FUN_0032a420: +0x170 FOV, +0x17c ramp, +0x184 hit dist, +0x1a0 shoulder, +0x1b0/+0x1b8 range, +0x1e0 fade, +0x1e4 target ids, +0x1e8 flags, +0x21c view mode, +0x224 kick"),
+    ("hud", "HUD", 0x60, "bytes:80", "D", "FUN_0033c060 / FUN_0033c868: +0x60 reticle mode, +0x64 flags, +0x70 lock blend, +0x78/+0x7c offset, +0x90 target screen pos"),
+    ("ret", "RET", 0x1B0, "bytes:96", "D", "FUN_003b0ac0: +0x1b0 kind, +0x1b1 flags, +0x1b2+k phase, +0x1bc+4k time, +0x1dc+2k length, +0x1ec/+0x1fc x/y"),
+    ("camtype_c", None, 0x4EEBE0, "bytes:80", "D", "FUN_003314e0: camera type 0xc object at 0x4eebd0 (+0x10..)"),
+    ("camtype_d", None, 0x4EEC40, "bytes:80", "D", "camera type 0xd object at 0x4eec30 (+0x10..)"),
+    ("camtype_e", None, 0x4EECA0, "bytes:80", "D", "camera type 0xe object at 0x4eec90 (+0x10..)"),
+]
+
+# Opt-in set for body-pose research (TRACE_FIELDSET=pose): the motion player's bone
+# matrices, 93 x 0x40 at *(MP+0x3f8). FUN_005a87a0 hands MP+0x3f8 to FUN_005b2d58 as the
+# model's matrix buffer; FUN_005a9db0 -> FUN_005afa30/FUN_005afa58 fill it; FUN_005b06d0
+# reads it (*(model+0x20) + bone*0x40) for the cape target. Model space, row-vector
+# (row 3 = translation); checked against anim_rot.compose for h_st in the save state (0.01).
+# 6.4 KB per record: set "log_from" so the log fits (about 60 frames).
+POSE_BONES = 93
+POSE_FIELDS = [f for f in FIELDS if f[0] in (
+    "step", "pad_held", "matrix", "ground_speed", "mp_head", "mp_rate", "mp_layers", "cape_target")] + [
+    ("bones", "BM", 0x0, "bytes:%d" % (POSE_BONES * 0x40), "D", "*(MP+0x3f8): bone matrices (FUN_005b2d58 / FUN_005b06d0), model space, row-vector"),
+]
+
+# Opt-in set for the follow camera (TRACE_FIELDSET=cam, worker 0089): FUN_0032ace0's state.
+# CAM+0x170..0x22f (FOV, pitch +0x174, yaw +0x178, timers +0x1a8/+0x1e2, flags +0x1e8),
+# the basis/eye (+0x60..+0xdf), look-at (+0xf0) and the normal type 0xc object.
+CAM_FIELDS = [f for f in FIELDS if f[0] in (
+    "step", "pad_held", "matrix", "move_dir", "want_dir_speed", "ground_speed", "body_pos", "motion")] + [
+    f for f in AIM_FIELDS if f[0] in ("cam_view", "cam_typeptr", "cam_60", "cam_f0", "camtype_c")] + [
+    ("cam_170", "CAM", 0x170, "bytes:192", "D", "FUN_0032ace0: +0x170 FOV, +0x174 pitch, +0x178 yaw, +0x180 blend, +0x198/+0x19c, +0x1a8 auto-turn gain, +0x1ac, +0x1bc, +0x1c4/+0x1c8, +0x1e2 stick-idle counter, +0x1e8 flags, +0x214, +0x218"),
+    ("cam_00", "CAM", 0x0, "bytes:96", "G", "CAM+0x00..0x5f: type +0x28, phase +0x2c, type object +0x48, player +0x54"),
+    ("mp_matrix", "MP", 0x10, "mat4", "D", "MP+0x10: the draw matrix; FUN_003477c8 (camera base when C+0x564 & 0x18000000) = MP+0x10 x bone 0"),
+    ("c_564", "C", 0x564, "u32", "D", "FUN_003422f0: C+0x564 & 0x18000000 picks the camera base (MP path vs C+0x54c vtable+0x24)"),
+]
+
+# Opt-in set for the jump (TRACE_FIELDSET=jump, worker 0095): no cape; the whole physics
+# body (C+0x3b0..+0x4cf: state +0xa8, take-off t/y0/dy/v0/rise +0xd4..+0xe8, poly +0x110),
+# the jump gates (FUN_00575698 / FUN_00577230) and the motion-state object pointer.
+JUMP_FIELDS = [f for f in FIELDS if f[0] in (
+    "step", "pad_held", "lstick", "p_state", "p_airshots", "matrix", "move_dir", "want_dir_speed",
+    "mflags", "move_mode", "ground_speed", "body_pos", "motion", "motion_flags", "mp_head",
+    "mp_layers", "cam_matrix")] + [
+    ("body", "C", 0x3B0, "bytes:288", "D", "physics body C+0x3b0: +0xa8 state (FUN_00357860), +0xac flags, +0xd0 gravity, +0xd4 t, +0xd8 y0, +0xdc dy, +0xe0 v0, +0xe4 -h, +0xe8 rise (FUN_00357168)"),
+    ("c_79c", "C", 0x79C, "u32", "D", "FUN_00575768: C+0x79c bit 0x20 = second jump used"),
+    ("c_664", "C", 0x664, "u32", "D", "FUN_00575698: short C+0x664 must be 0, 1 or 2"),
+    ("c_7d0", "C", 0x7D0, "u32", "D", "FUN_003419c0: *(C+2000) = motion-state object, its +0x70 = class id"),
+    ("p_118", "P", 0x118, "u32", "D", "FUN_00577230 / FUN_005771c8: P+0x118 bits 0x200 / 0x40000"),
+    ("p_2a8", "P", 0x2A8, "u32", "D", "FUN_00574808 bits; FUN_00575698 tests 8 and 0x10 in the air"),
+]
+
+if __import__("os").environ.get("TRACE_FIELDSET") == "jump":
+    FIELDS = JUMP_FIELDS
+elif __import__("os").environ.get("TRACE_FIELDSET") == "cam":
+    FIELDS = CAM_FIELDS
+elif __import__("os").environ.get("TRACE_FIELDSET") == "aim":
+    FIELDS = AIM_FIELDS
+elif __import__("os").environ.get("TRACE_FIELDSET") == "pose":
+    FIELDS = POSE_FIELDS
 
 LAYER_BYTES = 8 * 0x30
 

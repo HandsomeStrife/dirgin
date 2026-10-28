@@ -133,11 +133,67 @@ def vincent_socket(p000_dir, bone):
 
 
 # ---- gun ----------------------------------------------------------------------------
-def decode_gun():
+def descriptor_tri_limits(buf, NB, Wm, bc):
+    """{('part.gN', descriptor index): triangles inside the descriptor's own VIF run}.
+    FUN_005b2240 sends each draw descriptor as a DMA ref tag: qwc = u16 at desc+6,
+    address = desc+0x14 (the VIF pointer), so the run is exactly qwc quadwords (on the
+    gun, next VIF = VIF + 16 x (qwc + 2): the 2 are the next descriptor's header).
+    render_skinned.parse_drawpackets is given the next descriptor's VIF, or EOF for a
+    group's last one; on the gun 8 last descriptors then read on into the next part's
+    packets (frame0.g1 d2: 18 tris, 2 its own; the other 16 carry topmt0's UV triples on
+    frame0's vertices, the same-place twins that z-fought). Same walk and filter as
+    smd_material.descriptor_materials. Vincent's p000: no change (2389 tris either way)."""
+    R = P.R
+    n = R._u16(buf, 0x10); offs = [R._u32(buf, 0x14 + 4 * i) for i in range(n)]
+    lim = {}
+    for o in offs:
+        if buf[o + 8:o + 11] != b'smd': continue
+        Pp = o + 0x10
+        if R._u32(buf, Pp) != R.SM2_MAGIC: continue
+        name = buf[o:o + 8].rstrip(b'\0').decode('latin1')
+        sc = R._f32(buf, Pp + 0x2c) / 2048.0
+        grparr = R._u32(buf, Pp + 0x20)
+        for gi in range(R._u16(buf, Pp + 0x0a)):
+            G = Pp + R._u32(buf, Pp + grparr + 4 * gi)
+            r = R.build_group_pool(buf, NB, Wm, bc, Pp, G, sc)
+            if r is None: continue
+            _pool, _n, seen = r; psize = len(seen)
+            for di, (doff, vif) in enumerate(R.enum_descs(buf, NB, Pp, G)):
+                end = Pp + vif + 16 * R._u16(buf, Pp + doff + 6)        # FUN_005b2240: ref qwc
+                k = 0
+                for sub in R.parse_drawpackets(buf, NB, Pp + vif, end):
+                    idx = sub.get('idx')
+                    if not idx: continue
+                    for ja, jb, jc in R.sub_tris(idx, sub.get('prim')):
+                        a, b_, c = idx[ja], idx[jb], idx[jc]
+                        if a == b_ or b_ == c or a == c: continue
+                        if max(a, b_, c) >= psize or not (seen[a] and seen[b_] and seen[c]): continue
+                        k += 1
+                lim[(f"{name}.g{gi}", di)] = k
+    return lim
+
+
+def decode_gun(with_materials=False):
+    """The gun's triangles as the game draws them: decode_groups, minus the triangles
+    the decoder reads past a descriptor's qwc (descriptor_tri_limits). with_materials:
+    also [(material slot, descriptor +4 flags)] per triangle (smd_material; flag bit 1 =
+    the GS ATE+ABE draw, FUN_005b19b8)."""
+    import smd_material as SM
     buf, NB = P.R.load_container(GUN_CONT); sk = load_skeleton(GUN_CONT, trans_scale=1.0)
     Wm = [np.array(m, float) for m in sk['world_bind']]
     V, N, tris, gm = P.decode_groups(buf, NB, Wm, sk['bone_count'])
+    dm = SM.descriptor_materials(buf, NB, Wm, sk['bone_count'])
+    if len(dm) != len(tris) or any(tuple(int(k) for k in t[:3]) != d[4] for t, d in zip(tris, dm)):
+        raise SystemExit("gun: descriptor walk does not match the decode")
+    lim = descriptor_tri_limits(buf, NB, Wm, sk['bone_count'])
+    cnt = collections.Counter(); keep = []
+    for d in dm:
+        cnt[(d[2], d[3])] += 1; keep.append(cnt[(d[2], d[3])] <= lim[(d[2], d[3])])
+    tris = [t for t, k in zip(tris, keep) if k]
+    mats = [(d[0], d[1]) for d, k in zip(dm, keep) if k]
     part = [g[0].split('@')[0].rstrip('_') for g in gm]
+    if with_materials:
+        return buf, V, N, tris, gm, part, mats
     return buf, V, N, tris, gm, part
 
 
@@ -224,8 +280,13 @@ def main(argv):
             c = byuv.get(q(uv))
             if not c: continue
             d = [np.linalg.norm(X[v] - m) for v, _p in c]
-            j = int(np.argmin(d)); corners.append((c[j][1], d[j] * pl['s'], t0, m, c[j][0]))
-    won = collections.Counter(p for p, *_x in corners)
+            j = int(np.argmin(d))
+            # a corner shared by two parts at the same place (barrel0's 4 tris are exact
+            # copies of barrel1's) is no evidence for either: argmin gave it to the first
+            # part, which is how barrel0 got selected though the game never draws it
+            tie = any(p != c[j][1] and d[k] - d[j] < 1e-4 for k, (_v, p) in enumerate(c))
+            corners.append((c[j][1], d[j] * pl['s'], t0, m, c[j][0], tie))
+    won = collections.Counter(p for p, *_x, tie in corners if not tie)
     # parts the game draws: won corners; a part sharing all its UVs with a better-placed
     # part (barrel1/barrel4) only wins where it is nearer, so take the majority per UV set
     parts = sorted(p for p, n in won.items() if n >= 3)

@@ -1,0 +1,2 @@
+{"name": "i_air_release", "frames": 300, "log_from": 110, "doc": "air control with the stick released: run from 120, jump at 140, release at 150 (airborne); then standing jump at 220 with a stick tap 226-230, released after",
+ "events": [{"from": 120, "to": 150, "ly": -1.0}, {"from": 140, "to": 146, "buttons": ["cross"]}, {"from": 220, "to": 226, "buttons": ["cross"]}, {"from": 226, "to": 230, "lx": 1.0}]}

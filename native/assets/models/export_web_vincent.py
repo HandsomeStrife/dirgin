@@ -31,10 +31,12 @@ How it is built
   from one export_p000_gpu2.py run (--clip h_st --frame 0 --in-place) into OUT/_ref/ (its
   vincent_p000.mesh corner order is kept: body triangles in binding.json order, cape last,
   so its -charruns triangle ranges index our triangles directly).
-- Skeleton: render_p005.load_skeleton (93 bones). Body skin: each pool slot's bone and
-  bone-local position, read with build_group_pool's own batch walk (single bone per vertex,
-  last batch writing a slot wins, exactly what the decoder does; the group header's blend
-  weights are still ignored). Bind positions = world_bind[bone] x local.
+- Skeleton: render_p005.load_skeleton (93 bones). Body skin: each pool slot's influences
+  (bone, bone-local position, weight), read with build_group_pool's own batch walk. The
+  game's rule (FUN_005b1190 + VU0 0x120): a batch's cntA vertices start the slot at
+  w x M.local, its cntB vertices add w x M.local; w = the batch's S-32 stream. 994 of
+  2037 p000 vertices have 2-5 bones; top 4 kept (16 had a 5th at 0.05). Bind positions =
+  sum w x world_bind[bone] x local (= each bone's own, to 0.002).
 - Cape: p000_cloth.Cape's weighted skin records (bones 28-79 incl. its own chains), i.e.
   the exporter's --clip cape mode (skinned target, no cloth sim). Up to 5 influences per
   vertex; three.js uses 4, so the smallest weight is dropped and the rest renormalised.
@@ -98,43 +100,60 @@ def load():
 
 
 def slot_skin(buf, NB, bc, Pb, G, sc):
-    """build_group_pool's batch walk (render_skinned.py), keeping each slot's bone and
-    bone-local position instead of the posed one. Same skip rules, last write wins."""
+    """build_group_pool's batch walk (render_skinned.py), keeping each slot's influences
+    [(bone, bone-local position, weight)] instead of the posed sum. Same skip rules.
+    FUN_005b1190: a batch's first cntA vertices start their slot afresh, the next cntB
+    add to it (VU0 0x120: slot += w * M . local); w = the batch's S-32 weight."""
     R = P.R
     piv = Pb + R._u32(buf, G + 0x0c)
     cnt = R._i32(buf, piv); cr = piv + R._i32(buf, piv + 8); raw = piv + R._i32(buf, piv + 0xc)
-    loc = np.zeros((256, 3)); bone = np.full(256, -1)
+    infl = [[] for _ in range(256)]
     for b in range(cnt):
         o = cr + b * 8
         if o + 8 > NB: break
-        bn = R._s16(buf, o); num = buf[o + 2] + buf[o + 3]
+        bn = R._s16(buf, o); cA = buf[o + 2]; num = buf[o + 2] + buf[o + 3]
         qwc = R._s16(buf, o + 4); stride = R._s16(buf, o + 6)
         if num == 0: raw += max(stride, 0); continue
         if not (0 <= bn < bc) or qwc <= 0 or raw + 2 > NB: raw += max(stride, 0); continue
-        pos, nrm = R._parse_batch(buf, NB, raw, qwc, num); raw += stride
+        pos, nrm = R._parse_batch(buf, NB, raw, qwc, num); wt = R._batch_weights(buf, NB, raw, qwc)
+        raw += stride
         if pos is None or nrm is None or len(pos) < num or len(nrm) < num: continue
+        if wt is None or len(wt) < num: wt = None          # build_group_pool's GUESS fallback
         slot = (nrm[:num, 3].astype(int) + 0x80) & 0xff
         for k in range(num):
-            loc[slot[k]] = pos[k] * sc; bone[slot[k]] = bn
-    return loc, bone
+            if wt is None: infl[slot[k]] = [(bn, pos[k] * sc, 1.0)]
+            elif k < cA: infl[slot[k]] = [(bn, pos[k] * sc, float(wt[k]))]
+            else: infl[slot[k]].append((bn, pos[k] * sc, float(wt[k])))
+    return infl
 
 
 def body_skin(buf, NB, sk):
-    """(bind positions, bind normals, per-vertex bone, tris) over decode_groups' vertices."""
+    """(bind positions, bind normals, joints[n,4], weights[n,4], tris, stats) over
+    decode_groups' vertices. Up to 4 influences per vertex (three.js): a 5th, smallest
+    one is dropped and the rest renormalised (p000: 16 vertices, dropped weight 0.05)."""
     bc = sk['bone_count']; Wb = [np.array(m, float) for m in sk['world_bind']]
     V, N, tris, gmeta = P.decode_groups(buf, NB, Wb, bc)
-    bone = np.full(len(V), -1)
+    J4 = np.full((len(V), 4), -1); W4 = np.zeros((len(V), 4)); st = dict(multi=0, trimmed=0, dropped_w=0.0)
     for name, base, psize, _seen, _pool in gmeta:
         Pb = int(name.split('@')[1].split('.')[0], 16); gi = int(name.rsplit('.g', 1)[1])
         G = Pb + P.R._u32(buf, Pb + P.R._u32(buf, Pb + 0x20) + 4 * gi)
-        loc, bn = slot_skin(buf, NB, bc, Pb, G, P.R._f32(buf, Pb + 0x2c) / 2048.0)
-        bone[base:base + psize] = bn[:psize]
-        for s in range(psize):           # the decoder's bind position must be bone x local
-            if bn[s] >= 0:
-                p = Wb[bn[s]][:3, :3] @ loc[s] + Wb[bn[s]][:3, 3]
-                assert np.abs(p - V[base + s]).max() < 1e-4, (name, s)
+        infl = slot_skin(buf, NB, bc, Pb, G, P.R._f32(buf, Pb + 0x2c) / 2048.0)
+        for s in range(psize):
+            l = infl[s]
+            if not l: continue
+            # the decoder's bind position must be the weighted sum of bone x local
+            p = sum(w * (Wb[b][:3, :3] @ loc + Wb[b][:3, 3]) for b, loc, w in l)
+            assert np.abs(p - V[base + s]).max() < 1e-4, (name, s)
+            l = sorted(((w, b) for b, _loc, w in l), reverse=True)
+            st['multi'] += len(l) > 1
+            if len(l) > 4: st['trimmed'] += 1; st['dropped_w'] = max(st['dropped_w'], l[4][0])
+            # GUESS: three.js skins with 4 joints; a 5th bone (max weight 0.05, 16 vertices) is
+            # dropped and the rest renormalised (notes/fidelity-audit.md)
+            l = l[:4]; tot = sum(w for w, _ in l)
+            for k, (w, b) in enumerate(l): J4[base + s, k] = b; W4[base + s, k] = w / tot
+    J4[J4 < 0] = 0
     Nn = np.asarray(N, float); ln = np.linalg.norm(Nn, axis=1, keepdims=True); ln[ln < 1e-9] = 1
-    return np.asarray(V, float), Nn / ln, bone, tris
+    return np.asarray(V, float), Nn / ln, J4, W4, tris, st
 
 
 _CLIPS = {}
@@ -307,6 +326,31 @@ def add_anims(g, clips, bc, ext):
     return anims
 
 
+def local_pose(sk, parent, clips, out):
+    """vincent_local.bin: each clip's LOCAL (parent-relative) TRS per bone at frames 0..nf,
+    for native/web/player.js's translation of the game's pose build (FUN_005a9db0 ->
+    FUN_005afa30 / FUN_005afa58: per-bone local blend, then compose). Frame nf is the
+    decoder's own extrapolation past the last key (FUN_005af6c0; loops reset at nf, so the
+    game samples [nf-1, nf)). In place as the glb tracks: bone 1 x/z zeroed (y too when the
+    clip moves in y). Record: t xyz, s xyz, q xyzw (anim_rot / three.js order), float32."""
+    bc = sk['bone_count']; recs = []; index = {}
+    for c, d in clips.items():
+        cbuf, CP = find_clip(d['cont'], c); nf = d['nf']
+        index[c] = dict(offset=len(recs), frames=nf + 1)     # in records (one per bone)
+        for f in range(nf + 1):
+            for b, (t, s, q) in enumerate(AR.decode_frame_trs(cbuf, CP, bc, f)):
+                t = list(t if t is not None else sk['local_T'][b]); s = s if s is not None else (1.0, 1.0, 1.0)
+                if b == 1:
+                    t[0] = t[2] = 0.0
+                    if d['zero_y']: t[1] = 0.0
+                recs.append(list(t) + list(s) + list(q))
+    np.array(recs, '<f4').tofile(os.path.join(out, 'vincent_local.bin'))
+    return dict(file='vincent_local.bin', record='t3 s3 q4 (xyzw) float32, parent-relative',
+                bones=bc, parent=[int(p) for p in parent], clips=index,
+                note='FUN_005a9db0: out layer at weight 1 (FUN_005afa30), head layer lerped in at MP+0x408 '
+                     '(FUN_005afa58: t/s lerp, q nlerp with hemisphere flip), then compose (anim_rot.compose)')
+
+
 def parent_sha1(parent):
     """sha1 of the parent list as compact JSON ([-1,0,1,...]): ties a clip pack to its skeleton."""
     import hashlib
@@ -329,16 +373,16 @@ def export(dump, out, mutate_parents=False, clip_spec=None, sets=DEFAULT_SETS, p
     if mutate_parents:          # MUTATION TEST: skip one level (parent -> grandparent)
         parent = [parent[parent[i]] if parent[i] > 0 else parent[i] for i in range(bc)]
     Wb = [np.array(m, float) for m in sk['world_bind']]
-    V, N, bone, tris = body_skin(buf, NB, sk)
+    V, N, J4b, W4b, tris, bst = body_skin(buf, NB, sk)
+    print("body skin:", bst)
     assert len(tris) == len(bindj) and all([int(k) for k in t[:3]] == r['v'] for t, r in zip(tris, bindj))
     nbody = len(tris) * 3
 
-    # ---- body corners (mesh order), single bone, weight 1
+    # ---- body corners (mesh order): the game's weighted skin (FUN_005b1190), top 4
     vi = np.array([r['v'] for r in bindj]).reshape(-1)
     pos = [V[vi]]; nrm = [N[vi]]
-    joints = [np.c_[bone[vi], np.zeros((nbody, 3), int)]]
-    weights = [np.c_[np.ones(nbody), np.zeros((nbody, 3))]]
-    assert (bone[vi] >= 0).all()
+    joints = [J4b[vi]]; weights = [W4b[vi]]
+    assert (W4b[vi].sum(1) > 0.999).all()
 
     # ---- cape corners: weighted skin, top-4 influences
     import p000_cloth as CL
@@ -402,9 +446,15 @@ def export(dump, out, mutate_parents=False, clip_spec=None, sets=DEFAULT_SETS, p
     prims = []
     for order, (s0, cnt, kind) in enumerate(runs):
         idx = np.arange(s0 * 3, (s0 + cnt) * 3, dtype='<u2')
+        assert s0 + cnt <= len(tris) or s0 >= len(tris), 'a draw run straddles body and cape'
+        # lit: VU1 program D with the game's body normals (play.js, export_web_light.py).
+        # The cape is lit by program D in the game too (hero dump: ambient-only corners =
+        # 126 x A x 122/128 exactly), but which normal its draw uses is not decoded, so
+        # it stays prelit (notes/fidelity-audit.md "Character lighting").
         prims.append(dict(attributes=attrs, indices=A(idx, 5123, 'SCALAR', 34963), mode=4,
                           material=1 if kind == 'alpha' else 0,
-                          extras=dict(drawOrder=order, firstTri=s0, triCount=cnt, alpha=kind == 'alpha')))
+                          extras=dict(drawOrder=order, firstTri=s0, triCount=cnt, alpha=kind == 'alpha',
+                                      lit=s0 < len(tris))))
     # texture atlas (RGBA, alpha stored as GS A*255/128)
     rb = open(os.path.join(ref, "vincent_p000_tex.rgba"), 'rb').read(); tw, th = struct.unpack_from('<II', rb)
     png = io.BytesIO(); Image.frombytes('RGBA', (tw, th), rb[8:]).save(png, 'PNG')
@@ -420,10 +470,12 @@ def export(dump, out, mutate_parents=False, clip_spec=None, sets=DEFAULT_SETS, p
                                           'use transparent=true, alphaTest=alphaCutoff, depthWrite=true'))]
     j['extensionsUsed'] = ['KHR_materials_unlit']
     j['meshes'] = [dict(name='vincent', primitives=prims)]
-    # nodes: 0 = root (flip model -Y-up to Y-up, feet at y=0, centred), 1..bc = joints, bc+1 = mesh
-    bpos = pos[:nbody]; piv = np.array([(bpos[:, 0].min() + bpos[:, 0].max()) / 2, bpos[:, 1].max(),
-                                        (bpos[:, 2].min() + bpos[:, 2].max()) / 2])
-    rootT = [-piv[0], piv[1], piv[2]]           # Rx(180): (x,y,z) -> (x,-y,-z)
+    # nodes: 0 = root (flip model -Y-up to Y-up), 1..bc = joints, bc+1 = mesh. No translation:
+    # the game draws the model with MP+0x10 (the character matrix, unit rows), so model
+    # origin = the character position (his feet in every in-place clip). The old bind-pose
+    # bbox centring (feet at bind y = 12.13, 0.31 back) is not the game's (worker 0083).
+    rootT = [0.0, 0.0, 0.0]
+    bpos = pos[:nbody]                          # (Vincent's height, for the sidecar)
     j['nodes'] = [dict(name='vincent_root', rotation=[1.0, 0.0, 0.0, 0.0], translation=[float(x) for x in rootT],
                        children=list(range(1, bc + 1)))]
     for b in range(bc):
@@ -476,9 +528,9 @@ def export(dump, out, mutate_parents=False, clip_spec=None, sets=DEFAULT_SETS, p
     # ---- sidecar
     side = dict(
         format="vincent.glb: glTF 2.0 binary, one skinned mesh, flat joints, see 'notes'",
-        glb='vincent.glb', units='game world units (placement scale ~1.0; Vincent ~%.1f tall)'
+        glb='vincent.glb', units='game world units (unit scale, MP+0x10; Vincent ~%.1f tall)'
             % (bpos[:, 1].max() - bpos[:, 1].min()),
-        axes='glb is Y-up via the root node (Rx 180 deg + centring, feet at y=0). Model space '
+        axes='glb is Y-up via the root node (Rx 180 deg, no translation: model origin = character position, feet at y~0 in the in-place clips). Model space '
              '(joint matrices, IBMs, POSITION) is the game\'s -Y-up space; root.translation=%s' % rootT,
         forward='+Z in glb space (h_wk root motion moves +Z after the flip)',
         vertices=len(pos), triangles=len(pos) // 3, body_triangles=nbody // 3, cape_triangles=len(cp.tris),
@@ -492,8 +544,9 @@ def export(dump, out, mutate_parents=False, clip_spec=None, sets=DEFAULT_SETS, p
         texture='atlas %dx%d RGBA PNG embedded; texture alpha = GS A*255/128' % (tw, th),
         alpha=dict(cutoff=aref, game='ATE GEQUAL 100, AFAIL RGB_ONLY, blended by As', material='alpha'),
         culling='none (doubleSided)',
-        skin=dict(body='single bone per vertex (JOINTS_0.x, weight 1); the decoder\'s last-write-wins '
-                       'slot rule; group-header blend weights NOT used',
+        skin=dict(body='the game\'s weighted skin (FUN_005b1190 + VU0 0x120: cntA vertices start a slot, '
+                       'cntB add w x M.local; w = the batch S-32 stream); top 4 influences renormalised '
+                       '(%d of %d body vertices had 5, dropped weight <= %.2f)' % (bst['trimmed'], len(V), bst['dropped_w']),
                   cape='p000_cloth weighted skin records (exporter --clip cape mode, no cloth sim); '
                        'top 4 influences renormalised (%d of %d cape vertices had 5)' % (trimmed, cp.N)),
         joints=dict(count=bc, node_index='joint b = node b+1', names='j00..j%02d' % (bc - 1),
@@ -511,6 +564,7 @@ def export(dump, out, mutate_parents=False, clip_spec=None, sets=DEFAULT_SETS, p
         source=dict(ref_run=f"export_p000_gpu2.py --clip {REF_CLIP[0]} --frame {REF_CLIP[1]} --in-place",
                     clip_container=os.path.basename(CLIP_CONT) if not ext else
                     sorted({os.path.basename(d['cont']) for d in clips.values()})))
+    side['local_pose'] = local_pose(sk, parent, clips, out)
     json.dump(side, open(os.path.join(out, 'vincent.json'), 'w'), indent=1)
     print("wrote", os.path.join(out, 'vincent.json'))
     for c, d in clips.items():
@@ -561,7 +615,7 @@ def cloth(out):
     # glb cape corners -> cloth vertex (export(): cape corners last, cp.tris order)
     cvi = [int(v) for vs, _u, _c in cp.tris for v in vs]
     # the glb's first cape triangle = the body triangle count (export(): body first)
-    first = len(body_skin(buf, NB, sk)[3])
+    first = len(body_skin(buf, NB, sk)[4])
     vj = os.path.join(out, 'vincent.json')
     if os.path.exists(vj):
         assert json.load(open(vj))['body_triangles'] == first, "vincent.json is from another body decode"

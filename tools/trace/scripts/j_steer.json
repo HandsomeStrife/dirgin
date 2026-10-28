@@ -1,0 +1,3 @@
+{"name": "j_steer", "frames": 150, "log_from": 5, "doc": "worker 0095: standing jump at 10, air steer right 18-34, left 34-44, release; then run 80-, jump 95, pull back 103-125 (TRACE_FIELDSET=jump)",
+ "events": [{"from": 10, "to": 16, "buttons": ["cross"]}, {"from": 18, "to": 34, "lx": 1.0}, {"from": 34, "to": 44, "lx": -1.0},
+            {"from": 80, "to": 103, "ly": -1.0}, {"from": 95, "to": 101, "buttons": ["cross"]}, {"from": 103, "to": 125, "ly": 1.0}]}

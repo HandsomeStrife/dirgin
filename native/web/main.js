@@ -7,8 +7,12 @@
 // cam=ex,ey,ez,yaw,pitch starts at that view ("copy view" writes it). yaw/pitch are
 // degrees about world up (-Y): yaw = atan2(dir.x, dir.z), pitch = asin(dir . up).
 // zprio=0 / zunder=0 turn off the polygon offsets on untextured / underlay room draws.
+// outblur=1/0 forces the PS2 output merge on/off (output.js; default: on only with res=native).
+// res=native renders the game's 432x512 framebuffer shown as a 4:3 picture (output.js); the
+// default renders at canvas resolution and fills the canvas (Dan's choice, 2026-10-28).
 import * as THREE from 'three';
 import { initReport } from './report.js';
+import { createOutputStage } from './output.js';
 
 const params = new URLSearchParams(location.search);
 const hud = document.getElementById('hud');
@@ -175,11 +179,21 @@ async function main() {
   renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
   renderer.setClearColor(new THREE.Color().setRGB(...scene.clear, THREE.LinearSRGBColorSpace), 1);
   document.body.appendChild(renderer.domElement);
+  // PS2 output (output.js): the game's 432x512 framebuffer, its projection (FUN_0040d478),
+  // the PCRTC merge (FUN_0040d228) and the 4:3 display window, with ?res=native.
+  // Default: the sharp canvas-resolution render filling the canvas (Dan's choice, 2026-10-28);
+  // ?outblur=1 / 0 = merge on / off
+  // Output merge: on in native mode (the game's look), off in the full-res default (sharp, Dan's
+  // choice 2026-10-28); ?outblur=1 / 0 forces it.
+  const nativeRes = params.get('res') === 'native';
+  const output = createOutputStage(renderer, { enabled: params.has('outblur') ? params.get('outblur') !== '0' : nativeRes,
+                                               msaa: params.get('aa') === '1', native: nativeRes });
 
   const cam0 = scene.camera;
   const eye0 = new THREE.Vector3(...cam0.eye);
   const [near, far] = nearFar(eye0, lo, hi);
   const camera = new THREE.PerspectiveCamera(cam0.fov, innerWidth / innerHeight, near, far);
+  output.fitCamera(camera);                        // the game's projection (native) or the canvas aspect (full)
   const worldUp = new THREE.Vector3(...scene.up).normalize();
   const fwd = new THREE.Vector3();
 
@@ -258,8 +272,8 @@ async function main() {
   });
 
   addEventListener('resize', () => {
-    camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
     renderer.setSize(innerWidth, innerHeight);
+    output.fitCamera(camera);
   });
 
   // toast + buttons (the HUD itself ignores the pointer)
@@ -286,7 +300,7 @@ async function main() {
   });
   document.getElementById('btn-report').addEventListener('click', e => { e.stopPropagation(); report.open(); });
   const report = initReport({
-    renderer, camera, root, scene, attrs: floats, toast,
+    renderer, camera, root, scene, attrs: floats, toast, output,
     setFrozen(f) { frozen = f; keys.clear(); drag = null; if (!f) clock.getDelta(); },
     view() {
       const [yw, pt] = yawPitch(fwd);
@@ -317,7 +331,7 @@ async function main() {
       camera.position.addScaledVector(mv.normalize(), speed * boost * dt);
     }
     camera.lookAt(camera.position.clone().add(fwd));
-    renderer.render(root, camera);
+    output.render(root, camera);
 
     frames++; acc += dt;
     if (acc >= 0.5) { fps = frames / acc; frames = 0; acc = 0; }
@@ -330,7 +344,7 @@ async function main() {
       `click: mouse look   WASD move   Space/E up  C/Q down\nShift fast   H hero camera   R report`;
     window.__frames = (window.__frames || 0) + 1;
   }
-  window.__view = { setCam, camString, hero, render: () => renderer.render(root, camera), camera, renderer, root, scene };
+  window.__view = { setCam, camString, hero, render: () => output.render(root, camera), camera, renderer, output, root, scene };
   requestAnimationFrame(frame);
 }
 

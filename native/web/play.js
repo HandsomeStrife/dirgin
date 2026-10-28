@@ -1,18 +1,26 @@
 // Dirge z128, playable: Vincent (data/vincent/vincent.glb) walking the room with
-// third-person controls, a follow camera and collision (collision.js, or the stub).
+// third-person controls, the game's follow camera (player.js, FUN_0032ace0) and collision (collision.js,
+// or the stub). Gameplay is the game's locomotion (player.js) and the ladder action;
+// invented behaviour was removed by worker 0078 (notes/fidelity-audit.md).
 //
 // The room comes from room.js (main.js's loader and shader, with its z-fight fixes).
 // Game space, -Y up. URL params: hud=0, aa=1, dpr=N, col=stub (force the stub),
 // cam=ex,ey,ez,yaw,pitch (detached camera at that view; H re-attaches it),
-// actions=0 (no action modules), packs=a,b (clip packs to load; default jump,ladder,shoot,
-// packs= loads none), zprio=0 / zunder=0 (room.js depth-tie offsets off). Packs load in
+// actions=0 (no action modules), packs=a,b (clip packs to load; default ladder,
+// packs= loads none), zprio=0 / zunder=0 (room.js depth-tie offsets off), cloth=0 (cape
+// cloth off: the keyed glb cape), gun=0 (no gun mesh), ladder=N (test aid: start at
+// ladder N's bottom), outblur=1/0 (PS2 output merge on/off, output.js; default: on only with res=native), res=native (the game's
+// 432x512 framebuffer shown 4:3; default = canvas-resolution render filling the canvas, Dan's choice). Packs load in
 // the background after start (vincent_<pack>.glb).
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-import { TICK, PlayerController, SpeedAnimator, FollowCamera } from './player.js';
+import { TICK, PlayerController, SpeedAnimator, FollowCamera, cameraRays, KEY_WALK, KEY_RUN } from './player.js';
+import { attachGun } from './gun.js';
 import { loadActions } from './actions/index.js';
 import { initReport } from './report.js';
 import { loadRoom } from './room.js';
+import { CapeCloth } from './cloth.js';
+import { createOutputStage } from './output.js';
 
 const params = new URLSearchParams(location.search);
 const hud = document.getElementById('hud');
@@ -20,32 +28,13 @@ const msg = document.getElementById('msg');
 if (params.get('hud') === '0') hud.style.display = 'none';
 
 const SPAWN = { x: -1395.63, z: -1110.51 };
-const PACKS = params.has('packs') ? params.get('packs').split(',').filter(Boolean) : ['jump', 'ladder', 'shoot'];
-const ROOT_PER_FRAME = { walk: 0.525, run: 1.665 };   // clip root motion, glb units per 60 Hz frame
-// The glb's origin is not at his soles: export_web_vincent.py centres the root on the
-// bind-pose body (feet at model y = 12.13), but the in-place clips put the feet near
-// model y = 0, so every clip draws him ~11.67 world units above the origin (worker 0053).
-// measureSole() finds the lowest skinned vertex in h_st frame 0 at load and the body is
-// shifted by that much, so his soles sit on the controller's feet. Measured: h_st
-// -11.670 (constant), h_wk -11.58..-11.68 (planted foot), h_rn -11.56 lowest.
-let FEET_OFFSET = 0;
-
-// Lowest point (largest y, -Y up) of the skinned body relative to body.position, in
-// world units, for the pose the mixer currently holds.
-function measureSole(vin, root) {
-  root.updateMatrixWorld(true);
-  const v = new THREE.Vector3();
-  let maxY = -Infinity;
-  for (const m of vin.prims) {
-    if (!m.isSkinnedMesh) continue;
-    const n = m.geometry.attributes.position.count;
-    for (let i = 0; i < n; i++) {
-      m.getVertexPosition(i, v); v.applyMatrix4(m.matrixWorld);
-      if (v.y > maxY) maxY = v.y;
-    }
-  }
-  return maxY - vin.body.position.y;
-}
+const PACKS = params.has('packs') ? params.get('packs').split(',').filter(Boolean) : ['ladder'];
+// Placement: the game draws the model with the motion player's matrix MP+0x10 (FUN_005ab8f0
+// -> view x MP+0x10), a copy of the character matrix (FUN_00343de8 -> FUN_005a6f40 ->
+// FUN_005a6ea8). Its rows are unit length (save state) and its origin is the character
+// position, which is at his feet: the game's cape_target is that matrix x the skinned bones
+// at ratio 1.000 (worker 0083, tools/trace TRACE_FIELDSET=pose). So no scale, no pivot and
+// no sole offset: the glb's model origin goes on ctrl.pos (export_web_vincent.py rootT = 0).
 
 // ------------------------------------------------------------ room (room.js)
 // the static posed Vincent in scene.json is replaced by the animated glb
@@ -115,7 +104,7 @@ function gsAlphaPasses(prims) {
   return afail.map(([, o2]) => o2);
 }
 
-async function loadVincent(scale) {
+async function loadVincent() {
   msg.textContent = 'loading vincent…';
   const gltf = await new GLTFLoader().loadAsync('data/vincent/vincent.glb');
   const prims = [];
@@ -125,16 +114,25 @@ async function loadVincent(scale) {
     prims.push(o);
     const m = o.material;
     if (m.map) { m.map.colorSpace = THREE.NoColorSpace; m.map.needsUpdate = true; }  // raw texel, like the room
-    m.side = THREE.DoubleSide;
+    // Back-face cull. The game sends every Vincent triangle whose screen winding is
+    // counter-clockwise (y down, strip parity applied) as XYZ3 with ADC=1, so it is
+    // not drawn. Hero dump 163235: 1299 of 1303 ADC triangles are ccw, 1195 of 1198
+    // drawn ones are cw (body, hair, cape). The glb keeps both sides of the two-sided
+    // cards as separate triangles. The ones the game draws are clockwise on screen
+    // in glb index order: WebGL back faces. Drawn sets match the dump: hair alpha
+    // 135/135, hair opaque 84/81, cape 56/56, body 932/926.
+    m.side = THREE.BackSide;
   });
+  // The glb shares one material per kind; the prims that stay prelit (the cape, extras
+  // lit = false) get their own copy so the program-D patch (setupCharLighting) skips them.
+  for (const o of prims) if (o.geometry.userData?.lit === false) o.material = o.material.clone();
   const afail = gsAlphaPasses(prims);
   // gltf.scene is Y-up (root node 0 flips the game's -Y-up model). Flip back with
   // Rx(pi) so it sits in game space; glb +Z forward becomes game -Z.
   const flip = new THREE.Group();
   flip.rotation.x = Math.PI;
   flip.add(gltf.scene);
-  const body = new THREE.Group();                  // position = feet, rotation.y from heading
-  body.scale.setScalar(scale);
+  const body = new THREE.Group();                  // MP+0x10: position = feet, rotation.y from heading, unit scale
   body.add(flip);
   const clip = n => {
     const c = gltf.animations.find(a => a.name === n);
@@ -142,6 +140,235 @@ async function loadVincent(scale) {
     return c;
   };
   return { body, mixRoot: gltf.scene, clips: { idle: clip('h_st'), walk: clip('h_wk'), run: clip('h_rn') }, prims, afail };
+}
+
+// ------------------------------------------------------------ character lighting
+// VU1 program D (port/vu/RENDER-MATH.md §1) per vertex, from the skinned normal:
+//   rgb = min(vcol * (C0*max(L0.n,0) + C1*max(L1.n,0) + C2*max(L2.n,0) + A), 255), FTOI0
+// then GS MODULATE (COLOR_0 = vcol/128, so the shader keeps /128). The rig is rebuilt
+// once per drawn frame as FUN_005ab0b0 does (data/vincent/light.json, export_web_light.py):
+//   L0/C0  env slot 0 light (toward the light), colour x MP+0x450/128
+//   L1/C1  effect point lights (DAT_004eea50 / MP+0x160, FUN_0030e208): none on this page
+//   L2/C2  room light from the BMD light grids (FUN_0026a710 -> FUN_00270d08), colour
+//          rgb*k*100/d^2, smoothed by FUN_005ab608 while the chosen light changes
+//   A      env slot 0 ambient x MP+0x450/128
+// Not ported (inactive in z128: save state): the fixed rig behind DAT_004fcaf8 bit 36,
+// the MP+0x41c / +0x420 ambient tints, the env-slot blend FUN_005ab738.
+// Hero dump 163235 vs this model at h_st f91: vertices whose triangle matches the dump
+// pose (<2 deg) are within 1 level at the median (body, opaque and alpha hair).
+const LIGHT_VS = `
+  #if defined( USE_SKINNING ) && defined( USE_COLOR_ALPHA )
+  {
+    vec3 n = mat3( modelMatrix ) * objectNormal;          // world (= game world) normal, unit-scale MP+0x10
+    vec3 lit = uC0 * max( dot( uL0, n ), 0.0 ) + uC1 * max( dot( uL1, n ), 0.0 )
+             + uC2 * max( dot( uL2, n ), 0.0 ) + uAmb;     // MULA/MADDA L, MAX 0, MULA/MADD C + A
+    vColor.rgb = floor( min( vColor.rgb * 128.0 * lit, 255.0 ) ) / 128.0;   // MUL vcol, MINIi 255, FTOI0
+  }
+  #endif`;
+function litPatch(m, U) {
+  const prev = m.onBeforeCompile, prevKey = m.customProgramCacheKey;
+  m.onBeforeCompile = (sh, r) => {
+    prev.call(m, sh, r);
+    Object.assign(sh.uniforms, U);
+    sh.vertexShader = 'uniform vec3 uL0, uC0, uL1, uC1, uL2, uC2, uAmb;\n' +
+      sh.vertexShader.replace('#include <fog_vertex>', '#include <fog_vertex>' + LIGHT_VS);
+  };
+  m.customProgramCacheKey = () => prevKey.call(m) + '|programD';
+  m.needsUpdate = true;
+}
+
+async function setupCharLighting(vin) {
+  let L;
+  try {
+    const r = await fetch('data/vincent/light.json');
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    L = await r.json();
+  } catch (e) {
+    console.warn('character lighting off (data/vincent/light.json):', e.message);
+    return null;
+  }
+  const lit = [...vin.prims, ...vin.afail].filter(o => o.geometry.userData?.lit === true);
+  if (!lit.length) { console.warn('character lighting off: vincent.glb has no extras.lit (old export)'); return null; }
+  const V = (...a) => new THREE.Vector3(...a);
+  const s = L.scale_byte / 128;                                // MP+0x450 * 0.0078125
+  const U = {
+    uL0: { value: V(...L.env.dir0) }, uC0: { value: V(...L.env.col0).multiplyScalar(s) },
+    uL1: { value: V() }, uC1: { value: V() },
+    uL2: { value: V() }, uC2: { value: V() },
+    uAmb: { value: V(...L.env.ambient).multiplyScalar(s) },
+  };
+  for (const m of new Set(lit.map(o => o.material))) litPatch(m, U);
+
+  // FUN_0026a710: DAT_004e88a4 = 1e6, then every loaded BMD's grid (FUN_00270d08); the
+  // threshold carries over, so the result is the global least d^2/k.
+  function pick(p) {
+    let best = L.pick_start, hit = null;
+    for (const g of L.grids) {
+      let ix = Math.trunc((p.x - g.x0) / g.size), iz = Math.trunc((p.z - g.z0) / g.size);   // FUN_0026fb90
+      ix = Math.min(Math.max(ix, 0), g.nx - 1); iz = Math.min(Math.max(iz, 0), g.nz - 1);
+      for (const li of g.cells[iz * g.nx + ix]) {
+        const r = g.lights[li];
+        const dx = p.x - r.pos[0], dy = p.y - r.pos[1], dz = p.z - r.pos[2];
+        const q = (dx * dx + dy * dy + dz * dz) / r.k;
+        if (!(q < best)) continue;
+        if (r.type === 2) {                                    // spot: outside the cone -> skip
+          const d = Math.hypot(dx, dy, dz);
+          if ((dx * r.spot[0] + dy * r.spot[1] + dz * r.spot[2]) / d < r.spot[3]) continue;
+        }
+        best = q; hit = r;
+      }
+    }
+    return hit;
+  }
+  // FUN_005ab608 state: MP+0x110 dir, MP+0x140 colour, MP+0x430 the settled light
+  const s110 = V(), s140 = V();
+  let s430 = undefined;                                        // undefined: not run yet
+  const dir = V(), col = V(), dd = V(), dc = V();
+  // p = the actor point, MP+0x10 x (MP+0x90 + MP+0xa0)/2 (FUN_005a72a8, FUN_0026138c)
+  function frame(p) {
+    const r = pick(p);
+    dir.set(0, 0, 0); col.set(0, 0, 0);
+    if (r) {
+      dir.set(r.pos[0] - p.x, r.pos[1] - p.y, r.pos[2] - p.z);
+      const d = dir.length();
+      if (d !== 0) { dir.multiplyScalar(1 / d); col.set(...r.rgb).multiplyScalar(r.k * 100 / (d * d)); }
+      else dir.set(0, 0, 0);
+    }
+    const id = r || 0;
+    if (s430 === undefined) {
+      // GUESS: start settled on the first light (the actor's initial MP+0x110/0x140/0x430
+      // are not decoded; see notes/fidelity-audit.md "Character lighting")
+      s430 = id; s110.copy(dir); s140.copy(col);
+    } else if (id !== s430) {
+      dc.subVectors(col, s140); dd.subVectors(dir, s110);
+      if (dc.lengthSq() > 0.010000001 || dd.lengthSq() > 0.010000001) {
+        s140.addScaledVector(dc, 0.1); col.copy(s140);
+        s110.addScaledVector(dd, 0.2);
+        const l = s110.length(); if (l > 0) s110.multiplyScalar(1 / l);
+        dir.copy(s110);
+      } else s430 = id;
+    }
+    U.uL2.value.copy(dir); U.uC2.value.copy(col);              // light 2: not x MP+0x450
+  }
+  const centre = V(...L.actor_center);
+  return { U, frame, centre, pick };
+}
+
+// ------------------------------------------------------------ cape cloth (cloth.js)
+// The game simulates the cape's 82 cloth vertices (not bones): one cloth step per drawn
+// frame, 50/s on PAL (FUN_005ab8f0 -> FUN_005b2ef8 -> FUN_005b2550 -> FUN_005b0d30), on
+// targets skinned with all of each vertex's influences (FUN_005b06d0; the glb keeps 4).
+// The cape primitive (and its GS alpha-fail twin) is swapped for plain meshes whose
+// corners are written from the cloth buffer. Outside a settle window the cloth output IS
+// the keyed target, so the cape looks as before except for the 5th influences.
+//
+// Timing: one cloth.frame() per game frame, from the SpeedAnimator's draw hook (player.js
+// gameFrame: after the clip choice, before the clip advance FUN_005aa5b8), in the order
+// FUN_005ab8f0 runs it: a clip request arms the window (FUN_005a95f0), the cloth step
+// (FUN_005b2ef8, line 143), the countdown (FUN_005aa5b8, line 218), the turn re-arm
+// (FUN_005a6f40). It is skinned from the game's draw pose: the character matrix after this
+// frame's movement and the clip frames before this frame's advance (pose(), from main).
+async function setupCapeCloth(vin, anim, pose) {
+  let data;
+  try {
+    const r = await fetch('data/vincent/cloth.json');
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    data = await r.json();
+  } catch (e) {
+    console.warn('cape cloth off (data/vincent/cloth.json):', e.message);
+    return null;
+  }
+  const src = vin.prims.find(o => o.isSkinnedMesh && o.geometry.userData?.firstTri === data.cape_first_tri);
+  if (!src || !src.geometry.index || src.geometry.index.count !== data.corner_vertex.length) {
+    console.warn('cape cloth off: cape primitive not found or corner count differs');
+    return null;
+  }
+  const twin = vin.afail.find(o => o.geometry === src.geometry);
+  // unindexed copy of the cape corners; position is written from the cloth each render
+  const idx = src.geometry.index.array, n = idx.length;
+  const geom = new THREE.BufferGeometry();
+  for (const [name, a] of Object.entries(src.geometry.attributes)) {
+    if (name === 'position' || name === 'skinIndex' || name === 'skinWeight') continue;
+    const out = new Float32Array(n * a.itemSize);
+    for (let i = 0; i < n; i++) for (let k = 0; k < a.itemSize; k++) out[i * a.itemSize + k] = a.getComponent(idx[i], k);
+    geom.setAttribute(name, new THREE.BufferAttribute(out, a.itemSize, a.normalized));
+  }
+  const posAttr = new THREE.BufferAttribute(new Float32Array(n * 3), 3);
+  posAttr.setUsage(THREE.DynamicDrawUsage);
+  geom.setAttribute('position', posAttr);
+  const parent = src.parent;
+  for (const o of [src, twin].filter(Boolean)) {      // same scene-graph slot = same draw order
+    const m = new THREE.Mesh(geom, o.material);
+    m.name = o.name + '#cloth'; m.frustumCulled = false; m.userData = { ...o.userData, cloth: true };
+    const p = o.parent, i = p.children.indexOf(o);
+    p.children[i] = m; m.parent = p; o.parent = null;
+  }
+  const cloth = new CapeCloth(data);
+  const sk = src.skeleton, bind = src.bindMatrix;
+  const mats = new Map(), tmp = new THREE.Matrix4(), inv = new THREE.Matrix4();
+  const bones = [...new Set(data.skin.map(r => r[1]))];
+  const skinMat = b => mats.get(b);
+  const fx = new THREE.Vector3();
+  const N3 = cloth.N * 3;
+  const off = new Float32Array(N3);                   // cloth pos - target at the last game frame, parent space
+  const tgt = new Float32Array(N3);
+  const rskin = { N: cloth.N, skinRec: cloth.skinRec, target: new Float32Array(N3) };   // render targets (world)
+  let lastKey = undefined;
+  function skinNow() {                                // targets at the pose the scene graph holds now
+    vin.body.updateMatrixWorld(true);
+    for (const b of bones) mats.set(b, tmp.multiplyMatrices(sk.bones[b].matrixWorld, sk.boneInverses[b]).multiply(bind).toArray());
+  }
+  // world -> the cape meshes' parent space (o += M x)
+  function toParent(src3, dst, sub = null) {
+    inv.copy(parent.matrixWorld).invert();
+    const e = inv.elements;
+    for (let j = 0; j < N3; j += 3) {
+      const x = src3[j], y = src3[j + 1], z = src3[j + 2];
+      dst[j] = e[0] * x + e[4] * y + e[8] * z + e[12];
+      dst[j + 1] = e[1] * x + e[5] * y + e[9] * z + e[13];
+      dst[j + 2] = e[2] * x + e[6] * y + e[10] * z + e[14];
+      if (sub) { dst[j] -= sub[j]; dst[j + 1] -= sub[j + 1]; dst[j + 2] -= sub[j + 2]; }
+    }
+  }
+  // the clip that is playing now, as an identity: a new play() / gait change is a new clip
+  // request (FUN_005a91c8 -> FUN_005a95f0); a loop keeps the key (no re-arm)
+  const clipKey = () => anim.override || anim.current;
+  // one game frame (anim.drawHook)
+  function gameFrame() {
+    pose();
+    skinNow();
+    const key = clipKey();
+    const started = key !== lastKey ? anim.clipName() : null;
+    lastKey = key;
+    // GUESS: (traced, not decoded; see notes/fidelity-audit.md) character x axis for the turn re-arm (FUN_005a6f40): THIS frame's facing. Traced: the
+    // game's window re-arms on the frame our current facing turns (cw_turn / cw_run arm
+    // frames equal), although its skin uses the previous matrix (logicPose). Not decoded why.
+    pose.facing(fx);
+    cloth.frame({ clipStarted: started, skinMat, fx: [fx.x, fx.y, fx.z] });
+    toParent(cloth.target, tgt);
+    toParent(cloth.pos, off, tgt);
+  }
+  anim.drawHook = gameFrame;
+  return {
+    cloth,
+    // Draw: the cloth's offset from its target at the last game frame, added to the target
+    // at the pose being rendered (the render interpolates between game frames, ctrl.lerp),
+    // so the pinned edge stays on the body. Rendered at a game frame's own pose this is
+    // cloth.pos exactly. GUESS: display interpolation, a port convenience (see
+    // notes/fidelity-audit.md "Web frame loop and cape cloth").
+    render() {                                      // before the first game frame: off = 0, keyed
+      skinNow();
+      cloth.skin.call(rskin, skinMat);                // FUN_005b06d0 into a render-only buffer
+      const out = posAttr.array, cv = data.corner_vertex;
+      toParent(rskin.target, tgt);
+      for (let i = 0; i < n; i++) {
+        const j = 3 * cv[i];
+        out[3 * i] = tgt[j] + off[j]; out[3 * i + 1] = tgt[j + 1] + off[j + 1]; out[3 * i + 2] = tgt[j + 2] + off[j + 2];
+      }
+      posAttr.needsUpdate = true;
+    },
+    state: () => ({ total: cloth.total, remaining: cloth.remaining, k: +cloth.k().toFixed(4) }),
+  };
 }
 
 // clip sidecars: vincent.json + each pack's json -> { clip name: entry }
@@ -171,6 +398,23 @@ function sha1Hex(str) {
     h0 = (h0 + a) | 0; h1 = (h1 + bb) | 0; h2 = (h2 + c) | 0; h3 = (h3 + d) | 0; h4 = (h4 + e) | 0;
   }
   return [h0, h1, h2, h3, h4].map(x => (x >>> 0).toString(16).padStart(8, '0')).join('');
+}
+
+// The locomotion clips' local TRS (export_web_vincent.py local_pose): SpeedAnimator then
+// builds the pose the game's way (FUN_005a9db0). Without it (an old export) the three.js
+// mixer's model-space mix is used, with a warning.
+async function loadLocalPose(anim, root) {
+  let side;
+  try {
+    const r0 = await fetch('data/vincent/vincent.json');
+    if (!r0.ok) throw new Error(`HTTP ${r0.status}`);
+    side = await r0.json();
+  } catch (e) { console.warn(`vincent.json: ${e.message}: mixer pose`); return; }
+  const lp = side.local_pose;
+  if (!lp) { console.warn('vincent.json has no local_pose (old export): mixer pose'); return; }
+  const r = await fetch('data/vincent/' + lp.file);
+  if (!r.ok) { console.warn(`${lp.file}: HTTP ${r.status}: mixer pose`); return; }
+  anim.setLocalPose(lp, await r.arrayBuffer(), root);
 }
 
 // The main rig's skeleton signature, in export_web_vincent.py's parent_sha1 form:
@@ -230,8 +474,11 @@ async function loadCol() {
   if (params.get('col') !== 'stub') {
     try {
       const m = await import('./collision.js');
-      const col = await m.loadCollision('data/z128_collision.bin');
-      return { col, name: 'collision.js' };
+      const r = await fetch('data/z128_collision.bin');
+      if (!r.ok) throw new Error(`collision: HTTP ${r.status}`);
+      const buf = await r.arrayBuffer();
+      const col = await m.loadCollision(buf);
+      return { col, name: 'collision.js', camRays: cameraRays(buf) };
     } catch (e) {
       console.warn('collision.js unavailable, using the stub:', e.message);
     }
@@ -242,8 +489,8 @@ async function loadCol() {
 
 // ------------------------------------------------------------ main
 async function main() {
-  const [{ scene, root, lo, hi, floats }, { col, name: colName }] = await Promise.all([loadRoomPlay(), loadCol()]);
-  const vin = await loadVincent(scene.char.s || 1);
+  const [{ scene, root, lo, hi, floats }, { col, name: colName, camRays }] = await Promise.all([loadRoomPlay(), loadCol()]);
+  const vin = await loadVincent();
   msg.style.display = 'none';
   root.add(vin.body);
 
@@ -255,13 +502,22 @@ async function main() {
   renderer.setClearColor(new THREE.Color().setRGB(...scene.clear, THREE.LinearSRGBColorSpace), 1);
   document.body.appendChild(renderer.domElement);
   const canvas = renderer.domElement;
+  // PS2 output (output.js): the game's 432x512 framebuffer, its projection (FUN_0040d478),
+  // the PCRTC merge (FUN_0040d228) and the 4:3 display window, with ?res=native.
+  // Default: the sharp canvas-resolution render filling the canvas (Dan's choice, 2026-10-28);
+  // ?outblur=1 / 0 = merge on / off
+  // Output merge: on in native mode (the game's look), off in the full-res default (sharp, Dan's
+  // choice 2026-10-28); ?outblur=1 / 0 forces it.
+  const nativeRes = params.get('res') === 'native';
+  const output = createOutputStage(renderer, { enabled: params.has('outblur') ? params.get('outblur') !== '0' : nativeRes,
+                                               msaa: params.get('aa') === '1', native: nativeRes });
 
   const c0 = new THREE.Vector3(...scene.camera.eye);
   const far = Math.max(c0.distanceTo(lo.clone().add(hi).multiplyScalar(.5)) + lo.distanceTo(hi) + 1, 1);
   const camera = new THREE.PerspectiveCamera(scene.camera.fov, innerWidth / innerHeight, 1, far);
+  output.fitCamera(camera);                        // the game's projection (native) or the canvas aspect (full)
 
   // spawn: feet on the first floor at or below the scene's placement height
-  const s = scene.char.s || 1;
   let gy = col.groundY(SPAWN.x, SPAWN.z, scene.char.y);
   if (gy == null) gy = col.groundY(SPAWN.x, SPAWN.z, scene.char.y - 40);
   if (gy == null) { console.warn('no ground at spawn'); gy = scene.char.y; }
@@ -269,25 +525,57 @@ async function main() {
   const heroDir = new THREE.Vector3(...scene.camera.at).sub(c0);
   const heading0 = Math.atan2(heroDir.x, heroDir.z);
 
-  // feet speeds in world units/tick: the clip's root motion at the body scale, so
-  // full walk/run plays at rate 1 with no foot slide
-  const rootSpeed = { walk: ROOT_PER_FRAME.walk * s, run: ROOT_PER_FRAME.run * s };
   const ctrl = new PlayerController(col, {
-    pos: { x: SPAWN.x, y: gy, z: SPAWN.z }, heading: heading0,
-    walkSpeed: rootSpeed.walk, runSpeed: rootSpeed.run, radius: 3.5, height: 19, scale: s,
+    pos: { x: SPAWN.x, y: gy, z: SPAWN.z }, heading: heading0, radius: 3.5, height: 19, scale: 1,   // MP+0x10 unit scale
   });
-  const anim = new SpeedAnimator(vin.mixRoot, vin.clips, rootSpeed, { fade: 0.2 });
+  const anim = new SpeedAnimator(vin.mixRoot, vin.clips);
+  await loadLocalPose(anim, vin.mixRoot);
   anim.mixer.update(0);                            // h_st frame 0
-  const sole = measureSole(vin, root);
-  FEET_OFFSET = Number.isFinite(sole) && Math.abs(sole) < 40 ? -sole : 0;
-  if (!Number.isFinite(sole) || Math.abs(sole) >= 40) console.warn('sole measurement failed:', sole);
-  const follow = new FollowCamera(camera, col, { dist: 52, pitch: 0.3, targetHeight: 15 });
-  follow.yaw = heading0;
+  // the game's draw pose for the cloth (anim.drawHook, inside ctrl.step): MP+0x10 as the
+  // draw sees it, i.e. the character matrix from BEFORE this frame's move (ctrl.prev /
+  // prevHeading), and the clip frames before this frame's advance (alpha 1 = head.frame).
+  // Traced, not decoded: per record the game's cape_target is the previous record's
+  // character matrix x the skinned bones (0.000; this record's: 0.94 in run). Where
+  // FUN_00343de8 runs relative to the move (FUN_0034c388) isn't decoded.
+  const logicPose = () => {
+    vin.body.position.set(ctrl.prev.x, ctrl.prev.y, ctrl.prev.z);
+    vin.body.rotation.y = bodyYaw(ctrl.prevHeading);
+    const a = ctrl.alpha; ctrl.alpha = 1; anim.update(ctrl.speed, 0); ctrl.alpha = a;
+  };
+  logicPose.facing = v => {                        // x axis of the body at this frame's heading
+    const r = vin.body.rotation.y;
+    vin.body.rotation.y = bodyYaw(ctrl.heading); vin.body.updateMatrixWorld(true);
+    v.setFromMatrixColumn(vin.body.matrixWorld, 0).normalize();
+    vin.body.rotation.y = r; vin.body.updateMatrixWorld(true);
+  };
+  const cape = params.get('cloth') === '0' ? null : await setupCapeCloth(vin, anim, logicPose);
+  // character lighting (setupCharLighting): FUN_005ab0b0 runs in the draw, once per game
+  // frame, with the draw's MP+0x10 (the logic pose: ctrl.prev, prevHeading), after the cloth
+  const light = await setupCharLighting(vin);
+  if (light) {
+    const ap = new THREE.Vector3(), Y = new THREE.Vector3(0, 1, 0);
+    const actorPoint = () => ap.copy(light.centre).applyAxisAngle(Y, bodyYaw(ctrl.prevHeading)).add(ctrl.prev);
+    light.frame(actorPoint());
+    const prevHook = anim.drawHook;
+    anim.drawHook = () => { if (prevHook) prevHook(); light.frame(actorPoint()); };
+  }
+  // test aids that move him (H, ?ladder=): the cloth restarts from the new pose (cloth.js reset)
+  // and the camera resets as at spawn (player.js reset(): FUN_003285d0's snap; GUESS: the
+  // angles are CAM_SPAWN, and whether the game resets the camera on a warp is not decoded)
+  // Warp (ladder test aid): FUN_003285d0 takes the angles from render view 1's forward. GUESS:
+  // that is the current view (not decoded; notes/fidelity-audit.md), so the warp keeps yaw/pitch.
+  ctrl.onTeleport = () => { if (cape) cape.cloth.started = false; follow.reset(ctrl.pos, { yaw: follow.yaw, pitch: follow.pitch }); };
+  attachGun(vin.mixRoot);                          // static gun under j56 (gun.js), loads in the background
+  // the game's follow camera (player.js, FUN_0032ace0); its ray tests the camera collision
+  // class (null with the stub: no pull-in). Starts at the save state's camera values (GUESS
+  // for the page's spawn, player.js CAM_SPAWN).
+  const follow = new FollowCamera(camera, camRays || null);
+  follow.reset(ctrl.pos);
 
   // ---- actions (player.js header / ACTIONS.md)
   const motions = {};
   loadMotions('vincent').then(m => Object.assign(motions, m)).catch(e => console.warn(e.message));
-  ctrl.attach({ anim, camera: follow, motions });
+  ctrl.attach({ anim, motions });
   let actionHelp = [];
   if (params.get('actions') !== '0') {
     for (const a of await loadActions()) { ctrl.addAction(a.action); if (a.help) actionHelp.push(a.help); }
@@ -316,7 +604,8 @@ async function main() {
     if (typing(e) || frozen) return;
     keys.add(e.code);
     if (!e.repeat) pressed.add(e.code);
-    if (e.code === 'KeyH') { ctrl.reset(); follow.yaw = heading0; follow.pitch = 0.3; detached = null; }
+    // H: back to the spawn (debug aid, not a game feature)
+    if (e.code === 'KeyH') { ctrl.reset(); if (cape) cape.cloth.started = false; follow.reset(ctrl.pos); detached = null; }   // respawn: spawn angles
     if (e.code === 'KeyR') { e.preventDefault(); report.open(); }
     if (e.code === 'Space' || e.code.startsWith('Arrow')) e.preventDefault();
   });
@@ -327,32 +616,36 @@ async function main() {
   // event and clamp spikes so the camera doesn't spin.
   let skipMove = false;
   document.addEventListener('pointerlockchange', () => { skipMove = true; });
-  const clampMv = v => Math.max(-150, Math.min(150, v));
+  const clampMv = v => Math.max(-150, Math.min(150, v));   // GUESS: browser input spike clamp (port convenience, not game logic)
   addEventListener('mousemove', e => {
     if (document.pointerLockElement !== canvas) return;
     if (skipMove) { skipMove = false; return; }
-    if (!frozen) follow.look(clampMv(e.movementX), clampMv(e.movementY));
+    if (!frozen && !detached) follow.addMouse(clampMv(e.movementX), clampMv(e.movementY));   // the game's USB-mouse look (player.js MOUSE_SCALE)
   });
   let drag = null;
   canvas.addEventListener('pointerdown', e => { if (!document.pointerLockElement) drag = [e.clientX, e.clientY]; });
   addEventListener('pointerup', () => { drag = null; });
   addEventListener('pointermove', e => {
-    if (!drag || document.pointerLockElement || frozen) return;
-    follow.look(e.clientX - drag[0], e.clientY - drag[1]); drag = [e.clientX, e.clientY];
+    if (!drag || document.pointerLockElement || frozen || detached) return;
+    follow.addMouse(e.clientX - drag[0], e.clientY - drag[1]); drag = [e.clientX, e.clientY];
   });
   addEventListener('resize', () => {
-    camera.aspect = innerWidth / innerHeight; camera.updateProjectionMatrix();
     renderer.setSize(innerWidth, innerHeight);
+    output.fitCamera(camera);
   });
 
+  // keys -> camera-relative world direction through the camera matrix (rows 2 / 0)
+  function aim(inp, { f, r }) {
+    const x = inp.fwd * f.x + inp.side * r.x, z = inp.fwd * f.z + inp.side * r.z;
+    return { ...inp, x, z };
+  }
   function readInput() {
-    const { f, r } = follow.basis();
-    let x = 0, z = 0;
-    if (keys.has('KeyW') || keys.has('ArrowUp')) { x += f.x; z += f.z; }
-    if (keys.has('KeyS') || keys.has('ArrowDown')) { x -= f.x; z -= f.z; }
-    if (keys.has('KeyD') || keys.has('ArrowRight')) { x += r.x; z += r.z; }
-    if (keys.has('KeyA') || keys.has('ArrowLeft')) { x -= r.x; z -= r.z; }
-    return { x, z, run: keys.has('ShiftLeft') || keys.has('ShiftRight'), keys, pressed };
+    let fwd = 0, side = 0;
+    if (keys.has('KeyW') || keys.has('ArrowUp')) fwd += 1;
+    if (keys.has('KeyS') || keys.has('ArrowDown')) fwd -= 1;
+    if (keys.has('KeyD') || keys.has('ArrowRight')) side += 1;
+    if (keys.has('KeyA') || keys.has('ArrowLeft')) side -= 1;
+    return aim({ fwd, side, run: keys.has('ShiftLeft') || keys.has('ShiftRight'), keys, pressed }, follow.basis());
   }
 
   // ---- Report button (report.js, shared with the main viewer)
@@ -383,7 +676,7 @@ async function main() {
       onGround: ctrl.onGround, vy: r4(ctrl.vy || 0), hitWall: ctrl.hitWall,
       speed_per_tick: r4(ctrl.speed), clip: anim.override ? 'action' : anim.current,
       clipName: anim.clipName(), rate: r4(anim.rate),
-      clipTime: r4(anim.time()), feetOffset: FEET_OFFSET,
+      clipTime: r4(anim.time()),
       action: ctrl.active ? ctrl.active.name : null, packs: packsLoaded,
       ground: g && { y: r4(g.y), feetError: r4(g.y - p.y), tri: g.tri, subtree: g.subtree,
                      mask: g.mask === undefined ? null : '0x' + g.mask.toString(16).padStart(4, '0'),
@@ -392,23 +685,32 @@ async function main() {
     };
   }
   const report = initReport({
-    renderer, camera, root, scene, attrs: floats, toast, view: camView,
+    renderer, camera, root, scene, attrs: floats, toast, view: camView, output,
     setFrozen(f) { frozen = f; keys.clear(); pressed.clear(); drag = null; if (!f) { clock.getDelta(); acc = 0; } },
     extraMeta: () => ({ page: 'play', player: playerState() }),
   });
   document.getElementById('btn-report').addEventListener('click', e => { e.stopPropagation(); report.open(); });
 
-  // ---- loop: fixed 60 Hz sim, interpolated render
+  // ---- loop: one ctrl.step per PAL game frame (TICK = 1/50 s), interpolated render.
+  // GUESS: the catch-up cap (8 frames, then drop the time) is a port convenience; the game
+  // caps its step at 5 ticks (FUN_00322f88).
   const clock = new THREE.Clock();
   let acc = 0, frames = 0, fpsAcc = 0, fps = 0;
   const stats = { ticks: 0, groundErrMax: 0, colName };
   function frame() {
     requestAnimationFrame(frame);
-    const dt = frozen ? 0 : Math.min(clock.getDelta(), 0.25);
+    const dt = frozen ? 0 : Math.min(clock.getDelta(), 8 * TICK);   // GUESS: same cap as below (port convenience)
     acc += dt;
     let n = 0;
     while (acc >= TICK && n < 8) {
-      ctrl.step(readInput());
+      // the camera runs first in the game frame: it follows the player as the last frame
+      // left him, and this frame's stick-to-world uses its new matrix (player.js camera notes)
+      const inp = readInput();
+      const moving = Math.hypot(inp.x, inp.z) > 1e-6;
+      follow.tick({ pos: ctrl.pos, want: ctrl.C.dir, state: ctrl.P.state,
+                    stick: moving ? (inp.run ? KEY_RUN : KEY_WALK) : 0, pad: null });
+      const b = follow.basis();                    // re-aim the keys with this frame's matrix
+      ctrl.step(aim(inp, b));
       pressed.clear();                             // an edge is seen by one tick only
       // feet vs ground check (for the HUD / tests)
       const g = col.groundY(ctrl.pos.x, ctrl.pos.z, ctrl.pos.y);
@@ -418,17 +720,18 @@ async function main() {
     }
     if (n === 8) acc = 0;                          // fell far behind (tab hidden): drop time
     const pose = ctrl.lerp(acc / TICK);
-    vin.body.position.set(pose.x, pose.y + FEET_OFFSET, pose.z);
+    vin.body.position.set(pose.x, pose.y, pose.z);
     vin.body.rotation.y = bodyYaw(pose.heading);
     anim.update(ctrl.speed, dt);
+    if (cape) cape.render();
 
     if (detached) {
       camera.position.copy(detached.pos); camera.up.set(0, -1, 0);
       camera.lookAt(detached.pos.clone().add(detached.dir));
     } else {
-      follow.update(pose, dt);
+      follow.update(acc / TICK);                   // between the last two game frames, as the body
     }
-    renderer.render(root, camera);
+    output.render(root, camera);
 
     frames++; fpsAcc += dt;
     if (fpsAcc >= 0.5) { fps = frames / fpsAcc; frames = 0; fpsAcc = 0; }
@@ -438,11 +741,11 @@ async function main() {
       `clip ${anim.override ? 'action' : anim.current} (${anim.clipName()}) x${anim.rate.toFixed(2)}` +
       `${ctrl.active ? '   action ' + ctrl.active.name : ''}` +
       `   speed ${(ctrl.speed * 60).toFixed(1)} u/s\n` +
-      `onGround ${ctrl.onGround}${ctrl.hitWall ? '  WALL' : ''}${follow.blocked ? '  cam pulled in' : ''}\n` +
-      `click: mouse look (drag works too)   WASD move   Shift run   ${actionHelp.join('   ')}   H respawn   R report`;
+      `onGround ${ctrl.onGround}${ctrl.hitWall ? '  WALL' : ''}\n` +
+      `click: mouse look (drag works too)   WASD move (walk)   Shift run   ${actionHelp.join('   ')}   H respawn   R report`;
   }
-  window.__play = { ctrl, anim, follow, col, stats, camera, renderer, root, vin, spawnY: gy, rootSpeed,
-                    playerState, camView, report, keys, pressed, motions, packsReady, actionHelp };
+  window.__play = { ctrl, anim, follow, col, stats, camera, renderer, output, root, vin, light, spawnY: gy,
+                    playerState, camView, report, keys, pressed, motions, packsReady, actionHelp, cape };
   requestAnimationFrame(frame);
 }
 

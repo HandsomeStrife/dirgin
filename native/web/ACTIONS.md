@@ -1,24 +1,39 @@
 # Player actions (play.html)
 
-`player.js` runs Vincent as a small state machine: **locomotion** (idle / walk / run /
-fall, the original controller) plus at most one **active action** taken from a registry.
-Actions are separate modules in `native/web/actions/`. `actions/reload.js` is the worked
-example. The interface is also written at the top of `player.js`.
+`player.js` runs Vincent as a small state machine: **locomotion** (the game's own
+on-foot movement, translated from FUN_00578748 / FUN_0034c388 mode 0xc, with its
+idle / walk / run clip choice and walk-off falls) plus at most one **active action** taken
+from a registry.
+Actions are separate modules in `native/web/actions/`. The page has one: `actions/ladder.js`.
+The interface is also written at the top of `player.js`.
 
-With no actions registered, or with `?actions=0`, every code path is the original one.
-A headless run of 1500 ticks gave exactly the same position, heading, speed, clip, rate
-and camera as the pre-refactor `player.js`.
+**Faithful port (CLAUDE.md).** An action must translate the game's code (cite the `FUN_`
+address) or be a small `// GUESS:` stand-in listed in `notes/fidelity-audit.md`. Worker 0078
+removed the invented actions: the jump (`jump.js`; a later job translates FUN_00575768's
+physics-body branch), shooting with its aim mode, aim camera, overlays and muzzle flash
+(`shoot.js`), and reload (`reload.js`; the game only reloads a magazine below 9,
+FUN_00579570 state 7, so it waits for the weapon translation, worker 0077).
+
+With no actions registered, or with `?actions=0`, only the game's locomotion runs.
+
+**Timing.** `PlayerController.step()` is one PAL game frame (1/50 s, `TICK`), in which the
+game advances `STEP` = 1.1999999 ticks. Actions are still timed in 60 Hz ticks: `step()`
+runs `canEnter` / `update` from a 60 Hz accumulator, once or twice per game frame, with
+`dt = ACTION_TICK` (1/60 s). This keeps the existing actions' tick counts unchanged; it is
+a port convenience, not the game's timing (the game's states run once per frame with
+`step`). An action that returns `{ locomotion: true }` in any of a frame's ticks lets the
+game frame's locomotion run once.
 
 ## Registering
 
 ```js
-import { reloadAction } from './actions/reload.js';
-ctrl.attach({ anim, camera: follow, motions });   // play.js already does this
-ctrl.addAction(reloadAction());                   // registry order = priority
+import { ladderAction } from './actions/ladder.js';
+ctrl.attach({ anim, motions });                   // play.js already does this
+ctrl.addAction(ladderAction());                   // registry order = priority
 ```
 
-Each tick with no active action, `canEnter(ctx)` is asked in registry order. The first
-action that says yes becomes active, and its `update` runs in the same tick.
+Each action tick with no active action, `canEnter(ctx)` is asked in registry order. The
+first action that says yes becomes active, and its `update` runs in the same tick.
 
 ## Module shape
 
@@ -26,14 +41,14 @@ action that says yes becomes active, and its `update` runs in the same tick.
 |---|---|---|
 | `name` | | unique string |
 | `canEnter(ctx)` | every tick while locomotion runs | bool; must not change state |
-| `enter(ctx)` | once, on entry | optional **animation request** `{ clip, loop, rate, fade, onEnd }` |
-| `update(dt, ctx)` | every 60 Hz tick while active (`dt = TICK`) | a **move result** (below) |
-| `exit(ctx)` | once, after `done` or `ctrl.cancelAction()` / respawn | nothing; release the animation and camera mode here |
+| `enter(ctx)` | once, on entry | optional **animation request** `{ clip, loop, rate, onEnd }` |
+| `update(dt, ctx)` | every 60 Hz action tick while active (`dt = ACTION_TICK`) | a **move result** (below) |
+| `exit(ctx)` | once, after `done` or `ctrl.cancelAction()` / respawn | nothing; release the animation here |
 
 **Move result** (what the action owns this tick):
 
 - `{ locomotion: true }`: locomotion moves him as usual and the action only animates
-  (e.g. reload while walking, aim while strafing).
+  (the ladder's jump-off fall uses this: the body's own fall moves him).
 - `{ delta: {x, y, z}, heading?, onGround?, vy?, keepVel? }`: the action owns movement.
   `delta` is applied as is, in game units with -Y up (so up is negative y). The action
   does its own collision through `ctx.col`. Fields you leave out keep their values.
@@ -45,21 +60,22 @@ action that says yes becomes active, and its `update` runs in the same tick.
 
 | field | what |
 |---|---|
-| `ctx.ctrl` | the controller: `pos` (feet), `heading`, `vel {x,z}`, `vy`, `onGround`, `speed` (units/tick, measured), `opts {radius, height, maxDrop}`, `walkSpeed`, `runSpeed`, `gravity`, `scale`, `spawn`. Actions may write `pos/vel/vy/onGround`. |
-| `ctx.input` | `{ x, z, run, keys, pressed }`: camera-relative move direction, run, held key codes, and key-down edges since the last tick (each edge is seen by one tick only) |
+| `ctx.ctrl` | the controller: `pos` (feet), `heading`, `vel {x,z}`, `vy`, `onGround`, `speed` (units per 60 Hz tick = the game's commanded speed C+0x1d8 / 60), `opts {radius, height}`, `gravity` (mode-0xc gravity, 235.2 u/s² = 0.0653 u/tick²), `scale`, `spawn`. Actions may write `pos/vel/vy/onGround`; when an action owns movement the controller finds the body's walk polygon again afterwards, and `onGround: false` hands him to the body's fall. |
+| `ctx.input` | `{ x, z, run, keys, pressed, fwd, side }`: camera-relative move direction (through this frame's camera matrix, player.js `FollowCamera.basis()`), run, held key codes, key-down edges since the last tick (each edge is seen by one tick only), and the raw key axes |
 | `ctx.col` | collision.js: `groundY`, `groundHit`, `move`, `capsulePush`, `segment` |
-| `ctx.anim` | animator: `play(name, {loop, rate, fade, onEnd})` crossfades to any loaded clip. `loop:false` plays it once, holds the last frame and calls `onEnd(name)`. Also `release(fade)` (back to the speed blend), `setRate(r)`, `has(name)`, `duration(name)`, `time()`, `clipName()` |
-| `ctx.camera` | FollowCamera: `setMode(name, {dist, targetHeight, shoulder})` eases to an aim-style camera (`shoulder` = offset to the right); `clearMode()` eases back |
+| `ctx.anim` | animator: `play(name, {loop, rate, onEnd})` crossfades to any loaded clip. `loop:false` plays it once, holds the last frame and calls `onEnd(name)`. Also `release()` (back to the game's locomotion clips), `setRate(r)`, `has(name)`, `duration(name)`, `time()`, `clipName()`. Every action crossfade lasts `ACTION_FADE` (player.js; GUESS, the game's blend length for these isn't decoded), so actions don't pick their own fade times. |
 | `ctx.motions` | clip name -> sidecar entry (`vincent.json` / `vincent_<pack>.json` `clips`): `frames`, `loop`, `in_place_axes`, `root_motion_per_frame_glb`, `root_total_glb`, ... |
 | `ctx.rootDelta(name, f0, f1)` | the clip's root motion from frame f0 to f1 (fractional frames are fine), in game space for the current heading and character scale. Add it to `pos` to move him the way the clip does. |
-| `ctx.tick`, `ctx.TICK` | ticks since reset, step length (1/60 s) |
+| `ctx.tick`, `ctx.TICK` | 60 Hz action ticks since reset, action tick length (1/60 s) |
+
+With the detached debug camera (`?cam=`, until H) the follow camera keeps running unseen and takes no mouse input, so `ctx.input` (and WASD) stay relative to the follow camera's matrix, not the view on screen.
 
 ## Clips
 
 - `vincent.glb`: mesh plus `h_st`, `h_wk`, `h_rn` (unchanged).
 - Clip packs, loaded in the background after start (`?packs=a,b` to choose, `?packs=` for none):
-  `vincent_jump.glb` (h_jp0-4, h_div), `vincent_ladder.glb` (c_ld_*, h_ld_*),
-  `vincent_shoot.glb` (aim / fire / reload / h_swtch). A pack holds only the joint nodes and
+  default `ladder` = `vincent_ladder.glb` (c_ld_*, h_ld_*); `jump` (h_jp0-4, h_div) and `shoot`
+  (aim / fire / reload / h_swtch) still export but nothing on the page uses them. A pack holds only the joint nodes and
   the clips. Its tracks use the same joint names (`j00..j92`), so the main mixer binds them.
   Check `ctx.anim.has(name)` in `canEnter`, because a pack may still be loading.
 - Every clip is in place. Its root motion is in the sidecar, per axis: x/z are always
@@ -74,23 +90,22 @@ action that says yes becomes active, and its `update` runs in the same tick.
 
 Make a pack: `python3 -I native/assets/models/export_web_vincent.py export <dump> --clips a,b,c --pack NAME`.
 
-## Example: actions/reload.js
+## Example: actions/ladder.js
 
-F (R is the Report key) on the ground plays `h_st_rd` once and stands him still. The clip's
-`onEnd` sets a flag, and `update` returns `{ done: true }` on the next tick. `exit` releases the
-animation. The gun's own reload clip (07770580, gun bone 3 turns ~82 deg) isn't exported yet.
+Space (✕) with a ladder trigger box within the 7-unit ray along his facing (FUN_00544200)
+gets on: `enter` starts `c_ld_u` / `c_ld_d`, and `update` returns `{ delta, heading,
+onGround: false }` each tick, positions from the clip's root-motion curve between the game's
+end points (5.6 snap, 4.5 rungs, 14 ticks a step; FUN_0059a5d0, FUN_00599f10). The exits
+return `{ onGround: true, done: true }`. The jump-off plays `c_ld_jp`, returns `onGround:
+false` (the body's fall starts) and then `{ locomotion: true }` until he lands.
 
 ## Notes for the action writers
 
-- **jump**: `h_jp0` take-off (3 f) -> `h_jp1` rise (12 up) -> `h_jp2` descend (12 down)
-  -> `h_jp3` air loop -> `h_jp4` land. Chain them with `onEnd` + `ctx.anim.play`.
 - **ladder**: `c_ld_u` / `c_ld_d` get on at the bottom / top; `c_ld_uml`/`umr` and
   `c_ld_dml`/`dmr` climb one 4.5-unit step up / down, alternating hands;
   `c_ld_lid`/`rid` idle loops; `c_ld_uel`/`uer` and `c_ld_del`/`der` get off at the top / bottom.
-- **shoot**: `h_st_a` / `_ad` / `_au` aim loops (level / down / up), `h_st_f` / `_fd` / `_fu`
-  fire one-shots (15 f), the same for `h_sq_*` (crouched) and `h_wk_*` / `h_rn_*` (moving,
-  use `{locomotion: true}`); `ctx.camera.setMode('aim', {...})` for the aim camera.
-  Aimed strafe and backpedal are run clips only: `h_brn_*` (back), `h_lrn_*` (left) and
-  `h_rrn_*` (right), each with `_a`/`_au`/`_ad`. There is no aimed strafe walk, so a sideways
-  walk plays the run at a lower rate. Rebuild the shoot pack with them:
-  `python3 -I native/assets/models/export_web_vincent.py export tools/gsdump/dumps/z128_hero_163235.bin --pack shoot --clips h_wk_a,h_rn_a,h_sq_a,h_st_a,h_sq_f,h_st_f,h_wk_ad,h_rn_ad,h_sq_ad,h_st_ad,h_sq_fd,h_st_fd,h_wk_rd,h_rn_rd,h_sq_rd,h_st_rd,h_swtch,h_wk_au,h_rn_au,h_sq_au,h_st_au,h_sq_fu,h_st_fu,h_fwk_rd,h_sqm_rd,h_frn_rd,h_brn_a,h_brn_au,h_brn_ad,h_lrn_a,h_lrn_au,h_lrn_ad,h_rrn_a,h_rrn_au,h_rrn_ad`
+- **jump** (not on the page): the e_jumps trace plays `h_jp0` -> `h_jp3` -> `h_jp4`, never
+  `h_jp1` / `h_jp2`. Translate FUN_00575768's physics-body branch (take-off FUN_00357168,
+  already in player.js `startFall(h)`) and the jump state class's motion requests.
+- **shoot / reload** (not on the page): wait for worker 0077's aiming and weapon translation
+  (FUN_00579570, notes/aim-research.md). The game has no held aim mode or aim camera.

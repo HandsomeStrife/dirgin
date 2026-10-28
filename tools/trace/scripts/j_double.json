@@ -1,0 +1,2 @@
+{"name": "j_double", "frames": 130, "log_from": 5, "doc": "worker 0095: cross 10-13, again 30-33 in the air (second jump?), again 45-48 (TRACE_FIELDSET=jump)",
+ "events": [{"from": 10, "to": 13, "buttons": ["cross"]}, {"from": 30, "to": 33, "buttons": ["cross"]}, {"from": 45, "to": 48, "buttons": ["cross"]}]}
