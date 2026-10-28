@@ -24,6 +24,8 @@ gitignored directory (default native/web/data/vincent/, checked with git check-i
   vincent_NAME.json; vincent.glb/json are left alone. Load it next to vincent.glb.
   The pack JSON records bone_count and parent_sha1 (sha1 of the parent list as compact JSON,
   e.g. [-1,0,1,...]) so a loader can refuse a pack built for another skeleton.
+  A pack also writes vincent_NAME_local.bin (the clips' local TRS, vincent_local.bin's format;
+  index in the pack JSON's local_pose) for player.js's game-order pose build.
   --pack with --mutate-parents is refused (it would write mutant clips into the real pack).
 
 How it is built
@@ -326,8 +328,8 @@ def add_anims(g, clips, bc, ext):
     return anims
 
 
-def local_pose(sk, parent, clips, out):
-    """vincent_local.bin: each clip's LOCAL (parent-relative) TRS per bone at frames 0..nf,
+def local_pose(sk, parent, clips, out, name='vincent_local.bin'):
+    """vincent_local.bin (a pack: vincent_<pack>_local.bin, same format): each clip's LOCAL (parent-relative) TRS per bone at frames 0..nf,
     for native/web/player.js's translation of the game's pose build (FUN_005a9db0 ->
     FUN_005afa30 / FUN_005afa58: per-bone local blend, then compose). Frame nf is the
     decoder's own extrapolation past the last key (FUN_005af6c0; loops reset at nf, so the
@@ -344,8 +346,8 @@ def local_pose(sk, parent, clips, out):
                     t[0] = t[2] = 0.0
                     if d['zero_y']: t[1] = 0.0
                 recs.append(list(t) + list(s) + list(q))
-    np.array(recs, '<f4').tofile(os.path.join(out, 'vincent_local.bin'))
-    return dict(file='vincent_local.bin', record='t3 s3 q4 (xyzw) float32, parent-relative',
+    np.array(recs, '<f4').tofile(os.path.join(out, name))
+    return dict(file=name, record='t3 s3 q4 (xyzw) float32, parent-relative',
                 bones=bc, parent=[int(p) for p in parent], clips=index,
                 note='FUN_005a9db0: out layer at weight 1 (FUN_005afa30), head layer lerped in at MP+0x408 '
                      '(FUN_005afa58: t/s lerp, q nlerp with hemisphere flip), then compose (anim_rot.compose)')
@@ -510,7 +512,8 @@ def export(dump, out, mutate_parents=False, clip_spec=None, sets=DEFAULT_SETS, p
                               'node names j00..j92; three.js binds its tracks to the main model by name). '
                               'Fields as in vincent.json clips.', fps=dict(assumed=FPS),
                        bone_count=bc, parent_sha1=parent_sha1(sk['parent']),
-                       clips={c: clip_side(d) for c, d in clips.items()}),
+                       clips={c: clip_side(d) for c, d in clips.items()},
+                       local_pose=local_pose(sk, parent, clips, out, f'vincent_{pack}_local.bin')),
                   open(os.path.join(out, f'vincent_{pack}.json'), 'w'), indent=1)
         print("wrote", os.path.join(out, f'vincent_{pack}.glb'), f"{os.path.getsize(os.path.join(out, f'vincent_{pack}.glb')) / 1e6:.2f} MB,",
               len(clips), "clips:", ' '.join(f"{c}{'(loop)' if d['loop'] else ''}" for c, d in clips.items()))

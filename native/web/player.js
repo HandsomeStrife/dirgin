@@ -257,6 +257,7 @@ export class PlayerController {
         for (const a of this.actions) {
           if (!a.canEnter(ctx)) continue;
           this.active = a;
+          if (this.weaponHook && this.weaponHook.actionEnter) this.weaponHook.actionEnter(a);
           const req = a.enter(ctx);
           if (req && req.clip && ctx.anim) ctx.anim.play(req.clip, req);
           break;
@@ -274,10 +275,14 @@ export class PlayerController {
     }
     ctx.input = input;
     if (owned) this.locate();                     // an action moved him off the body's polygon
+    // weapon (aim.js): camera update + input (FUN_0032ace0 / FUN_003320c0) before the intent
+    // (the camera and FUN_00579570 run in every state, FUN_005786e8; actions pause the buttons and clips)
+    if (this.weapon && this.weaponHook) this.weaponHook.pre(input, !!this.active);
     this.stickInput(input);                       // FUN_00333150: runs in every state
     this.intent(owned);                           // FUN_00578748: the ramp runs in every state
     if (loco) this.moveTick();                    // FUN_0034ea18 -> FUN_0034c388 case 0xc
-    if (loco) this.rotate();                      // FUN_0034ea18 -> FUN_0034de50 mode 4
+    if (loco) this.rotate();                      // FUN_0034ea18 -> FUN_0034de50 mode 4 (6 with the weapon out)
+    if (this.weapon && this.weaponHook) this.weaponHook.post(input, !!this.active);   // FUN_00579570, clips
     if (ctx.anim && ctx.anim.gameFrame) ctx.anim.gameFrame(this, STEP);   // FUN_00343160 / FUN_005aa5b8
     this.frames++;
   }
@@ -382,8 +387,14 @@ export class PlayerController {
     // normalised stick direction, w = speed per tick
     const d = norm3(P.dir);
     const w = f32(spd * f32(0.016666668));
-    // P+0x29c = 2 (mode set by FUN_005747f8 in FUN_00333150); C+0x568 bit 0x1000 clear
     this.setMove(w, d);                           // FUN_0034af98
+    // P+0x29c = 3 (weapon out; aim_core.js): no turn request, rotation mode 6 (FUN_0034e960(C, 6)):
+    // FUN_0034de50 case 6 turns toward C+0x2b0 - C+0x30 at rate C+0x2cc = 0.5. C+0x2b0 = the face
+    // point (FUN_003424c0 -> FUN_0034b5e0). GUESS: its sideways offset (C row 0 x 0.25..1.25 by
+    // C+0x664, FUN_003424c0) is left out. The target is flattened: row 2 y stays 0 in every
+    // aim trace record.
+    if (this.aimTurn()) return;
+    // P+0x29c = 2 (mode set by FUN_005747f8 in FUN_00333150); C+0x568 bit 0x1000 clear
     // turn: FUN_0034b638(rate, C, dir); rate = (P+0x298 / 512 + 0.5) x 0.25, 0 with no stick
     const rate = P.b298 === 0 ? 0 : f32(f32(f32(P.b298 * f32(0.001953125)) + 0.5) * 0.25);
     this.setTurn(rate, d);
@@ -420,6 +431,19 @@ export class PlayerController {
     L = Math.hypot(vx, vz);
     this.setMove(L, L > 0 ? { x: vx / L, y: 0, z: vz / L } : C.dir);
     this.setTurn(0.25, d);                        // FUN_0034b638(0.25, ...) in jump states
+    // the air branch doesn't change the rotation mode: with the weapon out it stays 6, whose
+    // case in FUN_0034de50 rewrites C+0x2c0 / C+0x2cc (traced: aim_g, the turn to the aim
+    // point holds through the jump)
+    this.aimTurn();
+  }
+
+  // rotation mode 6 (weapon out): turn toward the face point at 0.5 (see intent)
+  aimTurn() {
+    const wpn = this.weapon;
+    if (!(wpn && wpn.isAiming())) return false;
+    const fp = wpn.P.facePt;
+    this.setTurn(0.5, fp ? norm3({ x: fp.x - this.pos.x, y: 0, z: fp.z - this.pos.z }) : this.C.face);
+    return true;
   }
 
   // FUN_0034af98(speed, C, dir): C+0xc0 = dir (if non-zero), C+0xcc = speed
@@ -627,6 +651,11 @@ export class SpeedAnimator {
       this.frames[k] = Math.round(clip.duration * 60);
     }
     this.library = new Map(Object.values(clips).map(c => [c.name, c]));
+    // the installed clip table C+0x5f4 (FUN_00345b58): { key, thr, root } per entry. Default =
+    // the locomotion table (GAME.loco, keys idle/walk/run); aim.js installs the aimed tables
+    // (FUN_00595440) with clip names as keys.
+    this.table = GAME.loco;
+    this.request = null;                          // a one-shot motion request on the head layer
     this.current = 'idle';
     this.actions.idle.play();
     this.rate = 0.5;                              // MP+0x40c
@@ -647,6 +676,55 @@ export class SpeedAnimator {
   }
 
   bind(ctrl) { this.ctrl = ctrl; }
+
+  // an action for a clip key (lazily for table / request clips from the packs)
+  ensure(key) {
+    if (this.actions[key]) return true;
+    const clip = this.library.get(key);
+    if (!clip) return false;
+    const a = this.mixer.clipAction(clip);
+    a.setLoop(THREE.LoopRepeat, Infinity);
+    a.timeScale = 0;
+    this.actions[key] = a; this.names[key] = key; this.frames[key] = Math.round(clip.duration * 60);
+    return true;
+  }
+
+  // FUN_00345b58: install a clip table (resets the current index C+0x659 = -1, so the next
+  // choice starts its clip at frame 0). null = the default locomotion table.
+  setTable(entries, speed = 0) {
+    const t = entries || GAME.loco;
+    if (t === (this.table || GAME.loco)) return;
+    for (const e of t) if (!this.ensure(e.key)) return false;
+    this.table = t; this.cur = -1;
+    if (entries) {
+      // an aimed table: FUN_00345b58 installs it (C+0x658 > 0); keep the locomotion table's own
+      // install flag (the traced install-at-5-u/s rule, gameFrame) for when it comes back
+      if (this.locoInstalled === undefined) this.locoInstalled = !!this.installed;
+      this.installed = true;
+    } else if (this.locoInstalled !== undefined) {
+      this.installed = this.locoInstalled; this.locoInstalled = undefined;
+      // holster: the locomotion choice runs at once at the current speed (traced: h_st standing,
+      // aim_e f221; h_rn while running, aim_h_holster_run f91), even before the table's first
+      // install (that rule stays: without it no further choice runs until 5 u/s).
+      // GUESS: the game's install path on holster isn't decoded; this matches both traces.
+      if (!this.installed) this.switchTo(this.pick(speed));
+    }
+    return true;
+  }
+
+  // a one-shot motion request on the head layer (FUN_00345818 from a state class, e.g. the
+  // stand-fire class FUN_00596460: h_st_f). The table choice pauses until clearRequest().
+  // Blends over C+0x591 + 1 like a table switch; ends (FUN_003460d8) on the last frame.
+  playRequest(key) {
+    if (!this.ensure(key)) return false;
+    this.out = { key: this.head.key, frame: this.head.frame, prevFrame: this.head.frame };
+    this.head = { key, frame: 0, prevFrame: 0 };
+    this.blend = { len: GAME.blendFrames + 1, rem: GAME.blendFrames + 1, w: 0 };
+    this.request = { key, ended: false };
+    this.current = key;
+    return true;
+  }
+  clearRequest() { if (this.request) { this.request = null; this.cur = -1; } }
 
   addClips(clips) { for (const c of clips) if (!this.library.has(c.name)) this.library.set(c.name, c); }
   has(name) { return this.library.has(name); }
@@ -695,11 +773,12 @@ export class SpeedAnimator {
 
   // FUN_00346860: the table index for ground speed s (u/s)
   pick(s) {
-    const L = GAME.loco;
+    const L = this.table || GAME.loco;
     const thr0 = Math.max(L[0].thr, 0.01);        // 0.75 with C+0x564 bit 0x800 (clear)
     const hyst = this.cur === 2 ? -0.1 : 0.0;
     if (s <= thr0) return 0;
-    if (s <= f32(L[1].thr + hyst)) return 1;
+    // the index is clamped to C+0x658 - 1 (entry count): a 1-entry table always picks 0
+    if (L.length > 1 && s <= f32(L[1].thr + hyst)) return 1;
     return L.length - 1;
   }
 
@@ -716,12 +795,14 @@ export class SpeedAnimator {
     // the third frame of stick); 3.70 the frame before doesn't install it.
     if (!this.installed && s >= 5.0) this.installed = true;
     let rate = this.rate;
-    if (this.installed) {
+    if (this.request) {
+      rate = 0.5;                                 // FUN_003456c0 / FUN_00345818 rate 1.0 -> MP+0x40c 0.5
+    } else if (this.installed || (this.table && this.table !== GAME.loco)) {
       const idx = this.pick(s);
       if (idx !== this.cur) this.switchTo(idx);
       // FUN_00346c10 (C+0x564 = 0x19: bits 1, 8, 0x10)
       const run = (GAME.locoFlags & 8) !== 0 && this.cur === 2;
-      const root = GAME.loco[this.cur].root;      // C+0x65c
+      const root = (this.table || GAME.loco)[this.cur].root;     // C+0x65c
       let r = 1.0;
       if (root !== 0) {
         const [lo, hi] = run ? GAME.runRateClamp : GAME.rateClamp;
@@ -744,10 +825,14 @@ export class SpeedAnimator {
     // the clips (FUN_005aa5b8, line 218): after this frame's clip choice, before the advance.
     if (this.drawHook) this.drawHook();
     // FUN_005aa5b8 -> FUN_005aa2a8 on the head layer and the blend-out layer
+    const req = this.request;
     const adv = L => {
       L.prevFrame = L.frame;
       L.frame = f32(L.frame + f32(f32(rate * 1.0) * step));   // weight byte 128 / 128
-      if (L.frame >= this.frames[L.key]) { L.frame = 0; L.prevFrame = 0; }   // loop: reset to 0
+      const n = this.frames[L.key];
+      if (req && L === this.head && L.key === req.key) {      // one-shot: hold n - 1
+        if (L.frame >= n - 1) { L.frame = n - 1; req.ended = true; }
+      } else if (L.frame >= n) { L.frame = 0; L.prevFrame = 0; }   // loop: reset to 0
     };
     adv(this.head);
     if (blending) {
@@ -760,7 +845,7 @@ export class SpeedAnimator {
   // FUN_00346860: a new table index
   switchTo(idx) {
     const prevKey = this.head.key, first = this.cur === -1;
-    const key = GAME.loco[idx].key;
+    const key = (this.table || GAME.loco)[idx].key;
     let frame = 0;
     if (!first) frame = Math.min(Math.max(this.head.frame * 2, 0), this.frames[key] * 2 - 1) * 0.5;  // FUN_005a8fd0
     const len = (idx === 0 && !first ? GAME.blendToIdle : GAME.blendFrames) + 1;
@@ -798,7 +883,10 @@ export class SpeedAnimator {
     this.mixer.update(0);
     // The game's own pose build replaces the mixer's model-space mix for the locomotion
     // clips (skipped while an action's clip fades out: that crossfade is the mixer's GUESS).
-    if (this.lp && !this._fadeOut)
+    // Clips without local-pose records (an old export, or a pack exported before packs carried
+    // vincent_<pack>_local.bin) keep the mixer's model-space mix (notes/fidelity-audit.md)
+    const hasLP = k => !!this.lp.clips[this.names[k]];
+    if (this.lp && !this._fadeOut && hasLP(this.head.key) && (!this.out || hasLP(this.out.key)))
       this.poseLocal(this.names[this.head.key], fr(this.head),
                      this.out ? this.names[this.out.key] : null, this.out ? fr(this.out) : 0, this.blend.w);
   }
@@ -822,10 +910,24 @@ export class SpeedAnimator {
                 S: new Float64Array(n * 3), P: new Float64Array(n * 3), q: new THREE.Quaternion(), v: new THREE.Vector3() };
   }
 
+  // a clip pack's local TRS (vincent_<pack>.json local_pose + vincent_<pack>_local.bin,
+  // export_web_vincent.py --pack; same record format): its clips join the table and read
+  // their own file. A pack for another bone count is refused.
+  addLocalPose(info, buffer) {
+    const L = this.lp;
+    if (!L) return false;
+    if (info.bones !== L.n) throw new Error(`local pose: pack has ${info.bones} bones, rig ${L.n}`);
+    const data = new Float32Array(buffer);
+    for (const [name, c] of Object.entries(info.clips))
+      if ((c.offset + c.frames * L.n) * 10 > data.length) throw new Error(`local pose: ${name} runs past the file (truncated?)`);
+    for (const [name, c] of Object.entries(info.clips)) if (!L.clips[name]) L.clips[name] = { ...c, data };
+    return true;
+  }
+
   // FUN_005af6c0 at a fractional clip frame: t/s lerp, q nlerp with hemisphere flip between
   // the bracketing keys (the export samples every integer frame, so the keys are frames).
   sampleLocal(name, frame, out) {
-    const L = this.lp, c = L.clips[name], d = L.data, n = L.n;
+    const L = this.lp, c = L.clips[name], d = c.data || L.data, n = L.n;
     let i = Math.floor(frame);
     i = Math.max(0, Math.min(i, c.frames - 2));
     const u = frame - i, o0 = (c.offset + i * n) * 10, o1 = o0 + n * 10;
@@ -907,9 +1009,27 @@ export const CAM_TYPE_C = {                       // type 0xc object (FUN_003301
   rate: [0.05, 0.05],                             // +0x30 / +0x34: look-stick yaw / pitch rate
   fov: 73.5,                                      // +0x50
 };
+// The weapon views' type objects (DAT_004eed98[type]; runtime values traced in z128,
+// TRACE_FIELDSET=aim camtype_d / camtype_e). FUN_0032a420 maps view mode CAM+0x21c to a type:
+// 1 -> 0xc, 2 -> 0xd (weapon), 3 -> 0xe (first person), 4 -> 0xf (scope; not on the page).
+// 0xd: its update FUN_00330980 writes pivot x = CAM+0x1a0 every frame; CAM+0x1a0 eases to
+// DAT_0046e348 = 5 at FUN_00323318(0.25) (FUN_0032ace0) and is 5 in the state, so 5 here.
+// 0xe: the values after its enter FUN_00330d18 (FOV = DAT_0046e3f0).
+export const CAM_TYPE_D = { pivot: [5, -16.25, 0], offset: [0, 0, -35], rate: [0.05, 0.05], fov: 73.5 };
+export const CAM_TYPE_E = { pivot: [0, -16.25, -0.1], offset: [0, 0, -0.1], rate: [0.05, 0.05], fov: 73.5 };
+export const CAM_TYPES = { 0xc: CAM_TYPE_C, 0xd: CAM_TYPE_D, 0xe: CAM_TYPE_E };
 const LOOK_TABLE = 1.0;                           // DAT_004a0650[DAT_004e1058 = 8] (view mode 1; option value in the state)
+const LOOK_TABLE_W = 0.66;                        // DAT_004a0608[DAT_004e1060 = 8] (view modes 2-4)
+const GAIN_DECAY_W = 0.06;                        // DAT_0046e354: FUN_00330980 / FUN_00330f08 auto-turn gain decay
+const EASE_OUT_FAST = 0.2;                        // DAT_0046e508: distance ease-out with CAM+0x1e8 0x100000 / near
+const KICK_SCALE = 1.0;                           // DAT_0046e43c (FUN_0032a330)
 const BASE_RATE_UP = [0.125, 0.5, 0.125];         // CAM+0x150 (base moving down, dy > 0)
 const BASE_RATE_DN = [0.125, 0.15, 0.125];        // CAM+0x160
+// CAM+0x150 / +0x160 as each type's enter writes them (FUN_00330240 0xc: DAT_0046e330/334/338;
+// FUN_00330748 0xd: DAT_0046e33c/340/344 = 0.3 / 0.5 / 0.15 when FUN_00326500() (true);
+// FUN_00330d18 0xe: (1, 0.5, 1) both). The rates stay until the next enter, i.e. follow the type.
+const BASE_RATES = { 0xc: [BASE_RATE_UP, BASE_RATE_DN], 0xd: [[0.3, 0.5, 0.3], [0.3, 0.15, 0.3]],
+                     0xe: [[1.0, 0.5, 1.0], [1.0, 0.5, 1.0]] };
 export const PITCH_MAX = 50 * DEG;                // DAT_0046e3f8 (50 in RAM; the ELF's initial value is 54)
 export const PITCH_MIN = -54 * DEG;               // DAT_0046e3fc
 const BASE_FOV = 73.5;                            // DAT_0046e3f0 in RAM (ELF: 65)
@@ -961,6 +1081,13 @@ const rotX = a => { const c = Math.cos(a), s = Math.sin(a); return [[1, 0, 0], [
 const rotY = a => { const c = Math.cos(a), s = Math.sin(a); return [[c, 0, -s], [0, 1, 0], [s, 0, c]]; };
 const mm = (A, B) => A.map(r => [0, 1, 2].map(j => r[0] * B[0][j] + r[1] * B[1][j] + r[2] * B[2][j]));
 const len3 = v => Math.sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+// rows from a unit forward with row 1 = (0, 1, 0) (FUN_0032ace0 l.2127-2140): right = up x f
+const basisFromForward = f => {
+  const h = Math.hypot(f[0], f[2]) || 1, r = [f[2] / h, 0, -f[0] / h];
+  return [r, [f[1] * r[2] - f[2] * r[1], f[2] * r[0] - f[0] * r[2], f[0] * r[1] - f[1] * r[0]], f];
+};
+const easeSin = x => (x < 0 ? 0 : x > 1 ? 1 : Math.sin(x * 1.5707964));   // FUN_00260d44
+const DAT_0046E4CC = 0.8;                         // recoil share of the view pitch (l.1762)
 
 // Camera collision set: the packets the camera's ray tests. FUN_0054c848 casts through the
 // map object (FUN_0053bb58) with probe index 6 = flags 0x18b, i.e. packets with class bit
@@ -1064,12 +1191,21 @@ export class FollowCamera {
 
   // one game frame. p: { pos: {x,y,z} (C+0x30, last frame's), want: {x,y,z} (C+0xc0),
   // state: P+0x104, stick: |left stick| (FUN_00325678), pad: [rx, ry] processed right stick or null }
+  // this.weapon (aim.js): aim_core.js WeaponSystem; its cam holds the view mode CAM+0x21c, the
+  // type CAM+0x28, the switch ramp CAM+0x17c, flags, recoil and kick. Without it: type 0xc, view 1.
   tick(p) {
-    const T = this.type, S = CSTEP;
+    const W = this.weapon || null, wc = W ? W.cam : null, S = CSTEP;
+    const T = wc ? CAM_TYPES[wc.type] : this.type;
+    const view1 = !wc || wc.view === 1;           // uStack_15c = (FUN_0032a0f0() == 1)
     this.prev = { eye: this.eye.slice(), at: this.at.slice(), f: this.M[2].slice() };
-    // FUN_00330478: auto-turn gain from the left stick
     const L = p.stick || 0;
-    this.gain = clampf(L > 0.5 ? (L - 0.5) * S : this.gain - S * 0.3, 0, 1);
+    if (!wc || wc.type === 0xc) {
+      // FUN_00330478: auto-turn gain from the left stick
+      this.gain = clampf(L > 0.5 ? (L - 0.5) * S : this.gain - S * 0.3, 0, 1);
+    } else {
+      // FUN_00330980 (0xd) / FUN_00330f08 (0xe): the gain only decays
+      this.gain = clampf(this.gain - GAIN_DECAY_W * S, 0, 1);
+    }
     // base follow (CAM+0x130, FUN_0032ace0 head). Snap flag 0x2000: base = player, flag
     // cleared. Else d = player - base; only when |d.y| < 15 is d scaled per axis (by
     // min(rate x step, 1) when FUN_003264e0() == 0, else by the raw rate); at 15+ the base
@@ -1082,7 +1218,8 @@ export class FollowCamera {
     } else {
       const d = [tgt[0] - old[0], tgt[1] - old[1], tgt[2] - old[2]];
       if (Math.abs(d[1]) < 15.0) {
-        const rr = 0.0 < d[1] ? BASE_RATE_UP : BASE_RATE_DN;
+        const [rUp, rDn] = wc ? BASE_RATES[wc.type] : BASE_RATES[0xc];
+        const rr = 0.0 < d[1] ? rUp : rDn;
         const k = DAT_0046B1D8 !== 0              // FUN_003264e0() == 0
           ? rr.map((x, j) => Math.min(x * S, BASE_RATE_MAX[j])) : rr;
         for (let j = 0; j < 3; j++) d[j] *= k[j];
@@ -1102,7 +1239,11 @@ export class FollowCamera {
       const s = n2c > 3.5 ? (n2c - 3.5) / (6.0 - 3.5) : 0;
       e2 = [e2[0] * s, e2[1] * s];
     }
-    const recede = (n2c - len3(v2d)) * 1.0;       // x (CAM+0x1e1 = 60) / 60; CAM+0x1e9 < 0
+    // CAM+0x1e9 < 0 = flag 0x8000 (set while the type is 0xc, see the nudge below); clear (the
+    // weapon views): no recede, and the angle change is zeroed too (l.404-432), which only the
+    // nudge reads, gated by the same bit
+    const f8000 = !wc || wc.type === 0xc;
+    const recede = f8000 ? (n2c - len3(v2d)) * 1.0 : 0;   // x (CAM+0x1e1 = 60) / 60
     // look stick (FUN_003256d8: x|x|, y|y|, signs +1 / -1; mouse: counts x 0.1 / step)
     // FUN_00254ac8: mouse counts set the latch DAT_004e17d0; a pad stick past 0.3 (after
     // x|x|) clears it; the sum is clamped to +-1
@@ -1156,35 +1297,66 @@ export class FollowCamera {
       }
     }
     // look stick -> yaw / pitch (type +0x30 / +0x34 x step x option table)
-    const ry = T.rate[0] * S * LOOK_TABLE, rp = T.rate[1] * S * LOOK_TABLE;
+    // (view modes 2-4 read DAT_004a0608[DAT_004e1060] instead, uStack_15c == 0)
+    const lt = view1 ? LOOK_TABLE : LOOK_TABLE_W;
+    const ry = T.rate[0] * S * lt, rp = T.rate[1] * S * lt;
     this.yaw = wrapA(this.yaw + sx * ry);
     this.pitch += sy * rp;
-    // follow nudge (CAM+0x1e8 bit 0x8000): turn by the look point's angle change, capped
-    if (this.idle > 0 && smag === 0 && !fun253f50()) {
+    // follow nudge (CAM+0x1e8 bit 0x8000): turn by the look point's angle change, capped.
+    // The bit is set by type 0xc's enter FUN_00330240 (0x330368) and cleared by 0xd's
+    // FUN_00330748 (0x330938) and 0xe's FUN_00330d18 (traced: set exactly while the type is 0xc)
+    if (f8000 && this.idle > 0 && smag === 0 && !fun253f50()) {
       this.yaw += clampf((L * 0.2 + 0.8) * f30 * 1.0 * e2[1], -ry, ry);
       this.pitch += clampf(f30 * 0.25 * e2[0], -rp, rp);
     }
+    // FUN_0032ace0 l.1509: a switch between views 2-4 (CAM+0x1e8 0x800, FUN_0032a420) adds the
+    // angles FUN_0032aaf8 measured (CAM+0x1d8 / +0x1dc); with 0x100000 (first person -> weapon
+    // view) the switch ramp CAM+0x17c is set to 1 here, so it ends this frame
+    if (wc) { const a = W.switchAngles(); this.pitch += a.pitch; this.yaw += a.yaw; }
     this.pitch = clampf(this.pitch, PITCH_MIN, PITCH_MAX);
-    // place the eye: offset, collision, distance ease
-    const g = this.place(base, old, { recede, state: p.state, L });
+    // l.1687-1762: the reticle offset, switch ramp, fade, FOV and recoil (aim_core.js cameraFrame)
+    if (W) W.cameraFrame(this.pitch);
+    if (wc) FollowCamera.shoulderPre(wc);
+    // place the eye: offset, collision, switch lerp, distance ease, eye kick
+    const g = this.place(base, old, { recede, state: p.state, L, view1,
+                                      fast: !!wc && (wc.flags & 0x100000) !== 0,
+                                      e: wc ? wc.e : 1,
+                                      recoil: wc ? DAT_0046E4CC * wc.k198 * (wc.fov / BASE_FOV) : 0,
+                                      kick: wc ? KICK_SCALE * wc.kick : 0 });
     this.eye = g.eye; this.at = g.at; this.M = g.M;
+    if (wc) FollowCamera.shoulderPost(wc);
+    if (W) W.kickDecay();                         // FUN_0032a348, after the eye kick
+  }
+
+  // FUN_00330478 (type 0xc) sets CAM+0x1a4 = 0 before FUN_0032ace0; FUN_00330980 (0xd) writes
+  // its pivot x = CAM+0x1a0 (CAM_TYPE_D.pivot[0], 5 = DAT_0046e348 at rest)
+  static shoulderPre(wc) { if (wc.type === 0xc) wc.a1a4 = 0; }
+  // l.2256-2264: CAM+0x1a0 eases to 5 at FUN_00323318(0.25); t = (x - 5) / (2 - 5);
+  // CAM+0x1a4 = -0.75 x FUN_00260d44(2t) below t = 0.5, else -0.75
+  static shoulderPost(wc) {
+    wc.a1a0 = (5.0 - wc.a1a0) * stepFrac(0.25) + wc.a1a0;
+    const t = (wc.a1a0 - 5.0) / (2.0 - 5.0);
+    wc.a1a4 = t < 0.5 ? -0.75 * easeSin(t + t) : -0.75;
   }
 
   // the eye for this frame (FUN_0032ace0 from the matrix build on); ctx = null: no
   // collision or easing (reset)
   place(base, old, ctx) {
-    const T = this.type;
+    const T = this.weapon ? CAM_TYPES[this.weapon.cam.type] : this.type;
     // final pitch: + atan(k tan(fov x 0.875 / 2)) - atan(k tan(BASE_FOV x 0.875 / 2)), 0 while
     // the type FOV = DAT_0046e3f0 (both 73.5 in z128); CAM+0x188 x +0x180 = 0 (no blend)
     const g0 = this.pitch * -0.4774648, x = Math.abs(g0) + 0.3;
     const kk = g0 * (x > 1 ? 1.0 : 1 - Math.cos(x * 1.5707964)); // FUN_00260cf4
+    // + 0.8 x CAM+0x198 x CAM+0x170 / DAT_0046e3f0 (recoil, l.1762; ctx.recoil, 0 without the weapon)
     const pf = this.pitch + Math.atan(kk * Math.tan(T.fov * 0.875 * DEG * 0.5))
                           - Math.atan(kk * Math.tan(BASE_FOV * 0.875 * DEG * 0.5));
-    const RX = rotX(pf), RY = rotY(this.yaw), M = mm(RX, RY);
+    const RX = rotX(pf + (ctx ? ctx.recoil || 0 : 0)), RY = rotY(this.yaw), M = mm(RX, RY);
     const off = T.offset.slice();
     off[1] *= Math.abs(RX[1][1]) * 0.8 + 0.2;
     const eoff = vm(off, M);
-    const piv = [T.pivot[0], T.pivot[1], T.pivot[2] + (pf > 0 ? -4.0 : -3.0) * pf];   // DAT_0046e4dc / 0x46e4d8
+    // l.1812: pivot y + CAM+0x1a4 (0 except the frame after leaving first person, FUN_00331160)
+    const a4 = this.weapon ? this.weapon.cam.a1a4 : 0;
+    const piv = [T.pivot[0], T.pivot[1] + a4, T.pivot[2] + (pf > 0 ? -4.0 : -3.0) * pf];   // DAT_0046e4dc / 0x46e4d8
     const pr = vm(piv, RY);
     const at = [base[0] + pr[0], base[1] + pr[1], base[2] + pr[2]];                    // CAM+0xf0
     let eye = [at[0] + eoff[0], at[1] + eoff[1], at[2] + eoff[2]];
@@ -1215,6 +1387,16 @@ export class FollowCamera {
         eye = [0, 1, 2].map(j => best.p[j] + fw[j] * push);
       }
     }
+    // switch ramp (CAM+0x2c == 0, l.2088-2140): the eye (CAM+0x90) and the forward row
+    // (CAM+0x80) move from last frame's toward this frame's by FUN_00260d44(CAM+0x17c) (taken
+    // before the ramp update; FUN_002611f4 = lerp), the forward renormalised with row 1 = (0,1,0)
+    let M2 = M;
+    if (ctx.e !== undefined && ctx.e < 1) {
+      const e = ctx.e, le = this.eye, lf = this.M[2], nf = M[2];
+      eye = [0, 1, 2].map(j => le[j] + (eye[j] - le[j]) * e);
+      const f = [0, 1, 2].map(j => lf[j] + (nf[j] - lf[j]) * e), fl = len3(f) || 1;
+      M2 = basisFromForward(f.map(v => v / fl));
+    }
     // distance (CAM+0x1c0): in at once, out slowly. Out: 0.03 per frame (FUN_00323318),
     // x0.1 while the base moves away from the eye in the on-foot states (view mode 1),
     // else x (|left stick| x 0.9 + 0.1); plus the recede term x (dist - 25) / (60 - 25)
@@ -1224,21 +1406,39 @@ export class FollowCamera {
     const u = [eye[0] - ref[0], eye[1] - ref[1], eye[2] - ref[2]];
     const dist = len3(u);
     const fz = dist >= 60.0 ? 1.0 : Math.max(0, (dist - 25.0) / (60.0 - 25.0));
+    // View mode 1 only (uStack_15c): when last frame's eye was within 17.5 of base + type
+    // pivot (unrotated, param_1+0x10), the out rate is (0.2 - 0.03) x (17.5 - d) / 10 + 0.03,
+    // as with CAM+0x1e8 0x100000 in any view (which gives 0.2); the state rule is view 1 only.
+    let near = false, k23 = 1.0;
+    if (ctx.view1 !== false && this.eye) {          // (constructor: no eye yet; reset: dist 1000, unused)
+      const le = this.eye;
+      const d17 = len3([base[0] + T.pivot[0] - le[0], base[1] + T.pivot[1] - le[1], base[2] + T.pivot[2] - le[2]]);
+      if (d17 < 17.5) { near = true; k23 = (17.5 - d17) / 10.0; }
+    }
+    // for test_cam_traces.mjs: which branch ran, and the walk-away test's margin
+    this.ease = { out: this.dist < dist, slowGap: null };
     if (this.dist < dist) {
-      let r = stepFrac(0.03);
+      const r0 = (ctx.fast || near) ? (EASE_OUT_FAST - 0.03) * k23 + 0.03 : 0.03;
+      let r = stepFrac(r0);
       const st = ctx.state;
       const slow = (st >= 2 && st < 6) || st === 0x13 || st === 0x14 || st === 0x1d || st >= 0xc0;
-      if (slow && 20.0 < dist) {
+      if (ctx.view1 !== false && slow && 20.0 < dist) {
         const dOld = len3([eye[0] - old[0], eye[1] - old[1], eye[2] - old[2]]);
         const dNew = len3([eye[0] - base[0], eye[1] - base[1], eye[2] - base[2]]);
         r *= dOld < dNew ? 0.1 : ctx.L * 0.9 + 0.1;
+        // pinned on a wall the base barely moves, dOld ~ dNew, and the game's f32 / VU rounding
+        // decides the x0.1 (traced: it flips every other frame)
+        this.ease.slowGap = dNew - dOld;
       }
       this.dist += (dist - this.dist) * r + fz * ctx.recede;
       eye = [0, 1, 2].map(j => ref[j] + u[j] / dist * this.dist);
     } else {
       this.dist = dist + ctx.recede;
     }
-    return { eye, at, M };
+    // eye kick (l.2412, FUN_00326500() true in the state): eye += forward x FUN_0032a330()
+    // (DAT_0046e43c x CAM+0x224); the kick then decays (FUN_0032a348, tick())
+    if (ctx.kick) eye = [0, 1, 2].map(j => eye[j] + M2[2][j] * ctx.kick);
+    return { eye, at, M: M2 };
   }
 
   // render: the camera between the last two game frames (alpha as ctrl.lerp; a display-rate

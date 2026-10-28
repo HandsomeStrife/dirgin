@@ -2,7 +2,7 @@
 """export_web_aim.py -- weapon stats and reticle tables for the web play page (aim.js).
 
     python3 -I native/assets/models/export_web_aim.py [--elf ELF | --iso ISO] [--bgd bgd.bin]
-        [--parts 117,141,,,,0] [-o native/web/data/aim] [--check-state STATE.p2s]
+        [--menudata menudata.bin] [--parts 117,141,,,,0] [-o native/web/data/aim] [--check-state STATE.p2s]
 
 Writes OUT/weapon.json and OUT/reticle.json (gitignored game data). Sources (all the user's
 own files; notes/aim-research.md):
@@ -23,8 +23,9 @@ reticle.json: the reticle draw tables read from the ELF (static data):
   FUN_003cb268). Phase lengths DAT_00472110[kind] (show / hide,
   FUN_003b0680 / FUN_003b0738), DAT_00472130[kind] (normal) and DAT_00472140[kind] (variant;
   FUN_003b07b0 / FUN_003b08a0). Texture name: PTR_DAT_0047d500[DAT_004727f0[2*kind]]
-  (FUN_003dd4a8). The texture itself is not exported: its texel layout is not decoded
-  (notes/aim-research.md, "Reticle texture").
+  (FUN_003dd4a8). The texture ('menu2' in data/etc/menudata.bin) is exported decoded as
+  reticle.json textures[name]: idx = w*h hex digits (PSMT4 indices, row-major), clut = 16 RGBA
+  (alpha 0..0x80); see menu_texture() and notes/aim-research.md, "Reticle texture".
 """
 import argparse
 import json
@@ -34,6 +35,7 @@ import sys
 
 ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', '..'))
 BGD = os.path.join(ROOT, 'extract/_KEL/data/bgd/bgd.bin')
+MENUDATA = os.path.join(ROOT, 'extract/_KEL/data/etc/menudata.bin')
 ELF = os.path.join(ROOT, 'elf/SLES_541.85')
 OUT = os.path.join(ROOT, 'native/web/data/aim')
 SAVE_PARTS = '117,141,,,,0'          # the sea-of-flames save's weapon slot 1 (R+0x34)
@@ -239,6 +241,100 @@ def reticle_json(elf):
             'hud': [512, 448], 'kinds': kinds, 'sprite_frames': frames}
 
 
+# ------------------------------------------------------------------ reticle texture
+# The reticle's texture ('menu2', PTR_DAT_0047d500[DAT_004727f0[2k]], loaded by FUN_003dd4a8 ->
+# FUN_00258590 / FUN_003d2b80) is a record in data/etc/menudata.bin: name (8 bytes), type 'tm2'
+# (4), size (4), then a TIM2 ('TIM4') file. Its picture header's GsTex0 says PSMT4 128x128,
+# TBW 2. The image region (imageSize) and the CLUT region (clutSize) each start with a zeroed
+# slot; the data sits at the END of each region (texels: the last w*h/2 bytes; colours: the last
+# clutColors*4 bytes). The texel bytes are the GS transfer image as uploaded: GS dump
+# reticle_f200 uploads them verbatim as PSMCT32 64x32 (BITBLTBUF DBW 1, TRXREG 64x32) to TBP 10792
+# and the 16 colours as PSMCT32 8x2 to CBP 10788, just before the reticle's 21 draws. The draws
+# read them back as TEX0 PSMT4 TBW 2 (CSM1, CSA 0), so the texels are the GS memory layout:
+# write as PSMCT32, read as PSMT4 (block / column tables below = the GS's own layout, as in
+# native/assets/textures/swizzle.c). Draw state from the dump: TEX1_1 = 0 (nearest, no mip),
+# CLAMP_1 = 0 (repeat), TCC 1, TFX 0 (modulate), ABE with (Cs - Cd) As + Cd, no alpha test.
+GS_BLOCK32 = [[0, 1, 4, 5, 16, 17, 20, 21], [2, 3, 6, 7, 18, 19, 22, 23],
+              [8, 9, 12, 13, 24, 25, 28, 29], [10, 11, 14, 15, 26, 27, 30, 31]]
+GS_COL32 = [[0, 1, 4, 5, 8, 9, 12, 13], [2, 3, 6, 7, 10, 11, 14, 15],
+            [16, 17, 20, 21, 24, 25, 28, 29], [18, 19, 22, 23, 26, 27, 30, 31],
+            [32, 33, 36, 37, 40, 41, 44, 45], [34, 35, 38, 39, 42, 43, 46, 47],
+            [48, 49, 52, 53, 56, 57, 60, 61], [50, 51, 54, 55, 58, 59, 62, 63]]
+GS_BLOCK4 = [[0, 2, 8, 10], [1, 3, 9, 11], [4, 6, 12, 14], [5, 7, 13, 15],
+             [16, 18, 24, 26], [17, 19, 25, 27], [20, 22, 28, 30], [21, 23, 29, 31]]
+GS_COL4 = [
+    [0, 8, 32, 40, 64, 72, 96, 104, 2, 10, 34, 42, 66, 74, 98, 106, 4, 12, 36, 44, 68, 76, 100, 108, 6, 14, 38, 46, 70, 78, 102, 110],
+    [16, 24, 48, 56, 80, 88, 112, 120, 18, 26, 50, 58, 82, 90, 114, 122, 20, 28, 52, 60, 84, 92, 116, 124, 22, 30, 54, 62, 86, 94, 118, 126],
+    [65, 73, 97, 105, 1, 9, 33, 41, 67, 75, 99, 107, 3, 11, 35, 43, 69, 77, 101, 109, 5, 13, 37, 45, 71, 79, 103, 111, 7, 15, 39, 47],
+    [81, 89, 113, 121, 17, 25, 49, 57, 83, 91, 115, 123, 19, 27, 51, 59, 85, 93, 117, 125, 21, 29, 53, 61, 87, 95, 119, 127, 23, 31, 55, 63],
+    [192, 200, 224, 232, 128, 136, 160, 168, 194, 202, 226, 234, 130, 138, 162, 170, 196, 204, 228, 236, 132, 140, 164, 172, 198, 206, 230, 238, 134, 142, 166, 174],
+    [208, 216, 240, 248, 144, 152, 176, 184, 210, 218, 242, 250, 146, 154, 178, 186, 212, 220, 244, 252, 148, 156, 180, 188, 214, 222, 246, 254, 150, 158, 182, 190],
+    [129, 137, 161, 169, 193, 201, 225, 233, 131, 139, 163, 171, 195, 203, 227, 235, 133, 141, 165, 173, 197, 205, 229, 237, 135, 143, 167, 175, 199, 207, 231, 239],
+    [145, 153, 177, 185, 209, 217, 241, 249, 147, 155, 179, 187, 211, 219, 243, 251, 149, 157, 181, 189, 213, 221, 245, 253, 151, 159, 183, 191, 215, 223, 247, 255],
+    [256, 264, 288, 296, 320, 328, 352, 360, 258, 266, 290, 298, 322, 330, 354, 362, 260, 268, 292, 300, 324, 332, 356, 364, 262, 270, 294, 302, 326, 334, 358, 366],
+    [272, 280, 304, 312, 336, 344, 368, 376, 274, 282, 306, 314, 338, 346, 370, 378, 276, 284, 308, 316, 340, 348, 372, 380, 278, 286, 310, 318, 342, 350, 374, 382],
+    [321, 329, 353, 361, 257, 265, 289, 297, 323, 331, 355, 363, 259, 267, 291, 299, 325, 333, 357, 365, 261, 269, 293, 301, 327, 335, 359, 367, 263, 271, 295, 303],
+    [337, 345, 369, 377, 273, 281, 305, 313, 339, 347, 371, 379, 275, 283, 307, 315, 341, 349, 373, 381, 277, 285, 309, 317, 343, 351, 375, 383, 279, 287, 311, 319],
+    [448, 456, 480, 488, 384, 392, 416, 424, 450, 458, 482, 490, 386, 394, 418, 426, 452, 460, 484, 492, 388, 396, 420, 428, 454, 462, 486, 494, 390, 398, 422, 430],
+    [464, 472, 496, 504, 400, 408, 432, 440, 466, 474, 498, 506, 402, 410, 434, 442, 468, 476, 500, 508, 404, 412, 436, 444, 470, 478, 502, 510, 406, 414, 438, 446],
+    [385, 393, 417, 425, 449, 457, 481, 489, 387, 395, 419, 427, 451, 459, 483, 491, 389, 397, 421, 429, 453, 461, 485, 493, 391, 399, 423, 431, 455, 463, 487, 495],
+    [401, 409, 433, 441, 465, 473, 497, 505, 403, 411, 435, 443, 467, 475, 499, 507, 405, 413, 437, 445, 469, 477, 501, 509, 407, 415, 439, 447, 471, 479, 503, 511],
+]
+
+
+def gs_word32(x, y, bw):                    # PSMCT32 word address (bw in 64-px units)
+    page = (x // 64) + (y // 32) * max(bw, 1)
+    return page * 2048 + GS_BLOCK32[(y % 32) // 8][(x % 64) // 8] * 64 + GS_COL32[y % 8][x % 8]
+
+
+def gs_nibble4(x, y, bw):                   # PSMT4 nibble address (bw in 64-px units)
+    page = (x // 128) + (y // 128) * max(bw // 2, 1)
+    return page * 16384 + GS_BLOCK4[(y % 128) // 16][(x % 128) // 32] * 512 + GS_COL4[y % 16][x % 32]
+
+
+def find_tim(data, name):
+    key = name.encode('latin-1').ljust(8, b'\0')[:8] + b'tm2\0'
+    o = 0
+    while True:
+        o = data.find(key, o)
+        if o < 0:
+            raise ValueError('%s: no record in menudata.bin' % name)
+        if o % 16 == 0 and data[o + 16:o + 20] in (b'TIM2', b'TIM3', b'TIM4'):
+            return o + 16
+        o += 1
+
+
+def menu_texture(data, name):
+    t = find_tim(data, name)
+    pic = t + (0x80 if data[t + 5] else 0x10)
+    total, clut_size, img_size, hdr, ncol = struct.unpack_from('<IIIHH', data, pic)
+    ctype, itype, w, h = data[pic + 0x12], data[pic + 0x13], *struct.unpack_from('<HH', data, pic + 0x14)
+    tex0 = struct.unpack_from('<Q', data, pic + 0x18)[0]
+    psm, tbw = (tex0 >> 20) & 0x3f, (tex0 >> 14) & 0x3f
+    if itype != 4 or psm != 0x14 or (ctype & 0x3f) != 3 or ncol != 16:
+        raise ValueError('%s: not a PSMT4 / 16-colour CT32 CLUT picture' % name)
+    img = pic + hdr
+    nb = w * h // 2
+    tex = data[img + img_size - nb:img + img_size]
+    clut = data[img + img_size + clut_size - ncol * 4:img + img_size + clut_size]
+    # the upload: PSMCT32, (tbw / 2) x 64 px wide (one PSMT4 page = one PSMCT32 page)
+    bw32 = max(tbw // 2, 1)
+    uw = bw32 * 64
+    words = struct.unpack('<%dI' % (nb // 4), tex)
+    mem = {}
+    for i, v in enumerate(words):
+        mem[gs_word32(i % uw, i // uw, bw32)] = v
+    idx = []
+    for y in range(h):
+        for x in range(w):
+            n = gs_nibble4(x, y, tbw)
+            idx.append('%x' % ((mem[n >> 3] >> (4 * (n & 7))) & 15))
+    # CSM1, 16 colours: entry i = word i of the 8x2 PSMCT32 block (alpha 0..0x80)
+    cl = [list(clut[4 * i:4 * i + 4]) for i in range(ncol)]
+    return {'w': w, 'h': h, 'psm': 'PSMT4', 'tbw': tbw, 'idx': ''.join(idx), 'clut': cl,
+            'tex1': 0, 'clamp': 0, 'tfx': 0, 'tcc': 1}
+
+
 # ------------------------------------------------------------------ test aid
 def check_state(path, parts_all):
     sys.path.insert(0, os.path.join(ROOT, 'tools/trace'))
@@ -267,6 +363,7 @@ def main():
     ap.add_argument('--elf', default=ELF)
     ap.add_argument('--iso')
     ap.add_argument('--bgd', default=BGD)
+    ap.add_argument('--menudata', default=MENUDATA)
     ap.add_argument('--parts', default=SAVE_PARTS)
     ap.add_argument('-o', '--out', default=OUT)
     ap.add_argument('--check-state')
@@ -280,6 +377,8 @@ def main():
     w = compose([allp[i] if i is not None else None for i in sel[:6]])
     wj = weapon_json(w, a.parts)
     rj = reticle_json(load_elf(a))
+    md = open(a.menudata, 'rb').read()
+    rj['textures'] = {n: menu_texture(md, n) for n in sorted({kd['texture'] for kd in rj['kinds'].values()})}
     # write only once both are built, so a failure leaves neither file half-updated
     os.makedirs(a.out, exist_ok=True)
     for name, obj, ind in (('weapon.json', wj, 1), ('reticle.json', rj, None)):
@@ -287,8 +386,9 @@ def main():
         with open(tmp, 'w') as fh:
             json.dump(obj, fh, indent=ind)
         os.replace(tmp, os.path.join(a.out, name))
-    print('weapon.json: interval %d, range %.0f, magazine %d, recoil %.2f deg; reticle.json: %d kinds'
-          % (wj['interval'], wj['range10'] * 10, wj['magazine'], wj['recoil_deg'], len(rj['kinds'])))
+    print('weapon.json: interval %d, range %.0f, magazine %d, recoil %.2f deg; reticle.json: %d kinds, textures %s'
+          % (wj['interval'], wj['range10'] * 10, wj['magazine'], wj['recoil_deg'], len(rj['kinds']),
+             ', '.join(rj['textures'])))
 
 
 if __name__ == '__main__':

@@ -1,0 +1,2 @@
+{"name": "aim_i_fp_holster", "frames": 200, "doc": "worker 0099: R3 from cold (first person), then circle while in first person (holster), stand still",
+ "events": [{"from": 10, "to": 12, "buttons": ["r3"]}, {"from": 80, "to": 82, "buttons": ["circle"]}]}

@@ -1,0 +1,2 @@
+{"name": "w101_aim_pose", "frames": 72, "log_from": 12, "doc": "worker 0101, TRACE_FIELDSET=pose: R1 at 10 raises the gun (h_st -> h_st_a), stick up from 30 (h_wk_a -> h_rn_a); logs frames 12-71 with the bone matrices",
+ "events": [{"from": 10, "to": 12, "buttons": ["r1"]}, {"from": 30, "to": 72, "ly": -1.0}]}

@@ -1,0 +1,2 @@
+{"name": "cam_near_back", "frames": 280, "doc": "worker 0099: run toward the camera into the wall behind, then run away (eye eases out from close)",
+ "events": [{"from": 10, "to": 100, "ly": 1.0}, {"from": 110, "to": 200, "ly": -1.0}]}

@@ -120,10 +120,26 @@ export function createOutputStage(renderer, { enabled = true, msaa = false, nati
     return size;
   }
 
+  function drawHud(w, h, nat) {
+    if (!stage.hud) return;
+    const a = renderer.autoClear;
+    renderer.autoClear = false;
+    const base = { renderer, w, h, x0: CX, y0: CY };
+    stage.hud(nat ? { ...base, native: true, cx: CX, cy: CY, kx: 1, ky: 1 }
+                  : { ...base, native: false, cx: w / 2, cy: h / 2, kx: (4 / 3) * h / COLS, ky: h / LINES });
+    renderer.autoClear = a;
+  }
+
   const stage = {
     enabled,
     native,
     framebuffer: fbRT,                                 // the 432x512 scene target (headless checks)
+    // HUD drawn into the frame after the scene, as the game draws its HUD into the framebuffer
+    // before the PCRTC merge: hud({ renderer, native, w, h, x0, y0, cx, cy, kx, ky }) renders into the
+    // current target. Frame px (x, y) -> target px: cx + (x - x0) kx, cy + (y - y0) ky (x0, y0 = 213, 256) (native: identity on 432x512;
+    // full: the projection centre at the canvas centre, one frame row = h / 512, one frame column
+    // = (4/3 h / 425.5), the CRTC's 4:3 picture)
+    hud: null,
     // set the camera's projection for this mode (call at start and on resize)
     fitCamera(camera) {
       if (camera.userData.fov0 === undefined) camera.userData.fov0 = camera.fov;
@@ -167,6 +183,7 @@ export function createOutputStage(renderer, { enabled = true, msaa = false, nati
         renderer.setRenderTarget(fbRT);                // draw would re-clear the bars to the scene colour)
         renderer.clear();
         renderer.render(scene, camera);
+        drawHud(FB_W, FB_H, true);
         merge.mat.uniforms.c2on.value = stage.enabled ? 1 : 0;
         renderer.setRenderTarget(vckRT);
         renderer.render(merge.scene, qCam);
@@ -186,7 +203,10 @@ export function createOutputStage(renderer, { enabled = true, msaa = false, nati
         renderer.autoClear = autoClear;
         return;
       }
-      if (!stage.enabled) { renderer.setRenderTarget(target); renderer.render(scene, camera); renderer.setRenderTarget(null); return; }
+      if (!stage.enabled) {
+        renderer.setRenderTarget(target); renderer.render(scene, camera); drawHud(s.x, s.y, false);
+        renderer.setRenderTarget(null); return;
+      }
       if (rt.width !== s.x || rt.height !== s.y) rt.setSize(s.x, s.y);
       const line = s.y / LINES;                        // one PS2 line, canvas pixels
       const vck = (4 / 3) * s.y / COLS * VCK;          // one VCK, canvas pixels
@@ -194,6 +214,7 @@ export function createOutputStage(renderer, { enabled = true, msaa = false, nati
       renderer.setRenderTarget(rt);
       renderer.clear();
       renderer.render(scene, camera);
+      drawHud(s.x, s.y, false);
       renderer.setRenderTarget(target);
       renderer.render(full.scene, qCam);
       renderer.setRenderTarget(null);

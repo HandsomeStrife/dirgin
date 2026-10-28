@@ -207,6 +207,8 @@ INPUTS = {
     '07770582.bin': '78ede02dcc7662df0e9e3fb1f9b0239b58a72cc46fc9b5fac49fd8bc341428f9',
     # outside noPath (data/bgd): weapon parts for export_web_aim.py
     '../data/bgd/bgd.bin': 'cab126367d9fb61865d03323938cc422a450f15e4ab72de5999f6d2a6e21a9a3',
+    # outside noPath (data/etc): the HUD 'menu2' texture (reticle) for export_web_aim.py
+    '../data/etc/menudata.bin': 'b851a405451880e46a9f95c4be406b958ac81c44a9ac8de7bd7b8e7dccd74eb6',
 }
 
 

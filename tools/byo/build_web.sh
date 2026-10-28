@@ -197,6 +197,8 @@ for p in jump ladder shoot; do
   case $p in jump) clips=$PACK_JUMP ;; ladder) clips=$PACK_LADDER ;; shoot) clips=$PACK_SHOOT ;; esac
   step "clip pack: $p"
   run "pack_$p" $PY export_web_vincent.py export --no-dump --clips "$clips" --pack "$p"
+  # the pack clips' local TRS (vincent_<pack>_local.bin, same format as vincent_local.bin)
+  [ -s "$DATA/vincent/vincent_${p}_local.bin" ] || fail "data/vincent/vincent_${p}_local.bin missing after the $p pack export (log: $LOGS/pack_$p.log)"
   tail -n 1 "$LOGS/pack_$p.log" | cut -c1-160
 done
 
@@ -204,7 +206,7 @@ step "Vincent's gun (Cerberus)"
 run gun $PY export_web_gun.py --no-dump "$DATA/vincent"
 echo "ok"
 
-step "weapon stats + reticle tables (bgd.bin parts, ELF from the disc) -> data/aim"
+step "weapon stats + reticle tables and texture (bgd.bin parts, menudata.bin menu2, ELF from the disc) -> data/aim"
 run aim $PY export_web_aim.py --iso "$ISO" -o "$DATA/aim"
 tail -n 1 "$LOGS/aim.log"
 

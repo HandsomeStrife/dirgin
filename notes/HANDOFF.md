@@ -432,6 +432,9 @@ Read this first instead of re-deriving. Review images: notes/review/ (README exp
 - Hair vs cape while moving (worker 0088, 2026-10-28): NOT the cape logic, it's the camera. Per tick, page cloth vs game cloth (cw_walk/run/turn, all 82 verts): pos 0.011/0.002/0.010 mean; hair covered from behind by the cloth: page 0.154 vs game 0.156 (run). Rendered in-between frames at 60/144 Hz stay inside the tick values (no dip from ctrl.lerp, crossfades, the MP+0x10 lag or the heading lerp). Hair (j05-j12) and collar (j33/j35/j68/j70, prims 13/15/16) bones match the game (median 0.000). The traced game camera while moving sits at head height and looks level (17.2 up, 38 back); the page's GUESS FollowCamera sits ~30 up / ~50 back, looking down 17°, onto the collar top where the hair goes in. Same geometry from the game's camera hides it (turn-walk hair-over-collar share 0.129 page cam vs 0.029 game cam). Fix = translate FUN_0032ace0 (camera). No code changed. Image: review/hair-cape-moving.png (the "game" rows are page geometry from the traced game camera, not an emulator capture). Scripts: worker 0088 scratchpad moving.py / camview.py.
 - Follow camera translated (worker 0089, 2026-10-28): player.js `FollowCamera` is now FUN_00330478 -> FUN_0032ace0 for camera type 0xc / view mode 1 (base follow, look-at 17 up, eye 38 back, follow nudge, auto turn-behind, look stick + the game's USB-mouse path, 5-ray collision with slow ease-out). It ticks once per game frame BEFORE ctrl.step; the keys use its matrix. Checked on six new PCSX2 traces (`TRACE_FIELDSET=cam`, scripts in worker 0089 scratchpad/scripts): eye <= 0.0075, look-at <= 0.001, yaw <= 6e-6 rad, open and closed loop; locomotion replays unchanged. RAM != ELF for DAT_0046e3f0 (73.5), 0x46e500 (60), 0x46e3f8 (50): read the save state, not the ELF. GUESS left: camera collision file set [1,2], 1 px = 1 mouse count, spawn = save-state camera. Hair over collar while moving now equals the game camera's (turn-walk 1.3% vs 1.3%; was 12.9%). Image: review/camera-translated.png. Audit: "Camera" rows.
 - Camera review fixes (worker 0090, 2026-10-28): the base-follow |dy| < 15 test now wraps the rate block as in FUN_0032ace0 (15+ drop: base lands on the player; FUN_003264e0 = DAT_0046b1d8 == 0, 1 in RAM, so rates x step capped at 1). reset() is FUN_003285d0 (snap flag 0x2000, dist 1000 -> measured with collision, ramp 0); the ladder warp and H reset through ctrl.onTeleport. Translated FUN_00253f50 (off in the state), the 0.5 look deadzone -> FUN_00324440(10) bit (sx unchanged), FUN_00254ac8's pad-release of the mouse latch. Detached ?cam= view takes no mouse. Traces and locomotion replays unchanged. GUESS: reset angles (view 1), FUN_00326068(7) gate. Test: worker 0090 scratchpad test_drop.mjs.
+- Aiming on the page (worker 0098, 2026-10-28): worker 0077's weapon (aim.js / aim_core.js, FUN_00579570, bgd.bin stats, 21-piece reticle) merged onto the current page (3-way from the staging copy; player.js's setTable / playRequest / aimTurn / weaponHook, play.js `?aim=0`, shoot pack). Its GUESS GameCamera is gone: player.js `FollowCamera` now runs FUN_0032ace0's weapon (0xd) and first-person (0xe) paths through `follow.weapon` (gain decay, look table 0.66, flag 0x8000 off = no nudge/recede, base rates per type enter, ease-out 0.03/0.2, the switch lerp from LAST frame's eye/forward, FUN_0032aaf8 switch angles + ramp = 1 leaving first person (replaces the fastExit GUESS), FUN_00331160 shoulder drop, recoil in the view pitch, eye kick along forward). Several constants came from disassembling the enter functions in RAM (capstone; Ghidra has no decomp for them). Reticle drawn INTO the frame via output.js `hud` (native fb or full-HD target, before the PCRTC merge, so reports capture it). Tests (native/web): `AIM_TRACES=... node --import ./test_hooks.mjs test_aim.mjs` and `test_aim_camera.mjs` (all 8 aim traces + new w98_aim: eye <= 0.005, angles <= 7e-6); 17 mutations caught. Page vs game: review/aim-page.png (eye within 0.002 at both frames). OPEN: camera after a jump with the gun out (FUN_0032a0f8 flag 0x1000000 / CAM+0x220, reader not found; jump not wired on the page); reticle texture (decoded by worker 0100); aimed clips use the mixer pose (no local_pose export for the shoot pack: export_web_vincent.py). Scripts: worker 0098 scratchpad (aimgrab.py, scripts/w98_aim.json, pagecap.py, mutate.py; grab/ has the dumps + trace).
+- Aim review follow-ups (worker 0099, 2026-10-28): the view 1 near-eye ease-out (player.js `place()`) is now checked: new PCSX2 traces cam_near_back / cam_near_turn (run toward the camera into the wall behind, then run away / turn the camera) and aim_i_fp_holster (first person -> circle) match per tick (ease-out <= 0.005; aim_i eye <= 0.005); with the rule off they fail by 0.06 / 0.15 / 11. New test `native/web/test_cam_traces.mjs` replays all camera traces from `CAM_TRACES` (default tools/trace/out/cam, gitignored; 0089's six copied there, cam_run re-recorded and cam_lturn taken from 0089's out2, since the old ones lacked want_dir_speed); scripts in tools/trace/scripts/cam_*.json. Found, not fixed: at the wall behind the spawn the page's camera collision measures 0.048 closer than the game; the walk-away x0.1 test ties when pinned (game f32 rounding decides). test_aim_camera now asserts the page's wiring order matches its hand-built frame. Ladder mount: aim_core `ladderMount` (P+0x29c = 4; no drawn test in FUN_00576548 or its callers, so state 0xe with the gun away is the game's). Audit rows updated.
+- Reticle texture (worker 0100, 2026-10-28): DECODED. 'menu2' in data/etc/menudata.bin; its TIM regions start with a zeroed slot, so the texels are the LAST 0x2000 bytes of the image region (0077 read 0x80 early). They are the GS CT32 upload image (dump: 64x32 DBW 1 -> TBP 10792, CLUT 8x2 -> CBP 10788, read as PSMT4 TBW 2); export_web_aim.py `menu_texture` writes reticle.json `textures` (equal to the dump's GS memory at the draws, byte for byte). aim.js draws textured quads: UVs per vertex from FUN_003b1048, GS modulate (Cf Ct >> 7) and (Cs - Cd) As + Cd, TEX1 nearest (full HD: nearest texels at the target resolution). review/reticle.png (game | outlines | texture): green SSIM 0.34 -> 0.83 / 0.88, edges 0.07 -> 0.72 / 0.86. Tool: GS dumps carry the 4 MB GS memory at freeze +0x1a9 (worker 0100 scratchpad gsmem.py replays uploads into it). Open: add data/etc/menudata.bin (sha256 b851a405...4eb6) to tools/byo/disc.py INPUTS (not in this worker's allowed files); GS blend rounding not reproduced.
 
 ## Open
 - Post foot vs cape (review 40, left on purpose by Dan): the dump draws the near post
@@ -452,3 +455,80 @@ Read this first instead of re-deriving. Review images: notes/review/ (README exp
 - Hair vs collar from behind+above, running (worker 0093, 2026-10-28): the game does the SAME as the page; no defect, no code change. Captured the missing evidence: PCSX2 from the sea-of-flames state, full-stick run (pinned on the railing from ~frame 55, h_rn keeps playing, cape keyed), ry +1 pulses pitch the camera down; 4 GS dumps at pitch -6.5/-12.7/-23.8/-41 deg (Dan's report: -16). Each dump's camera fitted from room vertices (median 0.03-0.04 px) and its tick fixed by the character crop (ticks 112/141/172/207, h_rn f12.0/9.0/7.2/7.8). The page replays the same pad script closed loop from spawn: position <= 0.0002, clip frame exact, pitch exact (eye 0.3-0.44 off, so renders use the fitted camera), cape 0.09 mean (mostly a uniform 0.08 shift). Head/collar crops, hair pixels inside the collar region game/page: 202/212, 374/384, 504/500, 879/878; hair IoU 0.82-0.88, SSIM 0.82-0.83 (control, page 3 ticks off: IoU 0.41-0.57, SSIM 0.37-0.56). Visible difference: the gun on his back (game alpha-tested and dotted, page solid; the open gun ATE item). Image: review/hair-cape-above.png. Scripts and dumps: worker 0093 scratchpad (gsgrab.py with full-cape fields, scripts/above_run2.json, camfit.py, page_above.py, metrics.py, run2/d1-4.bin).
 - Gun draw modes (worker 0097, 2026-10-28): GS dumps hero/185126/185138: every gun draw is T8 TCC 1 MODULATE, ZTST GEQUAL, Z write on, right after Vincent's last hair draw; exactly the descriptor-flag-bit-1 triangles (5 drawn: 1 frame0, 4 barrel1) add ATE GEQUAL 100 / AFAIL RGB_ONLY / ABE (Cs-Cd)*As+Cd. gun.js now draws those as play.js's hair two passes (texture alpha kept in the atlas; meta.runs from export_web_gun.py, triangles in game draw order, 0 breaks vs the dumps). The remaining z-fight was a DECODER over-read, not game twins: FUN_005b2240 sends each descriptor as DMA ref qwc = u16 desc+6, but parse_drawpackets reads a group's last descriptor to EOF; on the gun 120/1058 tris leak from the next part (frame0.g1 d2: 16 topmt0 UV triples on frame0 verts = the same-place twins). export_cerberus.decode_gun now stops at qwc (none of the 120 is drawn in any dump; Vincent p000 unaffected). render_skinned.py still has the bug for other models. Gun textures are per triangle from the files in both export modes. Review: /srv/shared/dirge-port/review/gun-alpha.png.
 - Hair vs collar while running (worker 0094, 2026-10-28): ALREADY FIXED by worker 0092's multi-bone skin weights; no code change. Dan's reports e896/e1d5 were taken before it (data re-exported 13:25). Evidence: PCSX2 run on an open path from the sea-of-flames state (scripts w94a/b/z in the worker 0094 scratchpad; 1.2 u/frame through a left and a right turn), 5 GS dumps (frames 24/29/34/78/83, pitch -19 deg). Page closed loop from the SAVE-STATE spawn (the page's own spawn is the hero-dump placement, 0.69 off and 42 deg turned: set ctrl.spawn from the trace): position <= 0.003, bones <= 0.005, every drawn game vertex within 0.04-0.08 of the page, 0 page tris without a game counterpart, also between ticks at 120 Hz. Pre-0092 data: collar prims 13/15/16 up to 1.2-1.7 units high (median 0.3-0.45), reproducing Dan's view. Open (audit rows): page spawn != save state; idle cape target 3.4 off at the save state; the 100-frame cloth window on a turn from standing is not armed. Image: review/hair-collar-running.png. Scripts: worker 0094 scratchpad (gsgrab.py, camfit.py, dumpv.py, whichframe.py, page_cap.py, cmp_frames.py, vcmp2.py, extra.py, dancam.py).
+
+## Pack local poses (worker 0101, 2026-10-28; loader patch applied by the manager)
+export_web_vincent.py --pack now also writes `vincent_<pack>_local.bin` (vincent_local.bin's
+format, records t3 s3 q4) and a `local_pose` entry in vincent_<pack>.json (same fields as
+vincent.json's). build_web.sh fails if a pack's file is missing. Base outputs (vincent.glb/json,
+vincent_local.bin, cloth.json) and the pack glbs are byte-identical to before; the pack JSONs
+only gain `local_pose`. data/vincent re-exported. The loader change below is applied to player.js / play.js:
+
+```diff
+--- player.js.orig	2026-10-28 18:13:58.796587423 +0000
++++ player.js	2026-10-28 18:13:58.806587561 +0000
+@@ -883,9 +883,8 @@
+     this.mixer.update(0);
+     // The game's own pose build replaces the mixer's model-space mix for the locomotion
+     // clips (skipped while an action's clip fades out: that crossfade is the mixer's GUESS).
+-    // GUESS (port plumbing): clips without local-pose records (the pack clips, e.g. the aimed
+-    // h_st_a / h_wk_a: export_web_vincent.py local_pose covers the main glb's clips only) keep
+-    // the mixer's model-space mix (notes/fidelity-audit.md)
++    // Clips without local-pose records (an old export, or a pack exported before packs carried
++    // vincent_<pack>_local.bin) keep the mixer's model-space mix (notes/fidelity-audit.md)
+     const hasLP = k => !!this.lp.clips[this.names[k]];
+     if (this.lp && !this._fadeOut && hasLP(this.head.key) && (!this.out || hasLP(this.out.key)))
+       this.poseLocal(this.names[this.head.key], fr(this.head),
+@@ -911,10 +910,22 @@
+                 S: new Float64Array(n * 3), P: new Float64Array(n * 3), q: new THREE.Quaternion(), v: new THREE.Vector3() };
+   }
+ 
++  // a clip pack's local TRS (vincent_<pack>.json local_pose + vincent_<pack>_local.bin,
++  // export_web_vincent.py --pack; same record format): its clips join the table and read
++  // their own file. A pack for another bone count is refused.
++  addLocalPose(info, buffer) {
++    const L = this.lp;
++    if (!L) return false;
++    if (info.bones !== L.n) throw new Error(`local pose: pack has ${info.bones} bones, rig ${L.n}`);
++    const data = new Float32Array(buffer);
++    for (const [name, c] of Object.entries(info.clips)) if (!L.clips[name]) L.clips[name] = { ...c, data };
++    return true;
++  }
++
+   // FUN_005af6c0 at a fractional clip frame: t/s lerp, q nlerp with hemisphere flip between
+   // the bracketing keys (the export samples every integer frame, so the keys are frames).
+   sampleLocal(name, frame, out) {
+-    const L = this.lp, c = L.clips[name], d = L.data, n = L.n;
++    const L = this.lp, c = L.clips[name], d = c.data || L.data, n = L.n;
+     let i = Math.floor(frame);
+     i = Math.max(0, Math.min(i, c.frames - 2));
+     const u = frame - i, o0 = (c.offset + i * n) * 10, o1 = o0 + n * 10;
+--- play.js.orig	2026-10-28 18:13:58.798587450 +0000
++++ play.js	2026-10-28 18:14:14.029798659 +0000
+@@ -461,6 +461,15 @@
+       const g = await loader.loadAsync(`data/vincent/vincent_${n}.glb`);
+       anim.addClips(g.animations);
+       Object.assign(motions, side.clips || {});
++      // the pack clips' local TRS (player.js addLocalPose); without it they use the mixer pose
++      if (side.local_pose && anim.lp) {
++        const rl = await fetch('data/vincent/' + side.local_pose.file);
++        if (!rl.ok) console.warn(`${side.local_pose.file}: HTTP ${rl.status}: pack ${n} uses the mixer pose`);
++        else {
++          try { anim.addLocalPose(side.local_pose, await rl.arrayBuffer()); }
++          catch (e) { console.warn(`clip pack ${n}: ${e.message}: mixer pose`); }
++        }
++      } else if (!side.local_pose) console.warn(`clip pack ${n}: no local_pose (old export): mixer pose`);
+       got.push(`${n} (${g.animations.length})`);
+     } catch (e) {
+       console.warn(`clip pack ${n} not loaded:`, e.message);
+```
+
+Check (new trace tools/trace/scripts/w101_aim_pose.json, TRACE_FIELDSET=pose: R1 raise h_st -> h_st_a,
+then h_wk_a -> h_rn_a; bone matrices *(MP+0x3f8), 3x4 part, element max abs diff, layer state
+from the previous record): per-frame mean-bone error median 0.155 -> 0.067, mean 1.142 -> 0.110,
+max 16.5 -> 1.75 (worst bones before: 56-61 right arm/gun ~1.6 mean, 16 max; after: 79 0.34,
+56-61 ~0.28). c_run_pose_blend unchanged (median 0.0019). Mutation (sampleLocal reading the base
+file for pack clips) -> median 1.54, caught. Remaining aimed error, steady h_rn_a 0.05-0.07 mean:
+the aim-pitch partner layers (h_rn_ad etc., layer +0x8 partner, weight ~0.027 in this trace) that
+the page doesn't blend. Not decoded here. Harness: worker 0101 scratchpad h/cmp.mjs (real three
+0.169 + GLTFLoader; mixer = page's own update()). The play.js half (fetch in loadPacks) was not
+exercised in a browser.

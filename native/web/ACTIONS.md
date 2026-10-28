@@ -16,6 +16,18 @@ FUN_00579570 state 7, so it waits for the weapon translation, worker 0077).
 
 With no actions registered, or with `?actions=0`, only the game's locomotion runs.
 
+**Weapon (not an action).** `aim.js` + `aim_core.js` (workers 0077, 0098) run the game's weapon in
+every on-foot frame through `ctrl.weaponHook` (the aim ray and input before the intent, the weapon
+state machine FUN_00579570 and the clip requests after the move), install the aimed clip tables
+through `SpeedAnimator.setTable` / `playRequest`, and draw the reticle into the frame (`output.hud`,
+so the PCRTC merge and the report capture include it). The camera's weapon views (types 0xd / 0xe,
+the switch ramp, recoil, eye kick) run inside `FollowCamera` through `follow.weapon`. It needs
+`data/aim/` from `native/assets/models/export_web_aim.py` and the `shoot` clip pack. Ladder and
+other actions pause it. `?aim=0` turns it off. Keys (GUESS mapping, `aim.js`): left mouse button =
+R1 (draw, then fire), Z or middle mouse button = R3 (weapon view <-> first person; with the gun away it draws straight into first person), C = circle
+(holster). Tests: `node --import ./test_hooks.mjs test_aim.mjs`
+and `test_aim_camera.mjs` (aim traces, `$AIM_TRACES`); `test_cam_traces.mjs` (camera traces, `$CAM_TRACES`, default tools/trace/out/cam).
+
 **Timing.** `PlayerController.step()` is one PAL game frame (1/50 s, `TICK`), in which the
 game advances `STEP` = 1.1999999 ticks. Actions are still timed in 60 Hz ticks: `step()`
 runs `canEnter` / `update` from a 60 Hz accumulator, once or twice per game frame, with

@@ -10,7 +10,8 @@
 // packs= loads none), zprio=0 / zunder=0 (room.js depth-tie offsets off), cloth=0 (cape
 // cloth off: the keyed glb cape), gun=0 (no gun mesh), ladder=N (test aid: start at
 // ladder N's bottom), outblur=1/0 (PS2 output merge on/off, output.js; default: on only with res=native), res=native (the game's
-// 432x512 framebuffer shown 4:3; default = canvas-resolution render filling the canvas, Dan's choice). Packs load in
+// 432x512 framebuffer shown 4:3; default = canvas-resolution render filling the canvas, Dan's choice), aim=0 (no
+// weapon: aim.js / aim_core.js, the camera's weapon views and the reticle). Packs load in
 // the background after start (vincent_<pack>.glb).
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
@@ -21,6 +22,7 @@ import { initReport } from './report.js';
 import { loadRoom } from './room.js';
 import { CapeCloth } from './cloth.js';
 import { createOutputStage } from './output.js';
+import { setupAim } from './aim.js';
 
 const params = new URLSearchParams(location.search);
 const hud = document.getElementById('hud');
@@ -28,7 +30,8 @@ const msg = document.getElementById('msg');
 if (params.get('hud') === '0') hud.style.display = 'none';
 
 const SPAWN = { x: -1395.63, z: -1110.51 };
-const PACKS = params.has('packs') ? params.get('packs').split(',').filter(Boolean) : ['ladder'];
+const AIM = params.get('aim') !== '0';               // aim.js (aim_core.js): the weapon, its camera views, the reticle
+const PACKS = params.has('packs') ? params.get('packs').split(',').filter(Boolean) : (AIM ? ['ladder', 'shoot'] : ['ladder']);
 // Placement: the game draws the model with the motion player's matrix MP+0x10 (FUN_005ab8f0
 // -> view x MP+0x10), a copy of the character matrix (FUN_00343de8 -> FUN_005a6f40 ->
 // FUN_005a6ea8). Its rows are unit length (save state) and its origin is the character
@@ -456,6 +459,16 @@ async function loadPacks(names, anim, motions) {
       const bad = packMismatch(n, side, rig);
       if (bad) { console.warn(`clip pack ${n} skipped (built for another skeleton): ${bad}`); return; }
       const g = await loader.loadAsync(`data/vincent/vincent_${n}.glb`);
+      // the pack clips' local TRS (player.js addLocalPose), registered before the clips so a
+      // pack clip never starts on the mixer pose; without it they use the mixer pose
+      if (side.local_pose && anim.lp) {
+        const rl = await fetch('data/vincent/' + side.local_pose.file);
+        if (!rl.ok) console.warn(`${side.local_pose.file}: HTTP ${rl.status}: pack ${n} uses the mixer pose`);
+        else {
+          try { anim.addLocalPose(side.local_pose, await rl.arrayBuffer()); }
+          catch (e) { console.warn(`clip pack ${n}: ${e.message}: mixer pose`); }
+        }
+      } else if (!side.local_pose) console.warn(`clip pack ${n}: no local_pose (old export): mixer pose`);
       anim.addClips(g.animations);
       Object.assign(motions, side.clips || {});
       got.push(`${n} (${g.animations.length})`);
@@ -582,6 +595,11 @@ async function main() {
   }
   let packsLoaded = [];
   const packsReady = loadPacks(PACKS, anim, motions).then(g => { packsLoaded = g; return g; });
+  // the weapon (aim.js): FUN_00579570 in ctrl.step, the camera's weapon views (follow.weapon), the
+  // reticle in the frame (output.hud). isFrozen: the report freeze (declared below; false until then)
+  const weapon = AIM ? await setupAim({ ctrl, anim, motions, col, follow, output, vin, canvas,
+                                     isFrozen: () => { try { return frozen; } catch (_) { return false; } } }) : null;
+  if (weapon) actionHelp.push(weapon.help);
 
   // detached debug camera (?cam=), same format as main.js
   let detached = null;
@@ -605,7 +623,7 @@ async function main() {
     keys.add(e.code);
     if (!e.repeat) pressed.add(e.code);
     // H: back to the spawn (debug aid, not a game feature)
-    if (e.code === 'KeyH') { ctrl.reset(); if (cape) cape.cloth.started = false; follow.reset(ctrl.pos); detached = null; }   // respawn: spawn angles
+    if (e.code === 'KeyH') { ctrl.reset(); if (cape) cape.cloth.started = false; if (weapon) weapon.reset(); follow.reset(ctrl.pos); detached = null; }   // respawn: spawn angles
     if (e.code === 'KeyR') { e.preventDefault(); report.open(); }
     if (e.code === 'Space' || e.code.startsWith('Arrow')) e.preventDefault();
   });
@@ -731,6 +749,7 @@ async function main() {
     } else {
       follow.update(acc / TICK);                   // between the last two game frames, as the body
     }
+    if (weapon) weapon.render();                   // Vincent's first-person fade; the reticle draws in output.render
     output.render(root, camera);
 
     frames++; fpsAcc += dt;
@@ -741,10 +760,11 @@ async function main() {
       `clip ${anim.override ? 'action' : anim.current} (${anim.clipName()}) x${anim.rate.toFixed(2)}` +
       `${ctrl.active ? '   action ' + ctrl.active.name : ''}` +
       `   speed ${(ctrl.speed * 60).toFixed(1)} u/s\n` +
-      `onGround ${ctrl.onGround}${ctrl.hitWall ? '  WALL' : ''}\n` +
+      `onGround ${ctrl.onGround}${ctrl.hitWall ? '  WALL' : ''}` +
+      (weapon ? `   weapon ${weapon.core.P.drawn ? 'out' : 'away'} st ${weapon.core.P.st} T ${weapon.core.P.T}  cam 0x${weapon.core.cam.type.toString(16)}` : '') + '\n' +
       `click: mouse look (drag works too)   WASD move (walk)   Shift run   ${actionHelp.join('   ')}   H respawn   R report`;
   }
-  window.__play = { ctrl, anim, follow, col, stats, camera, renderer, output, root, vin, light, spawnY: gy,
+  window.__play = { ctrl, anim, follow, aim: weapon, col, stats, camera, renderer, output, root, vin, light, spawnY: gy,
                     playerState, camView, report, keys, pressed, motions, packsReady, actionHelp, cape };
   requestAnimationFrame(frame);
 }

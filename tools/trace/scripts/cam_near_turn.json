@@ -1,0 +1,2 @@
+{"name": "cam_near_turn", "frames": 280, "doc": "worker 0099: run toward the camera (stick down) until a wall pulls the eye in behind him, turn the camera (rx), then run away so the eye eases out (near-eye rule, FUN_0032ace0 view 1)",
+ "events": [{"from": 10, "to": 90, "ly": 1.0}, {"from": 100, "to": 160, "rx": 1.0}, {"from": 170, "to": 240, "ly": -1.0}]}

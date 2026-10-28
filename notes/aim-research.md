@@ -385,16 +385,28 @@ New decodes:
   handled in the same frame (pitch carry-over shows at once); leaving first person finishes
   the transition in one frame (traced; branch not located).
 
-**Reticle texture: UNDECODED (two attempts).** The texture is 'menu2' (PTR_DAT_0047d500[7]),
-a TIM2 ("TIM4") 128×128 PSMT4 in data/etc/menudata.bin at 0x2200 (and locale/*/menudata.bin).
-Linear reading (dtex, RST-FORMAT.md's TIM rule) gives noise; the GS CT32-write/PSMT4-read model
-(dtex_unswizzle4) gives a clean BOTTOM half (sprites recognisable, also for menu1's YES/NO icons)
-but a scrambled top half, where most reticle sprites are (v < 64). Other CT32 rectangle widths
-(32, 128) and per-half reads did not fix it. The CLUT is unclear too (menu1's white ramp sits just
-before the 'menu2' name; menu2's own region looks like pixel data). The GS dump's upload at TBP
-10792 in that frame is another texture, so the dump couldn't serve as the key either. Next
-attempt: trace the game's upload of 'menu2' (FUN_00258590 → FUN_003d2b80) to get its real
-BITBLTBUF/TRXREG and CLUT address. Until then the page draws the pieces as outlines (GUESS).
+**Reticle texture: DECODED (worker 0100, 2026-10-28).** 'menu2' (PTR_DAT_0047d500[7]) is a
+record in data/etc/menudata.bin (name 8 bytes, 'tm2', size, then a 'TIM4' file; identical in every
+locale copy). Picture header: PSMT4 128×128, 16-colour CT32 CLUT, GsTex0 TBW 2. The image region
+(imageSize 0x2080) and the CLUT region (0xc0) each START with a zeroed slot: the texels are the last
+0x2000 bytes (0x22c0 in the file), the colours the last 0x40 bytes (0x4340). Worker 0077 read from
+the region start (0x2240), 0x80 bytes early; that offset, not the swizzle, scrambled the image.
+The texel bytes are the GS transfer image: GS dump reticle_f200 uploads them verbatim as PSMCT32
+64×32 (DBW 1) to TBP 10792 and the CLUT as PSMCT32 8×2 to CBP 10788 at seq 53325, right before the
+21 green draws (TBP 10792 is a streaming slot: a wall texture sits there earlier in the frame, which
+is what the earlier attempt saw). Read back as PSMT4 TBW 2 = write CT32 / read T4 with the GS tables
+(`dtex_unswizzle4` gives the same image). CLUT: RGB white, alpha 0x02..0x80 ramp. Draw state at the
+reticle: TEX1_1 = 0 (nearest), CLAMP_1 = 0 (repeat), TEXA default, TEX0 TCC 1 TFX 0 (modulate:
+Cv = Cf·Ct >> 7 → (60,150,60) gives (119,255,119); Av = Af·At >> 7), ABE (Cs−Cd)·As+Cd, TEST ZTE
+GEQUAL, no alpha test. UVs (FUN_003b1048 l.185-190, via FUN_003cb1f0 / FUN_003cb268): u0 = frame
+u·16, u1 = (u+w)·16, v likewise (12.4 FST); vertices (x0,y0,u0,v0) (x1,y0,u1,v0) (x0,y1,u0,v1)
+(x1,y1,u1,v1), rotated or mirrored with their positions (dump: the mirrored pair keeps UVs per
+vertex). Flag 0x4000 mirrors u1 −8; flags 0x2000 / 0x80000 recolour (0x4188c7 / 0x404040) and switch
+texture (FUN_003dd4a8(9)); no kind 1-3 piece uses them. Method: the dump's freeze block holds the
+4 MB GS memory at +0x1a9 (registers end at +0x13c; checked by decoding the display buffer against
+the embedded screenshot); scripts in worker 0100's scratchpad (gsmem.py, rtex.py). The loader past
+FUN_003d2b80 (FUN_00259018 / FUN_003d2dc0) is not decoded; the geometry comes from the file's
+GsTex0 and the dump's BITBLTBUF / TRXREG / TEX0.
 
 Checks:
 - `node test_aim.mjs` (in the copy): all 7 traces, every frame: weapon state / timer /
