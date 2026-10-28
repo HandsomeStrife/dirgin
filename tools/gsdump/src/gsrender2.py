@@ -229,6 +229,30 @@ def tex0_fields(t):
                 tw=(t >> 26) & 0xf, th=(t >> 30) & 0xf, cbp=(t >> 37) & 0x3fff,
                 cpsm=(t >> 51) & 0xf, csa=(t >> 56) & 0x1f)
 
+def tex_coords(fst, a, b, c, w0, w1, w2, texW, texH):
+    """Texel-space (u, v) per pixel, GS rules (GS User's Manual, 3.4 texture mapping).
+    FST=1: UV register, 12.4 fixed point -> texel units.
+    FST=0: the packet's S, T are already s*Q, t*Q (the VU divides by w before kick);
+    the GS interpolates S, T, Q linearly in screen space and divides per pixel:
+    u = (S/Q) * 2^TW, v = (T/Q) * 2^TH. S and T must NOT be multiplied by Q here."""
+    if fst:
+        u = (w0 * a[6] + w1 * b[6] + w2 * c[6]) / 16.0
+        v = (w0 * a[7] + w1 * b[7] + w2 * c[7]) / 16.0
+        return u, v
+    sq = w0 * a[3] + w1 * b[3] + w2 * c[3]
+    tq = w0 * a[4] + w1 * b[4] + w2 * c[4]
+    qq = w0 * a[5] + w1 * b[5] + w2 * c[5]
+    qq = np.where(np.abs(qq) < 1e-9, 1e-9, qq)
+    return (sq / qq) * texW, (tq / qq) * texH
+
+def texel_index(u, v, tw, th, texW, texH):
+    """Nearest (point) sampling: texel i covers [i, i+1), so the GS takes floor(u),
+    not round(u) (UV = 16*i + 8 is texel i's centre). Wraps (REPEAT); CLAMP_1/2
+    and bilinear TEX1 are not emulated."""
+    ui = np.mod(np.floor(u * (tw / max(texW, 1))).astype(np.int64), tw)
+    vi = np.mod(np.floor(v * (th / max(texH, 1))).astype(np.int64), th)
+    return ui, vi
+
 class TexCache:
     """Decode each distinct TEX0 once, following gsbind's decode logic.
 
@@ -404,21 +428,9 @@ def rasterize(gif, tc, W=640, Hh=480, notex=False, only_tex=False, flat=False):
             th, tw = tex.shape[0], tex.shape[1]
             f = tex0_fields(ctx['tex0'])
             texW = 1 << f['tw']; texH = 1 << f['th']
-            if ctx['fst']:
-                # UV register: 12.4 fixed -> texel
-                u = (w0 * a[6] + w1 * b[6] + w2 * c[6]) / 16.0
-                v = (w0 * a[7] + w1 * b[7] + w2 * c[7]) / 16.0
-            else:
-                # STQ, perspective correct
-                sq = w0 * (a[3] * a[5]) + w1 * (b[3] * b[5]) + w2 * (c[3] * c[5])
-                tq = w0 * (a[4] * a[5]) + w1 * (b[4] * b[5]) + w2 * (c[4] * c[5])
-                qq = w0 * a[5] + w1 * b[5] + w2 * c[5]
-                qq = np.where(np.abs(qq) < 1e-9, 1e-9, qq)
-                u = (sq / qq) * texW
-                v = (tq / qq) * texH
+            u, v = tex_coords(ctx['fst'], a, b, c, w0, w1, w2, texW, texH)
             # map texel space (texW x texH from TEX0) onto decoded array (tw x th)
-            ui = np.mod(np.round(u * (tw / max(texW, 1))).astype(np.int64), tw)
-            vi = np.mod(np.round(v * (th / max(texH, 1))).astype(np.int64), th)
+            ui, vi = texel_index(u, v, tw, th, texW, texH)
             texel = tex[vi, ui]                       # (...,4) RGBA
             out = texel[..., :3] * (col / 128.0)
             ta = texel[..., 3]
@@ -712,15 +724,7 @@ def rasterize_targets(tris, tc, targets, notex=False, only_tex=False, flat=False
             f = tex0_fields(ctx['tex0'])
             tb = f['tbp0']
             texW = 1 << f['tw']; texH = 1 << f['th']
-            if ctx['fst']:
-                u = (w0 * a[6] + w1 * b[6] + w2 * c[6]) / 16.0
-                v = (w0 * a[7] + w1 * b[7] + w2 * c[7]) / 16.0
-            else:
-                sq = w0 * (a[3] * a[5]) + w1 * (b[3] * b[5]) + w2 * (c[3] * c[5])
-                tq = w0 * (a[4] * a[5]) + w1 * (b[4] * b[5]) + w2 * (c[4] * c[5])
-                qq = w0 * a[5] + w1 * b[5] + w2 * c[5]
-                qq = np.where(np.abs(qq) < 1e-9, 1e-9, qq)
-                u = (sq / qq) * texW; v = (tq / qq) * texH
+            u, v = tex_coords(ctx['fst'], a, b, c, w0, w1, w2, texW, texH)
             R = cs.get(tb // 32) if tb % 32 == 0 else None
             if R is not None and R.used:
                 # memory holds whichever wrote last; a small newer upload (e.g. a
@@ -750,8 +754,7 @@ def rasterize_targets(tris, tc, targets, notex=False, only_tex=False, flat=False
                 if tex is None:
                     st['tex_miss_skip'] += 1; continue
                 th, tw = tex.shape[0], tex.shape[1]
-                ui = np.mod(np.round(u * (tw / max(texW, 1))).astype(np.int64), tw)
-                vi = np.mod(np.round(v * (th / max(texH, 1))).astype(np.int64), th)
+                ui, vi = texel_index(u, v, tw, th, texW, texH)
                 texel = tex[vi, ui]
                 trgb = texel[..., :3]; ta = texel[..., 3]
             out = trgb * (col / 128.0)                    # TFX MODULATE

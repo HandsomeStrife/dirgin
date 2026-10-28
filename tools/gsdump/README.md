@@ -46,8 +46,14 @@ all-frames/all-buffers render byte-for-byte. What it does and why:
   4:3 stretch; it matches the PCSX2 screenshot best (width sweep optimum 424-426).
 - Hero dump vs PCSX2 screenshot (640x480): legacy MAE 74.6 / PSNR 7.0 dB;
   default 14.4 / 21.6 dB; `--crop=display` 14.0 / 21.9 dB.
-- Known gaps: some PSMT4 room textures (wall planks), the cape and sky clouds
-  render flat or missing (texture decode, not this renderer); HUD digits missing;
+- STQ fix (worker 0086, 2026-10-27): FST=0 draws multiplied S, T by Q a second
+  time; nearest lookup used round(u) instead of floor(u); REGLIST RGBAQ dropped Q.
+  Almost every scene draw is FST=0 (room too), so this was the "flat planks / missing
+  cape" gap. `--crop=display` vs PCSX2 shot now: hero 23.0 dB (was 20.0), walk
+  185126 24.0 (21.4), walk 185138 24.5 (17.7). Test: `python3 -I src/test_stq.py`.
+- Known gaps: no bilinear (TEX1) or CLAMP: nearest + wrap only, so magnified
+  low-res layers (sky clouds) look blocky and edges are sharper than the game's;
+  HUD digits missing;
   draws that reinterpret a buffer's format, or textured draws at a mismatched
   FBW, are skipped (counted in the stats line).
 

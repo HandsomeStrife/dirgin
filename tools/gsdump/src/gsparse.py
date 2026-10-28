@@ -250,6 +250,7 @@ class GIFInterp:
         elif ri==0x1:
             r=val&0xff; g=(val>>8)&0xff; b=(val>>16)&0xff; a=(val>>24)&0xff
             self.rgba=(r,g,b,a)
+            self.q=struct.unpack('<f',struct.pack('<I',(val>>32)&0xffffffff))[0]  # RGBAQ bits 63:32
         elif ri==0x2:
             s=struct.unpack('<f',struct.pack('<I',val&0xffffffff))[0]
             t=struct.unpack('<f',struct.pack('<I',(val>>32)&0xffffffff))[0]
