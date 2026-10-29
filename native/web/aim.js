@@ -157,6 +157,10 @@ export function makeClipControl({ core, anim, ctrl, motions, step = STEP }) {
   const IDLE = [{ key: AIM_IDLE, thr: 0.0, root: 0.0 }];      // the aim idle class: h_st_a (slot 0x40)
   let quad = 0, fire = null, inMove = false;
   function clips() {
+    // the jump's motion states (FUN_00598f50 / FUN_00599aa0, jump_core.js) own the head layer
+    // from the take-off until the landing ends; no other class runs (aim_g: a shot in the air
+    // changes no clip). The classes below pick up again on the next frame.
+    if (ctrl.jump && ctrl.jump.head) { core.events.length = 0; return; }
     if (!core.drawn()) {
       if (anim.request) anim.clearRequest();
       if (anim.table && anim.table !== GAME.loco) { anim.setTable(null, ctrl.C.groundSpeed); quad = 0; }

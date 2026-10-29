@@ -6,7 +6,7 @@
 // The room comes from room.js (main.js's loader and shader, with its z-fight fixes).
 // Game space, -Y up. URL params: hud=0, aa=1, dpr=N, col=stub (force the stub),
 // cam=ex,ey,ez,yaw,pitch (detached camera at that view; H re-attaches it),
-// actions=0 (no action modules), packs=a,b (clip packs to load; default ladder,
+// actions=0 (no action modules), packs=a,b (clip packs to load; default ladder, jump, shoot,
 // packs= loads none), zprio=0 / zunder=0 (room.js depth-tie offsets off), cloth=0 (cape
 // cloth off: the keyed glb cape), gun=0 (no gun mesh), ladder=N (test aid: start at
 // ladder N's bottom), outblur=1/0 (PS2 output merge on/off, output.js; default: on only with res=native), res=native (the game's
@@ -31,7 +31,7 @@ if (params.get('hud') === '0') hud.style.display = 'none';
 
 const SPAWN = { x: -1395.63, z: -1110.51 };
 const AIM = params.get('aim') !== '0';               // aim.js (aim_core.js): the weapon, its camera views, the reticle
-const PACKS = params.has('packs') ? params.get('packs').split(',').filter(Boolean) : (AIM ? ['ladder', 'shoot'] : ['ladder']);
+const PACKS = params.has('packs') ? params.get('packs').split(',').filter(Boolean) : (AIM ? ['ladder', 'jump', 'shoot'] : ['ladder', 'jump']);
 // Placement: the game draws the model with the motion player's matrix MP+0x10 (FUN_005ab8f0
 // -> view x MP+0x10), a copy of the character matrix (FUN_00343de8 -> FUN_005a6f40 ->
 // FUN_005a6ea8). Its rows are unit length (save state) and its origin is the character
@@ -599,6 +599,7 @@ async function main() {
   // reticle in the frame (output.hud). isFrozen: the report freeze (declared below; false until then)
   const weapon = AIM ? await setupAim({ ctrl, anim, motions, col, follow, output, vin, canvas,
                                      isFrozen: () => { try { return frozen; } catch (_) { return false; } } }) : null;
+  actionHelp.push('Space jump (✕; the ladder takes it first)');
   if (weapon) actionHelp.push(weapon.help);
 
   // detached debug camera (?cam=), same format as main.js

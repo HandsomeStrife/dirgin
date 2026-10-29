@@ -9,8 +9,8 @@ The interface is also written at the top of `player.js`.
 
 **Faithful port (CLAUDE.md).** An action must translate the game's code (cite the `FUN_`
 address) or be a small `// GUESS:` stand-in listed in `notes/fidelity-audit.md`. Worker 0078
-removed the invented actions: the jump (`jump.js`; a later job translates FUN_00575768's
-physics-body branch), shooting with its aim mode, aim camera, overlays and muzzle flash
+removed the invented actions: the old jump (`jump.js`; the translated jump is now
+jump_core.js, run by player.js `step` itself, not an action), shooting with its aim mode, aim camera, overlays and muzzle flash
 (`shoot.js`), and reload (`reload.js`; the game only reloads a magazine below 9,
 FUN_00579570 state 7, so it waits for the weapon translation, worker 0077).
 
@@ -86,8 +86,8 @@ With the detached debug camera (`?cam=`, until H) the follow camera keeps runnin
 
 - `vincent.glb`: mesh plus `h_st`, `h_wk`, `h_rn` (unchanged).
 - Clip packs, loaded in the background after start (`?packs=a,b` to choose, `?packs=` for none):
-  default `ladder` = `vincent_ladder.glb` (c_ld_*, h_ld_*); `jump` (h_jp0-4, h_div) and `shoot`
-  (aim / fire / reload / h_swtch) still export but nothing on the page uses them. A pack holds only the joint nodes and
+  default `ladder` = `vincent_ladder.glb` (c_ld_*, h_ld_*), `jump` (h_jp0-4, h_div; the jump's
+  motion states in player.js) and `shoot` (aim / fire / reload / h_swtch; aim.js). A pack holds only the joint nodes and
   the clips. Its tracks use the same joint names (`j00..j92`), so the main mixer binds them.
   Check `ctx.anim.has(name)` in `canEnter`, because a pack may still be loading.
 - Every clip is in place. Its root motion is in the sidecar, per axis: x/z are always
@@ -116,8 +116,9 @@ false` (the body's fall starts) and then `{ locomotion: true }` until he lands.
 - **ladder**: `c_ld_u` / `c_ld_d` get on at the bottom / top; `c_ld_uml`/`umr` and
   `c_ld_dml`/`dmr` climb one 4.5-unit step up / down, alternating hands;
   `c_ld_lid`/`rid` idle loops; `c_ld_uel`/`uer` and `c_ld_del`/`der` get off at the top / bottom.
-- **jump** (not on the page): the e_jumps trace plays `h_jp0` -> `h_jp3` -> `h_jp4`, never
-  `h_jp1` / `h_jp2`. Translate FUN_00575768's physics-body branch (take-off FUN_00357168,
-  already in player.js `startFall(h)`) and the jump state class's motion requests.
+- **jump** is not an action: player.js `step` runs jump_core.js (FUN_00575768 and the motion
+  states FUN_00598f50 / FUN_00599aa0) on the ✕ edge (Space) after the actions, so an action
+  that takes ✕ (the ladder) gets it first (FUN_00333150 order). Clips: h_jp0 -> h_jp1 -> h_jp2
+  -> h_jp3 (loop) -> h_jp4 on the head layer (notes/jump-research.md).
 - **shoot / reload** (not on the page): wait for worker 0077's aiming and weapon translation
   (FUN_00579570, notes/aim-research.md). The game has no held aim mode or aim camera.

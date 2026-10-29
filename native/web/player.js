@@ -55,6 +55,7 @@
 // With no actions registered every code path is the game's locomotion.
 // ================================================================
 import * as THREE from 'three';
+import { Jump, stickMode } from './jump_core.js';
 
 // ---------------------------------------------------------------- timing
 export const TICK = 1 / 50;                       // one PAL game frame (s): play.js's loop step
@@ -133,6 +134,7 @@ export function stickToWorld(sx, sy, row0, row2) {
 // The game has no run button: tilt sets the stick byte, and >= 236 runs (FUN_00578748).
 // Shift = full tilt (byte 255); walk = the b_walk trace's half tilt (pad 0x40 -> 0.2099,
 // byte 53). Any byte 1..235 walks at the same 15 u/s; the byte only sets the turn rate.
+export const CROSS_KEY = 'Space';                 // the page's ✕ (logical id 0xd), shared with ladder.js KEY
 export const KEY_WALK = 0.20987654;
 export const KEY_RUN = 1.0;
 
@@ -205,6 +207,9 @@ export class PlayerController {
     this.ticks = 0;                               // 60 Hz action ticks
     this.frames = 0;                              // game frames
     this.actAcc = 0;
+    this.stickW = { x: 0, z: 0, mag: 0 };         // this frame's stick (world, magnitude), stickInput
+    this.jump = new Jump();                       // the jump (jump_core.js): FUN_00575768 + motion states 0x20 / 0x21
+    this.jumpStepped = false;
     this.locate();
   }
 
@@ -278,14 +283,33 @@ export class PlayerController {
     // weapon (aim.js): camera update + input (FUN_0032ace0 / FUN_003320c0) before the intent
     // (the camera and FUN_00579570 run in every state, FUN_005786e8; actions pause the buttons and clips)
     if (this.weapon && this.weaponHook) this.weaponHook.pre(input, !!this.active);
+    // FUN_00333150: ✕ (logical id 0xd, press edge) goes to the ladder first (the action loop
+    // above: an action that took the press, or owns him this frame, keeps it), then the jump
+    // gate FUN_00577230 and FUN_00575768 (jump_core.js takeOff), before the stick writes.
+    // input.cross: the pad's ✕ edge (trace replays); the page's ✕ is Space (ladder.js KEY).
+    const cross = input.cross ?? !!(input.pressed && input.pressed.has(CROSS_KEY));
+    this.jump.takeOff(this, cross, { ladder: owned || !!this.active });
     this.stickInput(input);                       // FUN_00333150: runs in every state
+    stickMode(this, this.stickW);                 // FUN_00333150: P+0x29c (the back jump's turn-round bit)
     this.intent(owned);                           // FUN_00578748: the ramp runs in every state
-    if (loco) this.moveTick();                    // FUN_0034ea18 -> FUN_0034c388 case 0xc
-    if (loco) this.rotate();                      // FUN_0034ea18 -> FUN_0034de50 mode 4 (6 with the weapon out)
+    // the jump / landing motion state (FUN_00598f50 / FUN_00599aa0), before FUN_0034ea18.
+    // GUESS: armed = false: with the gun out the game plays the h_jp*_a sets (phases 4-7), but
+    // those clips aren't exported (not in 07700000 / 0770000b) and aim_g shows h_jp2_a skipped
+    // (phases 5-6 not matched); the plain set has the same 3-frame wind-up, so the freeze and
+    // the flight are unchanged. See notes/fidelity-audit.md "Jump".
+    this.jump.motionUpdate(this, { armed: false });
+    const frozen = this.jump.frozen;              // C+0x1c0 bit 0x20: FUN_0034ea18 returns at once
+    if (loco && !frozen) this.moveTick();         // FUN_0034ea18 -> FUN_0034c388 case 0xc
+    if (loco && !frozen) this.rotate();           // FUN_0034ea18 -> FUN_0034de50 mode 4 (6 with the weapon out)
     if (this.weapon && this.weaponHook) this.weaponHook.post(input, !!this.active);   // FUN_00579570, clips
+    this.jumpStepped = false;
     if (ctx.anim && ctx.anim.gameFrame) ctx.anim.gameFrame(this, STEP);   // FUN_00343160 / FUN_005aa5b8
+    if (!this.jumpStepped) this.jumpAdvance();    // no animator (tests): the jump clips' clock still runs
     this.frames++;
   }
+
+  // FUN_005aa5b8 on the jump's head-layer clock (the animator calls it between its draw and its advance)
+  jumpAdvance() { this.jump.advance(STEP); this.jumpStepped = true; }
 
   // an action moved him: apply its result
   applyOwned(res) {
@@ -332,6 +356,7 @@ export class PlayerController {
       mag = input.run ? KEY_RUN : KEY_WALK;       // GUESS: keyboard mapping
       v = { x: input.x / len * mag, y: 0, z: input.z / len * mag };
     }
+    this.stickW = { x: v ? v.x : 0, z: v ? v.z : 0, mag };
     const st = P.state;
     if (st === 8 || st === 9 || (st >= 0x1f && st <= 0x21)) {
       // air states: LAB_00333760 -> FUN_00574938 / FUN_00574920 (and the same writes for
@@ -430,7 +455,11 @@ export class PlayerController {
     }
     L = Math.hypot(vx, vz);
     this.setMove(L, L > 0 ? { x: vx / L, y: 0, z: vz / L } : C.dir);
-    this.setTurn(0.25, d);                        // FUN_0034b638(0.25, ...) in jump states
+    // LAB_00579288: with P+0x29c = 5 (the back jump, jump_core.js stickMode) the turn target is
+    // negated, so he keeps facing away from the stick (jump_core.js backTurnFix, folded in here
+    // so a mode-6 aim turn below still replaces it)
+    const td = P.mode29c === 5 ? { x: -d.x, y: -d.y, z: -d.z } : d;
+    this.setTurn(0.25, td);                       // FUN_0034b638(0.25, ...) in jump states
     // the air branch doesn't change the rotation mode: with the weapon out it stays 6, whose
     // case in FUN_0034de50 rewrites C+0x2c0 / C+0x2cc (traced: aim_g, the turn to the aim
     // point holds through the jump)
@@ -788,7 +817,19 @@ export class SpeedAnimator {
       if (this.drawHook) this.drawHook();
       return;
     }
+    const J = ctrl.jump;
+    if (J && J.head && J.clock) return this.jumpFrame(ctrl, J.clock, step);
     const s = ctrl.C.groundSpeed;
+    if (this.jumpHeld) {
+      // the landing motion ended last frame (FUN_00599aa0 -> motion 3 / 8): the locomotion clip
+      // choice FUN_00346860 runs from a fresh index (C+0x659 = -1: frame 0, blend C+0x591 + 1).
+      // Traced: j_stand f78 h_st 0.6 with blend 11 and h_jp4 (14.0) blending out.
+      this.jumpHeld = false; this.cur = -1;
+      this.switchTo(this.pick(s));
+      // before the table's first install (the 5 u/s GUESS below) the index stays fresh: the first
+      // choice after the install starts at frame 0 (e_jumps f123: h_wk 0.3 after the landing)
+      if (!this.installed) this.cur = -1;
+    }
     // GUESS: when the game installs the table (C+0x658 = 3) isn't decoded (its writer for
     // the player wasn't found in two attempts; FUN_00345b58 is only called from NPC state
     // classes). Traced: installed in the frame C+0x1d8 first reaches 5.55 (ramp byte 87,
@@ -840,6 +881,49 @@ export class SpeedAnimator {
       b.rem = f32(b.rem - step);
       if (b.rem <= 0) b.rem = 0;
     }
+  }
+
+  // the jump's motion states own the head layer (jump_core.js FUN_00598f50 / FUN_00599aa0): its
+  // ClipClock (requests: now = replace the head with blend req.blend, else queued; the hold /
+  // queue rule is jump_core's GUESS) is the head; a blend > 0 keeps the old head as the
+  // blend-out layer over blend + 1 (j_double: h_jp3 shows 5). Blend 0 = a cut (traced: every
+  // h_jp request has blend_frames 0).
+  jumpFrame(ctrl, clock, step) {
+    this.jumpHeld = true;
+    this.request = null;                          // the motion state replaced the head (a fire request's class is gone)
+    this.rate = 0.5;                              // FUN_003456c0 rate 1.0 -> MP+0x40c 0.5 (jump_core clipRate)
+    const take = () => {
+      if (clock.serial !== this.jumpSerial || clock !== this.jumpClock) {   // a new Jump (respawn) restarts the count
+        this.jumpSerial = clock.serial; this.jumpClock = clock;
+        // GUESS: a requested clip the page doesn't have (c_wjp*, c_bj*: not in the exported
+        // containers) keeps the current head pose; the clock still times it (notes/fidelity-audit.md "Jump")
+        if (!this.ensure(clock.clip)) return;
+        const len = clock.blend > 0 ? clock.blend + 1 : 0;
+        this.out = len ? { key: this.head.key, frame: this.head.frame, prevFrame: this.head.frame } : null;
+        this.blend = { len, rem: len, w: len ? 0 : 1 };
+        this.head = { key: clock.clip, frame: clock.frame, prevFrame: clock.frame };
+        this.current = clock.clip;
+      } else if (this.head.key === clock.clip) {
+        this.head.prevFrame = this.head.frame; this.head.frame = clock.frame;
+      }
+    };
+    take();                                       // this frame's requests (applied before the move)
+    const b = this.blend, blending = this.out && b.rem > 0;
+    if (blending) b.w = (b.len - b.rem) / b.len;  // MP+0x408
+    else { b.w = 1; this.out = null; }
+    if (this.drawHook) this.drawHook();
+    if (blending) {
+      const L = this.out, n = this.frames[L.key];
+      L.prevFrame = L.frame;
+      L.frame = f32(L.frame + f32(f32(this.rate * 1.0) * step));
+      if (L.frame >= n) { L.frame = 0; L.prevFrame = 0; }
+      b.rem = f32(b.rem - step);
+      if (b.rem <= 0) b.rem = 0;
+    }
+    const before = this.head.frame;
+    ctrl.jumpAdvance();                           // FUN_005aa5b8 on the head layer
+    take();                                       // a queued clip taking over (frame 0) or the next frame
+    if (this.head.frame < before) this.head.prevFrame = this.head.frame;   // loop wrap: no interpolation back
   }
 
   // FUN_00346860: a new table index

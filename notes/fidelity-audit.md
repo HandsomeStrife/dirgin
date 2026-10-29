@@ -114,7 +114,7 @@ references are function names, since line numbers move.
 | Air-shot hop (3.33 u, max 3) | — | removed (worker 0078) | — | — | **Label was wrong:** the trace shows no hop for a mid-air shot (HANDOFF, worker 0069). |
 | Ladder trigger: 7-unit ray along the facing into the trigger box | ladder.js `triggers()`, `inBox()` | DECODED | FUN_00544200, FUN_00576c88 / 576de8 | — | The ±3 y slack and the "within 60° of box +z" test were INVENTED: removed (worker 0078). |
 | Ladder trigger ray origin 2 above the feet | ladder.js `RAY_UP` | GUESS | rays from FUN_005635e0 / FUN_00563678 points, not decoded | S | Labelled. |
-| Ladder button: Space = ✕ for mount and jump-off | ladder.js `KEY` | GUESS (mapping) | ✕ (id 0xd), ladder before jump, FUN_00333150 | S | Was E for the mount (differed from the game's one button). |
+| Ladder button: Space = ✕ for mount and jump-off | ladder.js `KEY` | GUESS (mapping) | ✕ (id 0xd), ladder before jump, FUN_00333150 | S | Was E for the mount (differed from the game's one button). Open (review of worker 0102): ✕ again during h_jp0's 3 frozen frames can enter the ladder with a jump live; the game's ladder entry has no state test before FUN_003455e8(char, 0x92 / 0x9b), which is undecoded (likely a motion-permission check). |
 | Ladder snap 5.6, rung 4.5, 14 ticks per step, hand alternation | ladder.js `SNAP`, `RUNG`, `STEP_TICKS`, `next()` | DECODED | FUN_0059a5d0, FUN_00599f10 | — | `BODY_FWD 5.5` and `MOUNT_RISE 6.1` are DATA (clip) for the in-place export. |
 | Ladder positions along each clip's root-motion curve between the game's end points | ladder.js `move()`, `advance()` | DATA | FUN_0059a5d0 (lerp over half the clip) for the mount; the rest not decoded | M | The curve shape is the clip's, the end points the game's. |
 | Ladder step → idle clip at once with no key | ladder.js `next()` | GUESS | FUN_00599f10 settles 32 ticks after a step | S | Labelled. |
@@ -322,7 +322,7 @@ Oracle: hero dump 163235, GIF vertex colours of Vincent's draws vs this model at
 | Cloth window armed by a turn from standing (game: 100 frames at the frame the stick turns him, before h_wk starts) | cloth.js / play.js turn re-arm (GUESS rule) | OPEN (worker 0094) | mp_cloth 0x64/0x64 at frames 11-12 of w94z | S | Page arms nothing until the walk clip (60) at frame 13; cloth pos error 0.4 mean / 1.2 max at frame 12, decays to 0.02 by frame 39. |
 | Vertex normals exported at unit length (export_web_vincent.py normalises the blended normal); the game sums w x int8/128 normals unnormalised before lighting, slightly shorter than 1 where bones blend | export_web_vincent.py `body_skin` | GUESS | FUN_005b1190 / VU0 0x120 (the accumulate); play.js lighting uses the normal as given | — | Code review 2026-10-28. Effect: slightly brighter lighting at blended vertices; not re-measured against the hero dump since the skinning change. Open. |
 
-## Jump (worker 0095, jump_core.js, not wired yet)
+## Jump (worker 0095, jump_core.js; wired into the page by worker 0102)
 
 | behaviour | our code | source | game function | difficulty | notes |
 |---|---|---|---|---|---|
@@ -333,9 +333,12 @@ Oracle: hero dump 163235, GIF vertex colours of Vincent's draws vs this model at
 | Jump done flag → state 8 → 2 on that frame | `Jump.frame` | GUESS (handlers decoded, event plumbing not) | FUN_00538aa0, FUN_00538a30 | S | Frame-exact on all traces. |
 | Motion id for a second jump from states 9 / 0x20 | `Jump.frame` | GUESS | vt+0x24 0x538bd8 / 0x53a478 not read | S | |
 | Back-jump turn-round test uses P+0x80 = facing | `stickMode` | GUESS | FUN_00333150 (FUN_00261038(P+0x80, stick)) | S | j_back facing exact. |
-| Back-jump turn away from the stick (mode 5) | `stickMode`, `backTurnFix` | DECODED | FUN_00333150, FUN_00578748 LAB_00579288 | — | Could move into player.js airIntent when wired. |
+| Back-jump turn away from the stick (mode 5) | `stickMode`, `backTurnFix`; on the page player.js `airIntent` (negated before FUN_0034b638, so a mode-6 aim turn still replaces it) | DECODED | FUN_00333150, FUN_00578748 LAB_00579288 | — | |
 | Second jump (one per jump) | `startJump`, `JumpMotion(second)` | DECODED | FUN_00575698, FUN_00575768 | — | Was "missing". |
-| Jump sounds 0x50 / 0x51, camera hooks, FUN_005ae618 modes, FUN_00574b98 | — | missing | FUN_003412d0, FUN_00329ff0, FUN_005ae618 | S-M | Listed in notes/jump-research.md. |
+| Jump sounds 0x50 / 0x51, camera hooks, FUN_005ae618 modes, FUN_00574b98 | — | missing | FUN_003412d0, FUN_00329ff0, FUN_005ae618 | S-M | Listed in notes/jump-research.md. The camera hooks show on the page: review/jump-page.png's landing frame is framed differently from the game's. |
+| Page wiring (worker 0102): Space = ✕ edge; an action that takes the press or owns him (the ladder) keeps it; take-off before the stick, motion update after the intent, move + turn skipped while frozen; the jump's clip clock is the animator's head layer (blend 0 = cut, blend n = n + 1 frames), hand-back to the locomotion choice from a fresh index | player.js `step`, `SpeedAnimator.jumpFrame`; aim.js `clips()` stands aside while the jump owns the head | DECODED (order: FUN_00333150 → FUN_00578748 → FUN_00598f50 → FUN_0034ea18) | | — | test_jump_page.mjs: 7 jump traces through the real step + animator, every frame: state, ground, head clip, frame, blend countdown exact; position ≤ 3.7e-3 without re-sync; facing ≤ 7e-7. 18/18 mutants killed. |
+| Armed jump plays the plain h_jp set | player.js `step` (`armed: false`) | GUESS | FUN_00598f50 phases 4-7 (h_jp*_a with partners via FUN_00345818) | M | The h_jp*_a clips aren't in the exported containers (07700000 / 0770000b), and aim_g shows h_jp1_a → h_jp3_a (h_jp2_a skipped, blends 11 / 2) where jump_core's phase 5 queues h_jp2_a: not matched. The wind-up is 3 frames either way, so the flight is unchanged (aim_g 3e-5). The landing state is 3 with the gun out in the game (P+0x100 bit 44); ctrl.P stays 2. |
+| A requested jump clip the page doesn't have (c_wjp*, c_bj*) | player.js `SpeedAnimator.jumpFrame` | GUESS | — | S | Keeps the current head pose; the clock still times it. These clips aren't in the exported containers (which container z128 loads them from isn't decoded). |
 
 ## Aiming (workers 0077, 0098: aim.js, aim_core.js, player.js FollowCamera weapon views)
 

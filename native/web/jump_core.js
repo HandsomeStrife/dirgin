@@ -1,5 +1,5 @@
-// Vincent's on-foot jump in z128 (sea of flames), translated from the game. Pure: no three.js,
-// not wired into play.js / player.js yet (see notes/jump-research.md, "Wiring").
+// Vincent's on-foot jump in z128 (sea of flames), translated from the game. Pure: no three.js.
+// Wired into player.js's PlayerController.step (notes/jump-research.md, "Wiring").
 //
 // The game's jump has three parts:
 //   1. FUN_00333150 (input): ✕ (logical id 0xd) -> ladder first, then the jump gate
@@ -360,10 +360,11 @@ export class LandMotion {
 export class ClipClock {
   constructor(clip = null, frame = 0, frames = CLIP_FRAMES) {
     this.frames = frames; this.clip = clip; this.frame = frame; this.loop = false; this.queue = [];
+    this.serial = 0; this.blend = 0;                    // each clip switch: serial + 1, the request's blend frames
   }
   apply(reqs) {
     for (const r of reqs) {
-      if (r.now) { this.clip = r.clip; this.frame = 0; this.loop = r.loop; this.queue = []; }
+      if (r.now) { this.clip = r.clip; this.frame = 0; this.loop = r.loop; this.queue = []; this.serial++; this.blend = r.blend; }
       else this.queue.push(r);
     }
   }
@@ -377,7 +378,8 @@ export class ClipClock {
     const f = f32(this.frame + f32(f32(JUMP.clipRate * step)));
     if (this.loop) { this.frame = f >= n ? 0 : f; return; }
     if (f > n - 1 && this.queue.length) {               // passes the last frame: the queued clip
-      const r = this.queue.shift(); this.clip = r.clip; this.frame = 0; this.loop = r.loop; return;
+      const r = this.queue.shift(); this.clip = r.clip; this.frame = 0; this.loop = r.loop;
+      this.serial++; this.blend = r.blend; return;
     }
     this.frame = Math.min(f, n - 1);
   }
@@ -389,8 +391,10 @@ export class ClipClock {
 //   motion-state update (FUN_00598f50 / FUN_00599aa0)  ->  FUN_0034ea18 (move + turn,
 //   skipped while frozen)  ->  state 8 -> 2 when the jump motion is done  ->  clip advance.
 // The motion id (*(C+2000)+0x70) is tracked here: 0x20 jump, 0x21 land, 0x22 fall, else 3.
+// frame() runs the whole order (test_jump.mjs); player.js's PlayerController.step calls the
+// pieces (takeOff, stickMode, motionUpdate, advance) between its own steps.
 export class Jump {
-  constructor() { this.motion = null; this.clock = null; this.events = []; }
+  constructor() { this.motion = null; this.clock = null; this.events = []; this.head = false; }
   motionId(ctrl) {
     if (this.motion) return this.motion.id;
     return ctrl.P.state === ST.FALL ? 0x22 : 3;
@@ -398,28 +402,29 @@ export class Jump {
   get active() { return !!this.motion; }
   get frozen() { return !!(this.motion && this.motion.freeze); }
 
-  // one game frame. input: PlayerController.step's input; cross: ✕ pressed this frame.
-  // opts: canJump env plus { armed, aimChanged }. Returns the clip requests of the frame.
-  frame(ctrl, input, cross, opts = {}) {
+  // FUN_00333150's ✕ branch, before the stick writes (the state may become 8 here).
+  // opts: canJump's env ({ ladder, ... }) and startJump's options.
+  takeOff(ctrl, cross, opts = {}) {
+    if (!canJump(ctrl, this.motionId(ctrl), { pressed: cross, ...opts })) return null;
+    const prevMotion = this.motionId(ctrl);
+    const st = startJump(ctrl, prevMotion, opts);
+    if (st === null) return null;
+    // FUN_00537d58 (from 2) / FUN_00538a30 (from 8): 8, 0x1f -> motion 0x20; 0x20, 0x21 -> 0x59
+    // GUESS: from states 9 and 0x20 the same mapping (their vt+0x24, 0x538bd8 / 0x53a478,
+    // not read; see notes/jump-research.md)
+    const second = st === ST.JUMP2 || st === ST.BACK2;
+    this.motion = (st === ST.BACK || st === ST.BACK2) ? new BackJumpMotion(second) : new JumpMotion(second);
+    this.events.push({ frame: ctrl.frames, ev: 'jump', state: st });
+    return st;
+  }
+
+  // the motion-state update (before FUN_0034ea18). Returns this frame's clip requests, already
+  // applied to the head-layer clock. this.head: the jump's motion states own the head layer
+  // this frame (from the take-off until the frame the landing motion ends; the locomotion
+  // choice takes over on the next frame).
+  motionUpdate(ctrl, opts = {}) {
     const reqs = [];
-    // FUN_00333150: ✕ first, then the stick (the state may have just become 8)
-    if (canJump(ctrl, this.motionId(ctrl), { pressed: cross, ...opts })) {
-      const prevMotion = this.motionId(ctrl);
-      const st = startJump(ctrl, prevMotion, opts);
-      if (st !== null) {
-        // FUN_00537d58 (from 2) / FUN_00538a30 (from 8): 8, 0x1f -> motion 0x20; 0x20, 0x21 -> 0x59
-        // GUESS: from states 9 and 0x20 the same mapping (their vt+0x24, 0x538bd8 / 0x53a478,
-        // not read; see notes/jump-research.md)
-        const second = st === ST.JUMP2 || st === ST.BACK2;
-        this.motion = (st === ST.BACK || st === ST.BACK2) ? new BackJumpMotion(second) : new JumpMotion(second);
-        this.events.push({ frame: ctrl.frames, ev: 'jump', state: st });
-      }
-    }
-    ctrl.stickInput(input);
-    stickMode(ctrl, { x: input.x || 0, z: input.z || 0, mag: input.stick ?? Math.hypot(input.x || 0, input.z || 0) });
-    ctrl.intent(false);
-    backTurnFix(ctrl);
-    // motion-state update (before FUN_0034ea18)
+    this.head = !!this.motion;
     if (this.motion) {
       const io = { ground: ctrl.onGround, clipEnded: this.clock ? this.clock.ended() : true,
                    armed: !!opts.armed, aimChanged: !!opts.aimChanged, groundSpeed: ctrl.C.groundSpeed };
@@ -438,8 +443,23 @@ export class Jump {
       }
     }
     if (reqs.length) { if (!this.clock) this.clock = new ClipClock(); this.clock.apply(reqs); }
+    return reqs;
+  }
+
+  // FUN_005aa5b8's advance of the head layer (held after landing until the locomotion clips take over)
+  advance(step = JUMP.STEP) { if (this.clock) this.clock.advance(step); }
+
+  // one game frame. input: PlayerController.step's input; cross: ✕ pressed this frame.
+  // opts: canJump env plus { armed, aimChanged }. Returns the clip requests of the frame.
+  frame(ctrl, input, cross, opts = {}) {
+    // FUN_00333150: ✕ first, then the stick (the state may have just become 8)
+    this.takeOff(ctrl, cross, opts);
+    ctrl.stickInput(input);
+    stickMode(ctrl, { x: input.x || 0, z: input.z || 0, mag: input.stick ?? Math.hypot(input.x || 0, input.z || 0) });
+    ctrl.intent(false);                                   // player.js airIntent applies backTurnFix's negation itself
+    const reqs = this.motionUpdate(ctrl, opts);
     if (!this.frozen) { ctrl.moveTick(); ctrl.rotate(); }   // FUN_0034ea18 (C+0x1c0 bit 0x20)
-    if (this.clock) this.clock.advance();               // held after landing until the locomotion clips take over
+    this.advance();
     ctrl.frames++;
     return reqs;
   }

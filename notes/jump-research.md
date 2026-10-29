@@ -146,6 +146,26 @@ re-take-off, the back-jump angle test, turn negation and apex margin.
   (1.2003 vs 1.2000; later steps agree). That is player.js's air walker (integrate state 0 → 2
   handover), not the jump. test_jump allows 2e-4 per frame.
 
+## On the page (worker 0102, 2026-10-28)
+
+Done as below: player.js `step` calls `jump.takeOff` (✕ edge = `input.cross` or Space in
+`input.pressed`; `ladder` = an action took the press or owns him), `stickMode`, `intent`
+(airIntent negates the turn in mode 5: backTurnFix folded in, so Jump.frame no longer calls
+it), `jump.motionUpdate`, then `moveTick` / `rotate` unless frozen. `SpeedAnimator.jumpFrame`
+makes the jump's ClipClock the head layer (draw before the advance, like the locomotion
+clock); the frame after the landing ends, the locomotion choice runs from a fresh index
+(j_stand f78: h_st 0.6, blend 11, h_jp4 blending out), and the index stays fresh until the
+table's first install (e_jumps f123: h_wk 0.3). aim.js `clips()` returns while `jump.head`.
+`play.js` loads the `jump` pack by default.
+Check: `node --import ./native/web/test_hooks.mjs native/web/test_jump_page.mjs` (7 traces
+through the real step + the animator's clock, no re-sync; plus aim_g's armed jump for flight /
+ground; ✕ priority; the gate branches no trace reaches). Mutation (scratchpad mutate.py of
+worker 0102): 18/18 killed (ladder priority, Space edge, frozen bit in player.js and
+jump_core, move / turn gating, freeze exit, the gate's flag / state / lock branches, hand-back).
+Open: the armed h_jp*_a set (GUESS: plain set; see fidelity-audit "Jump"), the c_wjp / c_bj
+clips (not exported: the head keeps its pose), the jump's camera hooks (the landing frame in
+review/jump-page.png is framed differently), sounds.
+
 ## Wiring it into player.js (for Dan / the next worker)
 
 jump_core's `Jump.frame(ctrl, input, cross, opts)` is the reference order. In

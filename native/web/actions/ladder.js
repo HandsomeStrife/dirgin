@@ -1,7 +1,7 @@
 // Ladder action (play.html): Space (the game's ✕, id 0xd) at a ladder's bottom or top
 // trigger gets on, W / S climb in 4.5-unit rungs, climbing past the top or bottom gets
-// off, Space jumps off. In the game ✕ is also jump, with the ladder first (FUN_00333150);
-// the page has no jump yet (removed by worker 0078; FUN_00575768 is a later job).
+// off, Space jumps off. In the game ✕ is also jump, with the ladder first (FUN_00333150):
+// player.js step runs the jump (jump_core.js) only when no action took the press.
 // Data: data/z128_ladders.json (native/assets/models/export_web_ladders.py, stage
 // section 8 types 1/2 + the class-0x01 ladder faces). Values: notes/actions-research.md
 // section 3 (FUN_0059a5d0, FUN_00599f10, FUN_00346fc0, FUN_003470d8).
