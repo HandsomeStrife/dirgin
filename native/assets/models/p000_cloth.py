@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Vincent's cape (p000 smd 'p000_L02' @0x19f70): the game's cloth, reimplemented.
+"""Vincent's cape (p000 smd 'p000_L02' @0x19ed0 of 07703201): the game's cloth, reimplemented.
 
 What the game does (decoded from the EE code, raw MIPS + COP2 checked by hand):
 
@@ -46,7 +46,7 @@ What the game does (decoded from the EE code, raw MIPS + COP2 checked by hand):
   So the cape only simulates in a settle window after a clip starts or the character
   turns; the pull toward the target rises from 0.1 to 1 over that window, and after
   it the cape IS the skinned cape.
-  Vincent (0770000b): h_wk 2x30, h_sq_m 2x30, h_rn 2x14, h_jp0 2x3, h_jp4 2x50;
+  Vincent (0770000b, = 0770320b for these): h_wk 2x30, h_sq_m 2x30, h_rn 2x14, h_jp0 2x3, h_jp4 2x50;
   h_swtch (and 54 others) 0 -> no cloth; h_st (and 2 others) flag 1 -> unchanged.
 
 Space: the game runs it in M-space (character matrix). Only a y-axis rotation,
@@ -68,9 +68,9 @@ import render_skinned as R
 import skd_skeleton as SK
 import anim_rot as AR
 
-CONT = _REPO + "/extract/_KEL/noPath/07700001.bin"
-CLIP_CONT = _REPO + "/extract/_KEL/noPath/0770000b.bin"
-CAPE_BLOCK = 0x19f70
+CONT = _REPO + "/extract/_KEL/noPath/07703201.bin"     # the model z128 loads (render_p000_bound.py)
+CLIP_CONT = _REPO + "/extract/_KEL/noPath/0770320b.bin"  # handgun clips z128 loads (export_web_vincent CLIP_SETS)
+CAPE_BLOCK = 0x19ed0
 CONSTRAINT_ITERS = 4          # FUN_005b0d30: iVar4 = 3 .. 0
 CONSTRAINT_GAIN = 0.8         # FUN_005b09f8: 0x3f4ccccd
 
@@ -82,7 +82,7 @@ def _f32(b, o): return struct.unpack_from('<f', b, o)[0]
 
 
 class Cape:
-    """Everything the game reads for the cape, straight from 07700001.bin."""
+    """Everything the game reads for the cape, straight from 07703201.bin."""
 
     def __init__(self, path=CONT, block=CAPE_BLOCK):
         b = open(path, 'rb').read(); self.buf = b

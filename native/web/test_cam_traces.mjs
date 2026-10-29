@@ -14,10 +14,15 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 const P = process.argv[2] ? pathToFileURL(process.argv[2]).href : new URL('./player.js', import.meta.url).href;
-const { FollowCamera, cameraRays, padAxis, CAM_TYPE_C } = await import(P);
+const { FollowCamera, cameraRays, padAxis, CAM_TYPE_C, PlayerController, stickToWorld } = await import(P);
+const { WeaponSystem, aimRayPoints, reticleRay } = await import(new URL('./aim_core.js', import.meta.url).href);
+const { airState } = await import(new URL('./jump_core.js', import.meta.url).href);
+const { Collision } = await import(new URL('./collision.js', import.meta.url).href);
 const DIR = process.env.CAM_TRACES || fileURLToPath(new URL('../../tools/trace/out/cam/', import.meta.url));
 const buf = readFileSync(new URL('./data/z128_collision.bin', import.meta.url));
 const rays = cameraRays(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
+const col = new Collision(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
+const J = p => JSON.parse(readFileSync(new URL(p, import.meta.url), 'utf8'));
 const hex = h => Buffer.from(h, 'hex');
 const F = (h, o) => hex(h).readFloatLE(o);
 const V3 = (h, o) => [F(h, o), F(h, o + 4), F(h, o + 8)];
@@ -26,17 +31,131 @@ const wrap = a => Math.atan2(Math.sin(a), Math.cos(a));
 const TIE = 1e-3;
 // open loop: worker 0089's bounds (eye 0.0075); per tick: the near_back wall measures 0.048
 // closer than the game while pinned (collision, not the ease; see notes/fidelity-audit.md)
-const LIM = { open: { eye: 0.01, at: 0.002, yaw: 1e-5, pitch: 3e-4 }, tick: { eye: 0.06, at: 0.002, yaw: 1e-5, pitch: 1e-5, out: 0.01 } };
+// page: closed loop (below); the player's run-up and air drift (test_jump_page: run-up 2.2e-3 + air
+// railing slide 2.7e-3) moves the base, which can flip one step of the look point's quantised angle
+// change (pi / 4096 = 7.67e-4 rad: cam_j_run f44 yaw, cam_j_back f75 pitch x 0.25 x 2), and the back
+// jump's railing pulls the eye in (the collision residual above)
+const LIM = { open: { eye: 0.01, at: 0.002, yaw: 1e-5, pitch: 3e-4 }, tick: { eye: 0.06, at: 0.002, yaw: 1e-5, pitch: 1e-5, out: 0.01 },
+              page: { eye: 0.06, at: 0.005, yaw: 8e-4, pitch: 5e-4, a220: 1e-5, pos: 6e-3 } };
+// worker 0107's jump traces (scripts tools/trace/scripts/cam_j_*.json): open loop with the player
+// state P+0x104 from the trace (the second jump's landing has one quantiser tie in the look point's
+// pitch change, 1.9e-4: within 'open', not 'tick'); the back jump per tick (pinned on the railing:
+// the collision residual); and every one closed loop through the page ('page')
 const CASES = [
   ['cam_idle', 'open'], ['cam_walk', 'open'], ['cam_run', 'open'], ['cam_turn', 'open'],
   ['cam_lturn', 'open'], ['cam_look', 'open'], ['cam_near_back', 'tick'], ['cam_near_turn', 'tick'],
+  ['cam_j_stand', 'open'], ['cam_j_run', 'open'], ['cam_j_double', 'open'], ['cam_j_back', 'tick'],
+  ['cam_j_stand', 'page'], ['cam_j_run', 'page'], ['cam_j_double', 'page'], ['cam_j_back', 'page'], ['cam_j_gun', 'page'],
+  ['cam_j_gun_holster', 'page'], ['cam_j_gun_near', 'page'],
+  ['cam_j_draw_r1', 'page'], ['cam_j_draw_r3', 'page'], ['cam_j_draw_gate', 'page'],
+  // worker 0109: gun-out back jump (turn mode 3) and second jump (height - 0.1), and a draw in the
+  // jump's wind-up (P+0x100 bits 46-47 already 1, still on the ground: state 9, no fall restart)
+  ['cam_j_gun_back', 'page'], ['cam_j_gun_double', 'page'], ['cam_j_draw_windup', 'page'],
+  // gun out, then circle / R3 in the wind-up: holster into state 9 with no state-2 enter (the camera jump
+  // flag stays); R3 with the gun out is first person only (state 8 stays)
+  ['cam_j_gun_windup_holster', 'page'], ['cam_j_gun_windup_r3', 'page'],
 ];
 
+// 'page': the page's own frame, as play.js / aim.js wire it, fed only the trace's pad: follow.tick
+// (state = ctrl.P.state) -> ctrl.step (stick through the camera's new matrix; the ✕ edge -> jump;
+// the weapon hook: the aim ray from this frame's camera -> WeaponSystem.input, then stateMachine /
+// reticleFrame). Checked every frame: eye, look-at, yaw, pitch, CAM+0x220 (the gun-out jump's eye
+// offset blend) and flag 0x1000000, and the player position. The gun-out jump (cam_j_gun) needs
+// FUN_00575768's FUN_0032a0f8 (take-off), the state 2 / 3 enter's clear (landing) and
+// FUN_0032a180 / FUN_0032a1d8 (FollowCamera.place).
+// P+0x100 bits 46-47: byte 5 of the u64, bits 6-7
+const jbits = r => (hex(r.p_state)[5] >> 6) & 3;
+function runPage(name, R) {
+  const r0 = R[0], c0 = r0.cam_170, p0 = r0.matrix[3], f0 = r0.matrix[2];
+  const ctrl = new PlayerController(col, { pos: { x: p0[0], y: p0[1], z: p0[2] }, heading: Math.atan2(f0[0], f0[2]) });
+  ctrl.C.face = { x: f0[0], y: f0[1], z: f0[2] };
+  ctrl.P.state = hex(r0.p_state)[4];
+  ctrl.P.jumpBits = jbits(r0);
+  const W = J('./data/aim/weapon.json');
+  const core = new WeaponSystem(W, J('./data/aim/reticle.json'));
+  const cam = new FollowCamera(null, rays);
+  cam.reset({ x: p0[0], y: p0[1], z: p0[2] }, { pitch: F(c0, 4), yaw: F(c0, 8) });
+  cam.eye = V3(r0.cam_60, 0x30); cam.M = [0, 1, 2].map(i => V3(r0.cam_60, 16 * i));
+  cam.dist = F(c0, 0x50); cam.hit = (hex(c0).readUInt32LE(0x78) & 0x80) !== 0;
+  cam.weapon = core;
+  let i = 0, lastRay = null;
+  const btn = m => R[i].pad_in.buttons & m, prevBtn = m => (i ? R[i - 1].pad_in.buttons : 0) & m;
+  ctrl.weapon = core;
+  ctrl.weaponHook = {
+    pre() {
+      const O = { x: cam.eye[0], y: cam.eye[1], z: cam.eye[2] }, look = { x: cam.at[0], y: cam.at[1], z: cam.at[2] };
+      lastRay = aimRayPoints(O, reticleRay(cam.M, core.cam.c1cc), look, W.range10, (a, b) => col.segment(a, b));
+      core.eye = O; core.hit = lastRay.hit;
+      core.input({ r1Pressed: !!(btn(8) && !prevBtn(8)), r1Held: !!btn(8), r3Pressed: !!(btn(0x400) && !prevBtn(0x400)),
+                   circlePressed: !!(btn(0x20) && !prevBtn(0x20)) }, ctrl.onGround, lastRay.far, ctrl);
+    },
+    weapon() {
+      const before = core.cam.pitch;
+      core.stateMachine(lastRay ? lastRay.hit : null);
+      if (core.cam.pitch !== before) cam.pitch = core.cam.pitch;
+      core.reticleFrame(20);
+      return core.events.some(e => e.type === 'shot');
+    },
+    post() {},
+  };
+  const err = { eye: [0, 0], at: [0, 0], yaw: [0, 0], pitch: [0, 0], a220: [0, 0], pos: [0, 0] };
+  const put = (k, v, f) => { if (v > err[k][0]) err[k] = [v, f]; };
+  let flagOff = 0, flagF = null, bitsOff = 0, bitsF = null, jOff = 0, jF = null, stateOff = 0, maxA = 0, n = 0;
+  for (i = 0; i + 1 < R.length; i++) {
+    const r = R[i], g = R[i + 1], pad = r.pad_in;
+    const lx = padAxis(pad.lx - 128, pad.ly - 128), ly = padAxis(pad.ly - 128, pad.lx - 128);
+    const rx = padAxis(pad.rx - 128, pad.ry - 128), ry = padAxis(pad.ry - 128, pad.rx - 128);
+    cam.tick({ pos: ctrl.pos, want: ctrl.C.dir, state: ctrl.P.state, stick: Math.hypot(lx, ly), pad: [rx, ry] });
+    const w = stickToWorld(lx, ly, cam.M[0], cam.M[2]);
+    const cross = (pad.buttons & 64) !== 0 && (i === 0 || (R[i - 1].pad_in.buttons & 64) === 0);
+    ctrl.step({ x: w.x, z: w.z, stick: w.mag, run: false, keys: new Set(), pressed: new Set(), cross });
+    const gc = hex(g.cam_170), ga = gc.readFloatLE(0xb0), gfl = gc.readUInt32LE(0x78);
+    put('eye', d3(cam.eye, V3(g.cam_60, 0x30)), g.frame);
+    put('at', d3(cam.at, V3(g.cam_f0, 0)), g.frame);
+    put('yaw', Math.abs(wrap(cam.yaw - F(g.cam_170, 8))), g.frame);
+    put('pitch', Math.abs(cam.pitch - F(g.cam_170, 4)), g.frame);
+    put('a220', Math.abs(core.cam.a220 - ga), g.frame);
+    put('pos', d3([ctrl.pos.x, ctrl.pos.y, ctrl.pos.z], g.matrix[3]), g.frame);
+    if (((core.cam.flags ^ gfl) & 0x1000000) !== 0) { flagOff++; flagF ??= g.frame; }
+    // P+0x2a8 bit 0 (drawn) and bit 3 (drawn in the air: FUN_003320c0 l.288's R1 gate)
+    if (g.p_2a8 !== undefined && (((ctrl.P.flags2a8 ?? 0) ^ g.p_2a8) & 9) !== 0) { bitsOff++; bitsF ??= g.frame; }
+    // P+0x100 bits 46-47 (the take-off bits: jump_core enterState / startJump / weaponSwitch)
+    // compared where the page and the game agree on air / ground state (FUN_0055aa88): the page's
+    // GUESS 9 -> 2 landing (player.js moveTick) runs one frame before the game's (state 9 handler
+    // 0x538bd8 not decoded), and the bits follow the state change (FUN_0055b8e0)
+    if (airState(ctrl.P.state) !== airState(hex(g.p_state)[4])) stateOff++;
+    else if ((ctrl.P.jumpBits ?? 0) !== jbits(g)) { jOff++; jF ??= g.frame; }
+    maxA = Math.max(maxA, ga);
+    if (process.env.CAM_DEBUG) console.log(g.frame, (cam.yaw - F(g.cam_170, 8)).toExponential(2), 'want', [ctrl.C.dir.x, ctrl.C.dir.z].map(v => v.toFixed(4)).join(','), (R[i + 1].want_dir_speed || []).slice(0, 3).filter((_, j) => j !== 1).map(v => v.toFixed(4)).join(','), 'gain', cam.gain.toFixed(3), hex(g.cam_170).readFloatLE(0x38).toFixed(3), ctrl.P.state, hex(g.p_state)[4], d3(cam.eye, V3(g.cam_60, 0x30)).toExponential(2), core.cam.a220.toFixed(4), ga.toFixed(4), (core.cam.flags >>> 24) & 1, (gfl >>> 24) & 1);
+    n++;
+  }
+  const L = LIM.page, bad = Object.keys(L).filter(k => err[k][0] > L[k]);
+  if (flagOff) bad.push(`flag 0x1000000 off ${flagOff} (first f${flagF})`);
+  if (bitsOff) bad.push(`P+0x2a8 bits 0/3 off ${bitsOff} (first f${bitsF})`);
+  if (jOff) bad.push(`P+0x100 bits 46-47 off ${jOff} (first f${jF})`);
+  console.log(name.padEnd(14), 'page ', `frames ${n} (CAM+0x220 max ${maxA.toFixed(3)})  ` +
+              Object.keys(err).map(k => `${k} ${err[k][0].toExponential(1)} (f${err[k][1]})`).join('  ') +
+              (stateOff ? `  air/ground state off ${stateOff}` : '') + (bad.length ? '  FAIL ' + bad.join(',') : '  ok'));
+  return bad.length ? 1 : 0;
+}
+if (process.env.CAM_ONLY) CASES.splice(0, CASES.length, ...process.env.CAM_ONLY.split(',').map(x => x.split(':')));
+
 let fails = 0;
+// FollowCamera.reset (warp / H: FUN_00329f68 -> FUN_003285d0) leaves CAM+0x220 alone
+{
+  const core = new WeaponSystem(J('./data/aim/weapon.json'), J('./data/aim/reticle.json'));
+  const cam = new FollowCamera(null, rays);
+  cam.weapon = core; core.cam.a220 = 0.5;
+  cam.reset({ x: -1395.15, y: -98.64, z: -1111.01 });
+  const ok = core.cam.a220 === 0.5;
+  console.log('reset         ', ok ? 'CAM+0x220 kept  ok' : `CAM+0x220 ${core.cam.a220}  FAIL`);
+  if (!ok) fails++;
+}
 for (const [name, mode] of CASES) {
   const file = DIR + '/' + name + '.jsonl';
   if (!existsSync(file)) { console.log('FAIL missing', file); fails++; continue; }
   const R = readFileSync(file, 'utf8').trim().split('\n').slice(1).map(l => JSON.parse(l));
+  if (mode === 'page') { fails += runPage(name, R); continue; }
   // worker 0089 recorded idle / walk / turn / look before C+0xc0 was in the field set: fine while
   // the left stick stays under 0.5 (the auto turn-behind gain stays 0); checked below
   const noWant = !R[0].want_dir_speed;
@@ -62,7 +181,7 @@ for (const [name, mode] of CASES) {
     const le = cam.eye.slice();
     // the cam field set has no P+0x104: on foot, standing or moving = state 2 (the slow set 2-5)
     cam.tick({ pos: { x: r.matrix[3][0], y: r.matrix[3][1], z: r.matrix[3][2] }, want: { x: w[0], y: w[1], z: w[2] },
-               state: 2, stick: Math.hypot(lx, ly), pad: [rx, ry] });
+               state: r.p_state ? hex(r.p_state)[4] : 2, stick: Math.hypot(lx, ly), pad: [rx, ry] });
     const pv = CAM_TYPE_C.pivot, b = cam.base;
     const near = d3([b[0] + pv[0], b[1] + pv[1], b[2] + pv[2]], le) < 17.5;
     if (near && F(g.cam_170, 0x50) > F(r.cam_170, 0x50)) nearOut++;
@@ -73,6 +192,7 @@ for (const [name, mode] of CASES) {
       ties++;
       if (mode === 'tick') continue;
     }
+    if (process.env.CAM_DEBUG) console.log(g.frame, d3(cam.eye, V3(g.cam_60, 0x30)).toExponential(2), (cam.yaw - F(g.cam_170, 8)).toExponential(2), (cam.pitch - F(g.cam_170, 4)).toExponential(2), cam.dist.toFixed(4), F(g.cam_170, 0x50).toFixed(4), cam.ease.out, gap);
     put('eye', d3(cam.eye, V3(g.cam_60, 0x30)), g.frame);
     put('at', d3(cam.at, V3(g.cam_f0, 0)), g.frame);
     put('yaw', Math.abs(wrap(cam.yaw - F(g.cam_170, 8))), g.frame);

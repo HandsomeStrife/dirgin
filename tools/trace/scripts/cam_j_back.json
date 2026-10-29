@@ -1,0 +1,2 @@
+{"name": "cam_j_back", "frames": 130, "doc": "worker 0107: run forward 10-30, stick back from 30, cross 31-34 (back jump), release at 80 (TRACE_FIELDSET=cam)",
+ "events": [{"from": 10, "to": 30, "ly": -1.0}, {"from": 30, "to": 80, "ly": 1.0}, {"from": 31, "to": 34, "buttons": ["cross"]}]}

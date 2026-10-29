@@ -1,0 +1,2 @@
+{"name": "cam_j_draw_r1", "frames": 140, "doc": "worker 0108: standing jump (cross 20-24), R1 draw in the air 30-32: FUN_005766c0 -> FUN_00576548(P, 1) -> FUN_0032a0f8(CAM, 1, 1) (TRACE_FIELDSET=cam)",
+ "events": [{"from": 20, "to": 24, "buttons": ["cross"]}, {"from": 30, "to": 32, "buttons": ["r1"]}]}

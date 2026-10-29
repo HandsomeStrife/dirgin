@@ -61,6 +61,22 @@ export const ST = { FOOT: 2, JUMP: 8, FALL: 9, JUMP2: 0x1f, BACK: 0x20, BACK2: 0
 const onFoot = s => s >= 2 && s <= 5;
 const inAir = s => s === 8 || s === 9 || s === 0x20;
 
+// FUN_0055a850 (FUN_0055aa88(P) on P+0x104): the air states 8, 9, 0xf, 0x10, 0x1f, 0x20, 0x21
+export const airState = s => s === 8 || s === 9 || s === 0xf || s === 0x10 || (s >= 0x1f && s <= 0x21);
+
+// P+0x100 bits 46-47 (P.jumpBits; "took off"): FUN_00565df8(P, v) writes them. The take-off sets
+// them (FUN_00575768: 2 for kind 2, else 1; startJump below). FUN_0055b8e0 (every player state
+// change) ends with FUN_00565df8(P, 0) when the new state is not an air state (FUN_0055aa88), so
+// landing or a ladder clears them and a walk-off or ladder drop (no take-off) leaves them 0. The
+// other clearers, the +0x14 slots of state 1 / 0x80 (FUN_00537ce8 / FUN_00539dd8, vtables 0x58ae90 /
+// 0x58a860), and the script setters (FUN_005660b0, FUN_005661e8 case 0x145) are in states the page
+// doesn't have. Readers: FUN_005766c0 (weaponSwitch below); FUN_00565480 isn't on the page.
+// enterState: P+0x104 = st as FUN_0055b8e0 writes it, with that tail.
+export function enterState(P, st) {
+  P.state = st;
+  if (!airState(st)) P.jumpBits = 0;                      // FUN_0055b8e0: FUN_00565df8(P, 0)
+}
+
 // ---------------------------------------------------------------- 1. the gate
 // FUN_00575698: may a jump start from the current motion state? (also the second jump)
 //   motionId = *(C+2000)+0x70: 0x20 jump, 0x22 fall, 0x59 back jump; standing/walking is 3/8.
@@ -140,8 +156,9 @@ export function startJump(ctrl, motionId, { kind = 0, altHeight = false, backLoa
   } else {
     return null;                                          // other states: no jump (0x11/0x12/0x15/0x17 not ported)
   }
-  P.state = next;                                         // FUN_0055b8e0(P, next, ...)
+  enterState(P, next);                                    // FUN_0055b8e0(P, next, ...)
   P.flags2a8 &= ~4;                                       // bVar3: FUN_00574808(P, 2, 0)
+  P.jumpBits = kind === 2 ? 2 : 1;                        // FUN_00565df8(P, 2 / 1) (l.236-245)
 
   // physics-body branch: cfg+0xcc = 1.2, gravity = cfg+0xcc x 196 (FUN_00356358)
   const bs = ctrl.body.state, airborne = bs === 2 || bs === 3 || bs === 6 || bs === 7;   // FUN_003577c8
@@ -317,6 +334,40 @@ export class BackJumpMotion extends JumpMotion {
     }
     return this.tick(out);
   }
+}
+
+// FUN_005766c0(P, on, 1): the R1 / R3 draw (on) and the circle holster, the player side (the weapon
+// side, FUN_00576548, is aim_core draw / holsterCore; P+0x2a8 bit 0 is set / cleared there).
+// The draw restarts the fall only when P+0x100 bits 46-47 != 0 (a take-off) and C+0x1c0 bit 0x200
+// is clear: a walk-off or a ladder drop keeps falling. Both paths then pick the state: the ground
+// state when the bits are 0 and the ground bit is set, else 9. So in the jump's wind-up (bits 1,
+// still on the ground) a draw goes to state 9 without a restart. FUN_0055bb40 (states 0x80-0xbf)
+// is 0 in the states the page draws from. Returns the new player state, or null (holster in
+// states 0x1f / 0x20 / 0x21: no change); the ground states are returned, not written (the caller's).
+// Not ported: FUN_00565d78 (P+0x100 bit 44, C+0x590 bit 24, no reader on the page), the state-4/5
+// choice by P+0x100 bits 40-41 (0 traced).
+export function weaponSwitch(ctrl, on) {
+  const P = ctrl.P;
+  const took = (P.jumpBits ?? 0) !== 0;                   // (P+0x100 >> 0x2e & 3) != 0
+  if (on && took && !ctrl.onGround) {
+    // FUN_00326500() true: FUN_00357168(DAT_0046ee88 = 1.0, C+0x3b0), a fresh take-off of height 1;
+    // 0 after a second jump (C+0x79c bit 0x20) near the apex (|C+0x498 - C+0x484| = |rise - t| < 0.1)
+    const B = ctrl.body;
+    let h = 1.0;
+    if (((ctrl.C.flags79c ?? 0) & 0x20) && Math.abs(f32(B.rise - B.t)) < 0.1) h = 0;
+    ctrl.startFall(h);
+  }
+  if (!took && ctrl.onGround) return on ? 3 : 2;          // FUN_0055b8e0(P, 3 / 2, 0, 0) (LAB_00576930)
+  if (!on) {
+    const st = P.state;
+    if (st === ST.JUMP2 || st === ST.BACK || st === ST.BACK2) return null;   // ' ', '!', 0x1f
+  }
+  enterState(P, ST.FALL);                                 // FUN_0055b8e0(P, 9, 1, 0) (enter FUN_00538b50)
+  if (ctrl.jump) ctrl.jump.forceFall(ctrl);               // ... its param_3 = 1: the motion becomes 0x22
+  // LAB_005769c8: a draw in an air state (FUN_0055aa88) sets P+0x2a8 bit 3 (FUN_00574808(P, 3, 1)):
+  // no second R1 draw before the next take-off from the ground (FUN_003320c0 l.288)
+  if (on) P.flags2a8 = (P.flags2a8 ?? 0) | 8;
+  return ST.FALL;
 }
 
 // FUN_00333150's P+0x29c (turn mode) writes. States 0x20 / 0x21 (the back jump), after the stick writes (player.js
@@ -505,6 +556,10 @@ export class Jump {
     // FUN_00537d58 (from 2) / FUN_00538a30 (from 8): 8, 0x1f -> motion 0x20; 0x20, 0x21 -> 0x59
     // GUESS: from states 9 and 0x20 the same mapping (their vt+0x24, 0x538bd8 / 0x53a478,
     // not read; see notes/jump-research.md)
+    // FUN_00575768's end, every take-off: CAM+0x1e8 &= ~2 and FUN_00329ff0(CAM, 0) (flag 2 and the
+    // target-lock bit 0x10000 / CAM+0x1e3: neither is set on the page), then FUN_0032a0f8(CAM, 1, 0)
+    // when P+0x2a8 bit 0 (the gun is drawn): the eye offset starts its blend (aim_core camJump)
+    if (ctrl.weapon && ctrl.weapon.drawn()) ctrl.weapon.camJump(true);
     const second = st === ST.JUMP2 || st === ST.BACK2;
     this.motion = (st === ST.BACK || st === ST.BACK2) ? new BackJumpMotion(second) : new JumpMotion(second);
     this.events.push({ frame: ctrl.frames, ev: 'jump', state: st });
@@ -536,7 +591,10 @@ export class Jump {
         // done -> event -> FUN_00538aa0: state 2 (3 with P+0x100 bit 44); FUN_00538a30: motion 0x21
         // GUESS: that the done flag is what raises the event, on this frame (not decoded; the
         // traces agree to the frame; see notes/jump-research.md)
-        ctrl.P.state = ST.FOOT;
+        enterState(ctrl.P, ST.FOOT);
+        // entering state 2 / 3 runs its vtable +0xc slot, FUN_00537e70 / FUN_005380a0 (state table
+        // FUN_00537628: vtables 0x58ae60 / 0x58ae30): FUN_0032a0f8(CAM, 0, 0) (traced: cam_j_gun f82)
+        if (ctrl.weapon) ctrl.weapon.enterFoot();
         this.motion = new LandMotion();
         this.events.push({ frame: ctrl.frames, ev: 'land' });
       } else if (this.motion instanceof LandMotion && this.motion.done) {
@@ -559,10 +617,22 @@ export class Jump {
   airShot(ctrl) {
     const st = ctrl.P.state;
     if (!(st === 8 || st === 9 || st === 0xf || st === 0x10 || (st >= 0x1f && st <= 0x21))) return false;
-    if (st === ST.BACK || st === ST.BACK2) ctrl.P.state = ST.FALL;                 // FUN_0055b8e0(P, 9, 0, 0)
+    if (st === ST.BACK || st === ST.BACK2) enterState(ctrl.P, ST.FALL);                 // FUN_0055b8e0(P, 9, 0, 0)
     this.motion = new AirFireMotion();
     this.events.push({ frame: ctrl.frames, ev: 'airShot' });
     return true;
+  }
+
+  // FUN_0055b8e0(P, 9, 1, 0), param_3 = 1 (weaponSwitch): the handler is FUN_00537a58(0) (the state
+  // table's entry 0, vtable 0x58aec0), whose +0x24 slot FUN_00537cc0 -> FUN_00537aa0 gives state 9's
+  // motion from the jumptable 0x589e70[9] (0x537b34: li v0, 0x22). FUN_005641c0(P, 0x22, 1) then sets
+  // it even when it is already the motion (FUN_00341780(C, 0x22, 0)): a fresh fall class whose
+  // previous motion is the old one. From the wind-up the jump class's exit clears the h_jp0 freeze
+  // (cam_j_draw_windup: h_jp3_a and the rise start 2 frames early); mid-air it swaps h_jp3 for the
+  // fall class's h_jp3_a.
+  forceFall(ctrl) {
+    this.motion = new FallMotion(this.motionId(ctrl));
+    this.events.push({ frame: ctrl.frames, ev: 'forceFall' });
   }
 
   // FUN_005aa5b8's advance of the head layer (held after landing until the locomotion clips take over)

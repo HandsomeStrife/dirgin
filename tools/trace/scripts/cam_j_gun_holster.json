@@ -1,0 +1,2 @@
+{"name": "cam_j_gun_holster", "frames": 140, "doc": "worker 0107: gun out (R1 10-12), standing jump cross 40-44, holster (circle) 100-102 after landing: CAM+0x220 decays in view 1 (TRACE_FIELDSET=cam)",
+ "events": [{"from": 10, "to": 12, "buttons": ["r1"]}, {"from": 40, "to": 44, "buttons": ["cross"]}, {"from": 100, "to": 102, "buttons": ["circle"]}]}

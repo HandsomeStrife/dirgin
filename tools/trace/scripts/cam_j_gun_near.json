@@ -1,0 +1,2 @@
+{"name": "cam_j_gun_near", "frames": 260, "doc": "worker 0107: gun out (R1 10-12), standing jump cross 20-24, then back toward the camera into the wall behind 90-200 (CAM+0x220 with the eye pulled in), stop (TRACE_FIELDSET=cam)",
+ "events": [{"from": 10, "to": 12, "buttons": ["r1"]}, {"from": 20, "to": 24, "buttons": ["cross"]}, {"from": 90, "to": 200, "ly": 1.0}]}

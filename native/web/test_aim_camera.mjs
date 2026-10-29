@@ -24,7 +24,7 @@ const V3 = (h, o) => [F(h, o), F(h, o + 4), F(h, o + 8)];
 const BTN = { r1: 0x0008, r3: 0x0400, circle: 0x0020 };
 const d3 = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
 // limits: the follow camera's own trace checks reach 0.0075 (worker 0089)
-const LIM = { eye: 0.02, at: 0.002, ang: 1e-4, fwd: 1e-4, far: 0.05 };
+const LIM = { eye: 0.02, at: 0.002, ang: 1e-4, fwd: 1e-4, far: 0.05, a220: 1e-5 };
 
 let fails = 0;
 // The loop below rebuilds one game frame by hand (setupAim needs the DOM). Check that the page's
@@ -69,7 +69,7 @@ for (const file of files) {
   cam.M = [0, 1, 2].map(i => V3(r0.cam_60, 16 * i));
   cam.dist = F(c0, 0x50); cam.snap = false; cam.base = [r0.matrix[3][0], r0.matrix[3][1], r0.matrix[3][2]];
   cam.weapon = core;
-  const err = { eye: [0, 0], at: [0, 0], ang: [0, 0], fwd: [0, 0], far: [0, 0] };
+  const err = { eye: [0, 0], at: [0, 0], ang: [0, 0], fwd: [0, 0], far: [0, 0], a220: [0, 0] };
   const put = (k, v, f) => { if (v > err[k][0]) err[k] = [v, f]; };
   let n = 0, leadN = 0, skipN = 0, jumped = false, turned = false;
   for (let f = 0; f + 1 < R.length; f++) {
@@ -94,13 +94,18 @@ for (const file of files) {
     core.stateMachine(core.hit);
     if (core.cam.pitch !== before) cam.pitch = core.cam.pitch;   // shot: pitch carry-over (message 0x3e9)
     core.reticleFrame(20);
-    // not comparable: (1) after a jump with the gun out the game's eye leaves the view axis by ~4.9
-    // (FUN_00575768 -> FUN_0032a0f8 sets CAM+0x1e8 0x1000000 / CAM+0x220; their reader is not in
-    // the FUN_0032ace0 decomp: OPEN, notes/fidelity-audit.md); (2) the auto turn-behind in view 1
-    // needs C+0xc0, which the aim field set doesn't record (the facing stands in)
-    if ((r.mflags & 0x200) === 0 || hex(r.p_state)[4] === 8) jumped = true;
+    // the player's camera hooks, from the trace's state change in this frame (this test runs no
+    // player): the take-off (FUN_00575768: FUN_0032a0f8(CAM, 1, 0) with the gun drawn) and the
+    // state 2 / 3 enter (FUN_00537e70 / FUN_005380a0: FUN_0032a0f8(CAM, 0, 0)); the gun-out
+    // jump's eye offset (CAM+0x220, FUN_0032a180 / FUN_0032a1d8) then runs in FollowCamera.place
+    const s0 = hex(r.p_state)[4], s1 = hex(g.p_state)[4], air = st => st === 8 || st === 0x1f;
+    if (air(s1) && !air(s0) && core.drawn()) { core.camJump(true); jumped = true; }
+    if ((s1 === 2 || s1 === 3) && s0 !== 2 && s0 !== 3) core.enterFoot();
+    if (jumped) put('a220', Math.abs(core.cam.a220 - F(g.cam_170, 0xb0)), g.frame);
+    // not comparable: the auto turn-behind in view 1 needs C+0xc0, which the aim field set doesn't
+    // record (the facing stands in)
     if (core.cam.type === 0xc && cam.gain > 0.1) turned = true;   // from here on the yaw can differ
-    if (jumped || turned) { skipN++; continue; }
+    if (turned) { skipN++; continue; }
     // compare with the record after this frame
     const ge = V3(g.cam_60, 0x30), gl = V3(g.cam_f0, 0), gf = V3(g.cam_60, 0x20);
     put('eye', d3(cam.eye, ge), g.frame);

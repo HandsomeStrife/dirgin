@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Vincent (p000) cape + hero-frame placement, recovered from the GS dump.
 
-The cape is mesh block 0x19f70 of 07700001.bin (an smd named 'p000_L02', 112 tris).
+The cape is mesh block 0x19ed0 of 07703201.bin (0x19f70 in 07700001) (an smd named 'p000_L02', 112 tris).
 It has NO skinning batches (its pivot count is 0), so its vertex positions are not
 in the file: the game poses it at runtime (cloth). Its topology, UVs and vertex
 colours ARE in the file, and its UVs are identical to the dump's cape draws
@@ -21,7 +21,7 @@ import render_skinned as R
 from gsparse import read_header
 from gsrender2 import build, tex0_fields
 
-CAPE_BLOCK = 0x19f70          # smd header; payload at +0x10
+CAPE_BLOCK = 0x19ed0          # 07703201 (render_p000_bound.CONT); smd header; payload at +0x10
 CAPE_TBP = 0x2e68
 QMIN = 1e-6
 

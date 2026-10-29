@@ -28,8 +28,13 @@ from gsparse import read_header
 from gsrender2 import build, TexCache, tex0_fields
 from char_dumpbind import tri_sig
 
-CONT = _REPO + "/extract/_KEL/noPath/07700001.bin"
-TEXC = _REPO + "/extract/_KEL/noPath/07700002.bin"
+# z128 loads Vincent's model from 07703201 (mesh) / 07703202 (textures), not 07700001/02:
+# the sea-of-flames save state's RAM holds 07703201's image at 0x18dfe80 (37718 of 39492 words
+# equal, header size field 0x26910) and the hero GS dump draws the envmaps at TBP 0x2ee8/0x2eec,
+# CBP 0x2e64 = 07703202's VRAM layout (07700002 adds a 64x64 'p000_ta' eye texture before them).
+# Same body/cape/skeleton bytes as 07700001 (every block 0xa0 earlier: shorter texanm header).
+CONT = _REPO + "/extract/_KEL/noPath/07703201.bin"
+TEXC = _REPO + "/extract/_KEL/noPath/07703202.bin"
 QMIN = 1e-6
 
 def dump_sig2tex0(dumppath):

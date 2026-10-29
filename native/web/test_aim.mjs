@@ -192,16 +192,49 @@ for (const file of files) {
   console.log(`air turn (state 9, gun out): ${e.toFixed(4)} deg from the mode-6 step`);
   if (e > 1e-3) { console.log('  air turn differs'); fails++; }
 }
-// FUN_003320c0: R1 draws only on the ground (R3 draws anywhere); the traces never press R1 in the air
-// with the gun away, so it is set up here
+// FUN_003320c0 l.288: R1 draws on the ground, or in the air while P+0x2a8 bit 3 is clear (a draw
+// in the air sets it: jump_core weaponSwitch). Traced: cam_j_draw_r1 / cam_j_draw_gate
+// (test_cam_traces); set up here without the player too
 {
-  const w = new WeaponSystem(W, RET);
+  const w = new WeaponSystem(W, RET), pl = { P: { flags2a8: 8 } };
+  w.input({ r1Pressed: true, r1Held: true, r3Pressed: false, circlePressed: false }, false, null, pl);
+  const blocked = !w.P.drawn;
   w.input({ r1Pressed: true, r1Held: true, r3Pressed: false, circlePressed: false }, false, null);
-  const air = w.P.drawn;
-  w.input({ r1Pressed: true, r1Held: true, r3Pressed: false, circlePressed: false }, true, null);
-  const ground = w.P.drawn && w.cam.view === 2;
-  console.log(`R1 draw: in the air ${air ? 'DRAWS (wrong)' : 'no draw'}, on the ground ${ground ? 'draw + weapon view' : 'NO DRAW (wrong)'}`);
-  if (air || !ground) fails++;
+  const air = w.P.drawn && w.cam.view === 2 && w.cam.a220 === 1 && (w.cam.flags & 0x1000000) !== 0;
+  const g = new WeaponSystem(W, RET);
+  g.input({ r1Pressed: true, r1Held: true, r3Pressed: false, circlePressed: false }, true, null);
+  const ground = g.P.drawn && g.cam.view === 2 && g.cam.a220 === 0 && !(g.cam.flags & 0x1000000);
+  console.log(`R1 draw: air with bit 3 ${blocked ? 'no draw' : 'DRAWS (wrong)'}, air without ${air ? 'draw + CAM+0x220 = 1' : 'WRONG'}, ground ${ground ? 'draw, flag clear' : 'WRONG'}`);
+  if (!blocked || !air || !ground) fails++;
+}
+// the ladder mount (FUN_00576548(P, 0)) clears the gun-out jump flag only in the air
+{
+  const mk = () => { const w = new WeaponSystem(W, RET); w.camJump(true, true); return w; };
+  const a = mk(), g = mk();
+  a.ladderMount(false); g.ladderMount(true);
+  const ok = !(a.cam.flags & 0x1000000) && (g.cam.flags & 0x1000000) !== 0;
+  console.log(`ladder mount: flag 0x1000000 ${ok ? 'cleared in the air only' : 'WRONG'}`);
+  if (!ok) fails++;
+}
+// the same through the page's wiring: player.js step enters the ladder action -> weaponHook.actionEnter
+// -> aim.js makeClipControl actionEnter -> ladderMount(ctrl.onGround) (aim.js passes the ground bit)
+{
+  const run = ground => {
+    const c = new PlayerController(stubCol, { pos: { x: 0, y: 0, z: 0 }, heading: 0 });
+    const w = new WeaponSystem(W, RET); w.camJump(true, true);
+    const ctl = makeClipControl({ core: w, anim: headlessAnim(), ctrl: c, motions: MOTIONS, step: STEP });
+    c.weaponHook = { actionEnter: a => ctl.actionEnter(a) };
+    c.onGround = ground;
+    let took = 0;
+    c.addAction({ name: 'ladder', canEnter: () => !took++, enter: () => null,
+                  update: () => ({ delta: { x: 0, y: 0, z: 0 } }), exit: () => {} });
+    c.step({ x: 0, z: 0, keys: new Set(), pressed: new Set() });
+    return { entered: took > 0 && w.P.st === 0xe, flag: (w.cam.flags & 0x1000000) !== 0 };
+  };
+  const a = run(false), g = run(true);
+  const ok = a.entered && g.entered && !a.flag && g.flag;
+  console.log(`ladder mount via aim.js: ${ok ? 'air clears the flag, ground keeps it' : `WRONG (air ${JSON.stringify(a)}, ground ${JSON.stringify(g)})`}`);
+  if (!ok) fails++;
 }
 // LMB -> R1 gate with fake pointer-lock states: the lock-taking click and a drag-look never draw
 {

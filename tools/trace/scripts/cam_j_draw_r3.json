@@ -1,0 +1,2 @@
+{"name": "cam_j_draw_r3", "frames": 140, "doc": "worker 0108: standing jump (cross 20-24), R3 draw (first person) in the air 28-30, R3 again 38-40 (weapon view) before landing (TRACE_FIELDSET=cam)",
+ "events": [{"from": 20, "to": 24, "buttons": ["cross"]}, {"from": 28, "to": 30, "buttons": ["r3"]}, {"from": 38, "to": 40, "buttons": ["r3"]}]}

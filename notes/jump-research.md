@@ -123,8 +123,9 @@ re-take-off, the back-jump angle test, turn negation and apex margin.
 ## Not ported / open
 
 - Sounds 0x50 (take-off) and 0x51 (landing): FUN_003412d0 / FUN_00341330.
-- Camera hooks in FUN_00575768: CAM+0x1e8 &= ~2, FUN_00329ff0(CAM, 0), and FUN_0032a0f8(CAM, 1, 0)
-  when P+0x2a8 bit 0. For the camera translation (player.js FollowCamera).
+- Camera hooks in FUN_00575768: ported by worker 0107 (see HANDOFF). CAM+0x1e8 &= ~2 and
+  FUN_00329ff0(CAM, 0) clear bits the page never sets (flag 2, target lock 0x10000), so they are
+  left out; FUN_0032a0f8(CAM, 1, 0) with the gun drawn is jump_core takeOff.
 - FUN_00574b98 (weapon state P+0x2a4 3 → 0, 4 → 2) and FUN_00565df8(P, 1) (P+0x100 bits 46-47).
 - FUN_005ae618(MP, 1/2/3): a motion-player mode switch during the jump; meaning not decoded
   (the cloth? see cloth.json's h_jp windows).

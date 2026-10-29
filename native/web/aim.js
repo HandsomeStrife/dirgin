@@ -203,7 +203,7 @@ export function makeClipControl({ core, anim, ctrl, motions, step = STEP }) {
     clips,
     actionEnter(a) {
       if (a.name !== 'ladder') return;
-      core.ladderMount();
+      core.ladderMount(ctrl.onGround, ctrl);             // FUN_00576548(P, 0) reads the ground bit
       if (anim.request) anim.clearRequest();
       fire = null;
     },
@@ -297,7 +297,7 @@ export async function setupAim({ ctrl, anim, motions, col, follow, output, vin, 
       core.eye = { x: follow.eye[0], y: follow.eye[1], z: follow.eye[2] }; core.hit = lastRay.hit;
       if (inAction || isFrozen()) { clearEdges(); core.events.length = 0; return; }
       core.input({ r1Pressed: btn.r1Edge, r1Held: btn.r1, r3Pressed: btn.r3Edge, circlePressed: btn.circleEdge },
-                 ctrl.onGround, lastRay.far);
+                 ctrl.onGround, lastRay.far, ctrl);
       btn.r1Edge = btn.r3Edge = btn.circleEdge = false;
     },
     actionEnter: a => ctl.actionEnter(a),

@@ -1,0 +1,2 @@
+{"name": "cam_j_gun_back", "frames": 150, "doc": "worker 0109: gun out (R1 10-12), run forward 20-40, stick back from 40, cross 41-44 (back jump with P+0x2a8 bit 0: turn mode 3, LAB_00333e08), release at 90 (TRACE_FIELDSET=cam)",
+ "events": [{"from": 10, "to": 12, "buttons": ["r1"]}, {"from": 20, "to": 40, "ly": -1.0}, {"from": 40, "to": 90, "ly": 1.0}, {"from": 41, "to": 44, "buttons": ["cross"]}]}

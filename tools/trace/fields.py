@@ -146,12 +146,14 @@ POSE_FIELDS = [f for f in FIELDS if f[0] in (
 # CAM+0x170..0x22f (FOV, pitch +0x174, yaw +0x178, timers +0x1a8/+0x1e2, flags +0x1e8),
 # the basis/eye (+0x60..+0xdf), look-at (+0xf0) and the normal type 0xc object.
 CAM_FIELDS = [f for f in FIELDS if f[0] in (
-    "step", "pad_held", "matrix", "move_dir", "want_dir_speed", "ground_speed", "body_pos", "motion")] + [
+    "step", "pad_held", "p_state", "matrix", "move_dir", "want_dir_speed", "ground_speed", "body_pos", "motion")] + [
     f for f in AIM_FIELDS if f[0] in ("cam_view", "cam_typeptr", "cam_60", "cam_f0", "camtype_c")] + [
     ("cam_170", "CAM", 0x170, "bytes:192", "D", "FUN_0032ace0: +0x170 FOV, +0x174 pitch, +0x178 yaw, +0x180 blend, +0x198/+0x19c, +0x1a8 auto-turn gain, +0x1ac, +0x1bc, +0x1c4/+0x1c8, +0x1e2 stick-idle counter, +0x1e8 flags, +0x214, +0x218"),
     ("cam_00", "CAM", 0x0, "bytes:96", "G", "CAM+0x00..0x5f: type +0x28, phase +0x2c, type object +0x48, player +0x54"),
     ("mp_matrix", "MP", 0x10, "mat4", "D", "MP+0x10: the draw matrix; FUN_003477c8 (camera base when C+0x564 & 0x18000000) = MP+0x10 x bone 0"),
     ("c_564", "C", 0x564, "u32", "D", "FUN_003422f0: C+0x564 & 0x18000000 picks the camera base (MP path vs C+0x54c vtable+0x24)"),
+    # worker 0107 (jump camera): P+0x2a8 bit 0 gates FUN_00575768's FUN_0032a0f8(CAM, 1, 0)
+    ("p_2a8", "P", 0x2A8, "u32", "D", "FUN_00574808 bits; FUN_00575768 bit 0 -> FUN_0032a0f8(CAM, 1, 0)"),
 ]
 
 # Opt-in set for the jump (TRACE_FIELDSET=jump, worker 0095): no cape; the whole physics

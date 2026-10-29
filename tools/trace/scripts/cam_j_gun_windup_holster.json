@@ -1,0 +1,2 @@
+{"name": "cam_j_gun_windup_holster", "frames": 140, "doc": "worker 0109: gun out (R1 10-12), jump (cross 30-34; take-off sets the camera jump flag), circle 32-34 in the wind-up: holster into state 9, no state-2 enter, the flag stays (TRACE_FIELDSET=cam)",
+ "events": [{"from": 10, "to": 12, "buttons": ["r1"]}, {"from": 30, "to": 34, "buttons": ["cross"]}, {"from": 32, "to": 34, "buttons": ["circle"]}]}

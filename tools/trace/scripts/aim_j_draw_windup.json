@@ -1,0 +1,2 @@
+{"name": "aim_j_draw_windup", "frames": 140, "doc": "worker 0109: standing jump (cross 20-24), R1 22-24 in the h_jp0 wind-up (state 8, P+0x100 bits 46-47 = 1, still on the ground): FUN_005766c0 takes the air branch without a fall restart (TRACE_FIELDSET=aim; clip-checked in test_jump_page)",
+ "events": [{"from": 20, "to": 24, "buttons": ["cross"]}, {"from": 22, "to": 24, "buttons": ["r1"]}]}

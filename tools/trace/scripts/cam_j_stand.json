@@ -1,0 +1,2 @@
+{"name": "cam_j_stand", "frames": 120, "doc": "worker 0107: standing jump for the camera, cross 10-16 (TRACE_FIELDSET=cam)",
+ "events": [{"from": 10, "to": 16, "buttons": ["cross"]}]}

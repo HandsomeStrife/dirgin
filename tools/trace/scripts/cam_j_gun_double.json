@@ -1,0 +1,2 @@
+{"name": "cam_j_gun_double", "frames": 160, "doc": "worker 0109: gun out (R1 10-12), cross 30-33, again 50-53 in the air (second jump, armed: height - 0.1, FUN_00575768), again 65-68 (TRACE_FIELDSET=cam)",
+ "events": [{"from": 10, "to": 12, "buttons": ["r1"]}, {"from": 30, "to": 33, "buttons": ["cross"]}, {"from": 50, "to": 53, "buttons": ["cross"]}, {"from": 65, "to": 68, "buttons": ["cross"]}]}

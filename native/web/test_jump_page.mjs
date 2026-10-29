@@ -134,9 +134,9 @@ run('aim_g_air', { state: false, clips: false, dir: path.join(OUT, 'aim') });
 // head clip, frame, blend countdown (+0x24), and the blend-out layer's clip / frame.
 // node ... test_jump_page.mjs [player.js] [jump_core.js]: a mutant jump_core can't be swapped in
 // (player.js imports it), so the mutation runs edit the file in place (scratchpad mutate script).
-function runArmed() {
-  const file = path.join(OUT, 'aim', 'aim_g_air.jsonl');
-  if (!existsSync(file)) { console.log('skip armed aim_g_air: no trace'); return; }
+function runArmed(name = 'aim_g_air', order = 'h_jp0_a h_jp1_a h_jp3_a h_jp4_a', after = null) {
+  const file = path.join(OUT, 'aim', name + '.jsonl');
+  if (!existsSync(file)) { console.log(`skip armed ${name}: no trace`); return; }
   ran++;
   const J = p => JSON.parse(readFileSync(path.join(here, p), 'utf8'));
   const [, ...R] = load(file);
@@ -164,7 +164,7 @@ function runArmed() {
       sim.kickDecay();
       sim.eye = V(nx.cam_60, 0x30); sim.hit = V(nx.cam_60, 0x40);
       sim.input({ r1Pressed: !!(btn(8) && !prevBtn(8)), r1Held: !!btn(8), r3Pressed: !!(btn(0x400) && !prevBtn(0x400)),
-                  circlePressed: !!(btn(0x20) && !prevBtn(0x20)) }, (r.mflags & 0x200) !== 0, V(nx.cam_60, 0x50));
+                  circlePressed: !!(btn(0x20) && !prevBtn(0x20)) }, (r.mflags & 0x200) !== 0, V(nx.cam_60, 0x50), ctrl);
     },
     weapon() { sim.stateMachine(V(R[i + 1].cam_60, 0x40)); sim.reticleFrame(20); const s = sim.events.some(e => e.type === 'shot'); if (s) shots++; return s; },
     post() { sim.events.length = 0; },
@@ -195,17 +195,52 @@ function runArmed() {
     }
     if (process.env.JP_DUMP === 'armed') console.log(g.frame, our, anim.head.frame.toFixed(2), rem.toFixed(2), '|', gh.clip, gh.frame.toFixed(2), gh.blend_len.toFixed(2));
   }
-  const L = `armed aim_g_air (${S.n} jump-clip frames)`;
-  ok(seen.join(' ') === 'h_jp0_a h_jp1_a h_jp3_a h_jp4_a', `${L}: game clip order ${seen.join(' ')}`);
+  const L = `armed ${name} (${S.n} jump-clip frames)`;
+  ok(seen.join(' ') === order, `${L}: game clip order ${seen.join(' ')}`);
   ok(S.clip === 0, `${L}: head clip off ${S.clip}${S.clipF ? ', first ' + S.clipF : ''}`);
   ok(S.fr === 0, `${L}: head clip frame off ${S.fr}${S.frF ? ', first ' + S.frF : ''}`);
   ok(S.b === 0, `${L}: head blend countdown off ${S.b}${S.bF ? ', first ' + S.bF : ''}`);
   ok(S.o === 0, `${L}: blend-out layer clip / frame off ${S.o}${S.oF ? ', first ' + S.oF : ''}`);
   ok(S.pos <= POS_TOL, `${L}: position max ${S.pos.toExponential(2)}`);
+  if (after) return after(ctrl, L, shots);
   const air = ctrl.jump.events.filter(e => e.ev === 'airShot').map(e => e.frame);
   ok(shots >= 1 && air.length === 1 && air[0] === 48, `${L}: shots ${shots}, air-shot class entered on frames [${air}] (game: R1 f48 only; f60 fires nothing)`);
 }
 runArmed();
+// worker 0109: R1 in the h_jp0 wind-up (aim_j_draw_windup: ✕ f20, R1 f22, state 8, P+0x100 bits 46-47
+// = 1, ground bit still set). FUN_005766c0 takes the air branch with no fall restart (the ground bit
+// is set): state 9 (FUN_0055b8e0(P, 9, 1, 0)), whose forced motion 0x22 ends the wind-up: the
+// rise starts at once and h_jp3_a plays (jump_core forceFall). FUN_00576548 sees the ground bit:
+// no camera jump flag.
+// R1 / R3 while falling without a take-off (a walk-off or a ladder drop: P+0x100 bits 46-47 = 0; no
+// such ledge is reachable from the z128 save state, so this is set up by hand): FUN_005766c0 skips the
+// fall restart (LAB_005767bc) and still goes to state 9 (ground bit clear). After a take-off
+// (bits 1) the same draw restarts the fall with DAT_0046ee88 = 1.0. (The landing clear is checked per
+// frame against the game in test_cam_traces 'page'.)
+{
+  const J0 = p => JSON.parse(readFileSync(path.join(here, p), 'utf8'));
+  const r0 = load(path.join(OUT, 'j_stand.jsonl'))[1], p0 = r0.matrix[3];
+  const fall = (bits, inp) => {
+    const c = new PL.PlayerController(col, { pos: { x: p0[0], y: p0[1], z: p0[2] }, heading: 0 });
+    c.onGround = false; c.P.state = 9; c.P.jumpBits = bits;
+    const hs = []; const sf = c.startFall.bind(c); c.startFall = h => { hs.push(h); return sf(h); };
+    const w = new WeaponSystem(J0('data/aim/weapon.json'), J0('data/aim/reticle.json'));
+    w.input({ r1Pressed: false, r1Held: false, r3Pressed: false, circlePressed: false, ...inp }, false, null, c);
+    return { hs, st: c.P.state, wst: w.P.state, b3: ((c.P.flags2a8 ?? 0) & 8) !== 0, bits: c.P.jumpBits, drawn: w.P.drawn, c };
+  };
+  for (const [k, inp] of [['R1', { r1Pressed: true, r1Held: true }], ['R3', { r3Pressed: true }]]) {
+    const off = fall(0, inp), jumped = fall(1, inp);
+    ok(off.drawn && off.hs.length === 0 && off.st === 9 && off.wst === 9 && off.b3 && off.bits === 0,
+       `${k} falling with no take-off: drawn, no fall restart (${off.hs}), state ${off.st} / returned ${off.wst}, P+0x2a8 bit 3 ${off.b3}`);
+    ok(jumped.drawn && jumped.hs.length === 1 && jumped.hs[0] === 1 && jumped.st === 9 && jumped.bits === 1,
+       `${k} falling after a take-off: fall restarted with h ${jumped.hs} (want 1), state ${jumped.st}`);
+  }
+}
+runArmed('aim_j_draw_windup', 'h_jp0 h_jp3_a h_jp4_a', (ctrl, L) => {
+  const ev = ctrl.jump.events.filter(e => e.ev === 'forceFall').map(e => e.frame);
+  ok(ev.length === 1 && ev[0] === 22, `${L}: fall class forced on frames [${ev}] (game: R1 f22)`);
+  ok((ctrl.weapon.cam.flags & 0x1000000) === 0, `${L}: camera jump flag stays clear (ground bit set at the draw)`);
+});
 // ✕ priority (FUN_00333150): an action that takes the press (the ladder) or owns him keeps it;
 // otherwise the page's Space edge (input.pressed) is the jump
 {
@@ -237,7 +272,7 @@ runArmed();
 for (const drawn of [false, true]) {
   const r0 = load(path.join(OUT, 'j_stand.jsonl'))[1], p0 = r0.matrix[3];
   const c = new PlayerController(col, { pos: { x: p0[0], y: p0[1], z: p0[2] }, heading: 0 });
-  c.weapon = { drawn: () => drawn, isAiming: () => false, P: { facePt: null } };
+  c.weapon = { drawn: () => drawn, isAiming: () => false, P: { facePt: null }, camJump() {}, enterFoot() {} };
   c.weaponHook = { pre() {}, weapon: () => false, post() {} };
   c.step({ x: 0, z: 0, keys: new Set(), pressed: new Set(), cross: true });
   const want = drawn ? 'h_jp0_a' : 'h_jp0';
@@ -251,7 +286,7 @@ for (const drawn of [false, true]) {
   const r0 = load(path.join(OUT, 'j_stand.jsonl'))[1], p0 = r0.matrix[3];
   const c = new PlayerController(col, { pos: { x: p0[0], y: p0[1], z: p0[2] }, heading: 0 });
   let fire = false;
-  c.weapon = { drawn: () => true, isAiming: () => false, P: { facePt: null } };
+  c.weapon = { drawn: () => true, isAiming: () => false, P: { facePt: null }, camJump() {}, enterFoot() {} };
   c.weaponHook = { pre() {}, weapon: () => { const f = fire; fire = false; return f; }, post() {} };
   const seq = [];
   let loop3 = null, shotAt = null, after = null;
@@ -277,7 +312,7 @@ for (const drawn of [false, true]) {
 {
   const r0 = load(path.join(OUT, 'j_stand.jsonl'))[1], p0 = r0.matrix[3];
   const c = new PlayerController(col, { pos: { x: p0[0], y: p0[1], z: p0[2] }, heading: 0 });
-  c.weapon = { drawn: () => true, isAiming: () => false, P: { facePt: null } };
+  c.weapon = { drawn: () => true, isAiming: () => false, P: { facePt: null }, camJump() {}, enterFoot() {} };
   c.weaponHook = { pre() {}, weapon: () => false, post() {} };
   for (let i = 0; i < 30; i++) c.step({ x: 1, z: 0, stick: 1, keys: new Set(), pressed: new Set() });
   const seq = []; let motion = null, loop3 = null, req3 = null;

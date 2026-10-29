@@ -1,0 +1,2 @@
+{"name": "cam_j_gun", "frames": 160, "doc": "worker 0107: gun out (R1 10-12), standing jump cross 40-44, no shot (TRACE_FIELDSET=cam)",
+ "events": [{"from": 10, "to": 12, "buttons": ["r1"]}, {"from": 40, "to": 44, "buttons": ["cross"]}]}

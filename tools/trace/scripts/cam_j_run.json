@@ -1,0 +1,2 @@
+{"name": "cam_j_run", "frames": 140, "doc": "worker 0107: run from 10, jump at 30 with the stick held, release at 95 (TRACE_FIELDSET=cam)",
+ "events": [{"from": 10, "to": 95, "ly": -1.0}, {"from": 30, "to": 36, "buttons": ["cross"]}]}

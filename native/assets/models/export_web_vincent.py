@@ -591,7 +591,7 @@ def export(dump, out, mutate_parents=False, clip_spec=None, sets=DEFAULT_SETS, p
 def cloth(out):
     """OUT/cloth.json: everything native/web/cloth.js reads, from the game files only (no
     dump). Worker 0073's generator (gen_cloth_json.py), moved here as a step. Reads
-    p000_cloth.Cape (07700001.bin cape block 0x19f70), the skeleton's world_bind, the body
+    p000_cloth.Cape (07703201.bin cape block 0x19ed0), the skeleton's world_bind, the body
     decode (for the glb's first cape triangle) and each clip's cloth-window bytes."""
     import p000_cloth as CL
     p = os.path.join(out, 'cloth.json')

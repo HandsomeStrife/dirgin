@@ -4,7 +4,7 @@ hero-frame GS dump.
 
 - Body: every skinned family (ALL by default). Each triangle's texture + CLUT comes
   from the game files (smd_material.py: draw-descriptor material slot; textures read
-  from 07700002.bin). The dump binding below still runs: it supplies the evidence for
+  from 07703202.bin). The dump binding below still runs: it supplies the evidence for
   placement and pose, and every run prints how many of its 'exact' triangles the file
   binding agrees with (100% in hero/185126/185138). --bind-from-dump uses the old
   dump binding for the textures too (and the --dump-camera "bind_ref"):
@@ -13,7 +13,7 @@ hero-frame GS dump.
                  most of that coverage (per-texture UV-coverage map of the dump);
     3. neighbour - nearest dump-bound triangle sharing a vertex (same group);
     4. group   - group majority (last resort; counted, should be ~0).
-- Cape: mesh block 0x19f70 (unskinned, positions posed at runtime). Topology, UVs
+- Cape: mesh block C.CAPE_BLOCK (0x19ed0 of 07703201) (unskinned, positions posed at runtime). Topology, UVs
   and colours from the file; this frame's positions from the dump (p000_cape.py).
   Appended in model space by inverting the renderer's place_character().
 - Vertex colour = vcol/255: the shader already does the PS2 MODULATE doubling
@@ -74,7 +74,7 @@ from render_p000_bound import CONT, TEXC, dump_sig2tex0
 import p000_cape as C
 import anim_rot as AR
 
-CLIP_CONT = _REPO + "/extract/_KEL/noPath/0770000b.bin"   # h_* (handgun) clips
+CLIP_CONT = _REPO + "/extract/_KEL/noPath/0770320b.bin"   # h_* (handgun) clips z128 loads (FUN_005a7390)
 
 # GUESS: Vincent's world position and facing without a dump (--no-dump) (not decoded; see
 # docs/BROWSER.md "Known limitations"). yaw/x/y/z are what solve_placement gives for
@@ -344,7 +344,7 @@ def file_vs_dump_exact(buf, NB, Wm, bc, tris, tri_tex0, how):
 def bind_from_file(buf, NB, Wm, bc, tris, tri_tex0, how):
     """Default (--bind-from-dump turns it off): each triangle's TEX0 (texture + CLUT) from the game files
     (smd_material.py: draw-descriptor material byte -> FUN_00259058's material table
-    over 07700002.bin). Replaces tri_tex0 in place; `how` (the dump evidence) is kept
+    over 07703202.bin). Replaces tri_tex0 in place; `how` (the dump evidence) is kept
     for placement/pose. VRAM addresses are runtime: the table is laid out from this
     capture's body TBP - 4 (p000_glow.BODY_TBP, set by --dump-camera). Keys stay the
     dump's TEX0 ints where the dump drew that material (so the glow/pose lookups by
@@ -373,7 +373,7 @@ def bind_from_file(buf, NB, Wm, bc, tris, tri_tex0, how):
                  vs_dump_binding={f"{h}:{a}": n for (h, a), n in sorted(per_how.items())}, **st)
 
     def cape(cape_tex0):
-        m, _fl = SM.block_material(buf, 0x19f70)          # p000_L02 cape block
+        m, _fl = SM.block_material(buf, C.CAPE_BLOCK)      # p000_L02 cape block
         k = key(m)
         stats['cape'] = dict(material=m, agrees_with_dump=None if cape_tex0 is None else
                              fkey(tex0_fields(cape_tex0)) == fkey(mats[m]['fields']))
@@ -502,7 +502,7 @@ def main():
     import p000_pose as PZ
     vb0 = PZ.vertex_bones(buf, NB, bc, gmeta)
 
-    # ---- cape (block 0x19f70) posed from the dump
+    # ---- cape (block C.CAPE_BLOCK) posed from the dump
     if nodump:      # the file block's topology/UV/colour; positions come from the clip below
         cape = [(None, uvs, cols) for uvs, cols in C.decode_cape_block(buf, NB)]
         cape_tex0 = None; cst = dict(file_tris=len(cape), posed='clip (no dump)')

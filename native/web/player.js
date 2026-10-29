@@ -55,7 +55,7 @@
 // With no actions registered every code path is the game's locomotion.
 // ================================================================
 import * as THREE from 'three';
-import { Jump, stickMode } from './jump_core.js';
+import { Jump, stickMode, enterState } from './jump_core.js';
 
 // ---------------------------------------------------------------- timing
 export const TICK = 1 / 50;                       // one PAL game frame (s): play.js's loop step
@@ -183,6 +183,7 @@ export class PlayerController {
     // player half (P = the player actor)
     this.P = {
       state: 2,                                   // P+0x104: 2 = on foot (FUN_0055b8e0 states)
+      jumpBits: 0,                                // P+0x100 bits 46-47 (jump_core enterState)
       b298: 0, b299: 0,                           // stick byte target / ramped (FUN_00578748)
       dir: { x: 0, y: 0, z: 0 },                  // P+0x2c0: last stick direction (world)
     };
@@ -336,9 +337,9 @@ export class PlayerController {
         // GUESS: an action that drops him (ladder jump-off) hands over in the fall state 9,
         // so the first fall frame is not an on-foot frame (same GUESS state switch as
         // moveTick's 2 <-> 9; see notes/fidelity-audit.md)
-        if (this.P.state >= 2 && this.P.state <= 5) this.P.state = 9;
+        if (this.P.state >= 2 && this.P.state <= 5) enterState(this.P, 9);
       } else if (this.P.state === 9) {
-        this.P.state = 2;                         // back on his feet (same GUESS switch; a ladder exit)
+        enterState(this.P, 2);                        // back on his feet (same GUESS switch; a ladder exit)
       }
     }
     if (res.vy !== undefined) this.vy = res.vy;
@@ -512,8 +513,8 @@ export class PlayerController {
     // GUESS: player state on foot <-> fall. The state-2 class's event handler FUN_00537f38
     // returns state 9 when the ground bit is clear, but which event fires it, and the
     // fall state's landing, aren't decoded. 9 while airborne, 2 again once landed.
-    if (!this.onGround && this.P.state >= 2 && this.P.state <= 5) this.P.state = 9;
-    else if (this.onGround && this.P.state === 9) this.P.state = 2;
+    if (!this.onGround && this.P.state >= 2 && this.P.state <= 5) enterState(this.P, 9);
+    else if (this.onGround && this.P.state === 9) enterState(this.P, 2);
     this.vel = { x: C.dir.x * C.spd, z: C.dir.z * C.spd };
     this.speed = C.groundSpeed / 60;
     this.stuck = this.onGround && C.spd > 0 && prev.x === this.pos.x && prev.z === this.pos.z;
@@ -1201,6 +1202,7 @@ const basisFromForward = f => {
 };
 const easeSin = x => (x < 0 ? 0 : x > 1 ? 1 : Math.sin(x * 1.5707964));   // FUN_00260d44
 const DAT_0046E4CC = 0.8;                         // recoil share of the view pitch (l.1762)
+const NEAR_A220 = 25.0;                           // DAT_0046e4d0: FUN_0032a1d8's near distance (aim_core camJumpFrame)
 
 // Camera collision set: the packets the camera's ray tests. FUN_0054c848 casts through the
 // map object (FUN_0053bb58) with probe index 6 = flags 0x18b, i.e. packets with class bit
@@ -1270,6 +1272,7 @@ export class FollowCamera {
     this.camera = camera; this.rays = rays; this.type = type;
     this.mouseActive = false;                     // DAT_004e17d0
     this.look = [0, 0];                           // mouse counts gathered for the next frame
+    this.hit = false;                             // CAM+0x1e8 0x80: the collision hit last frame
     this.reset({ x: 0, y: 0, z: 0 });
   }
 
@@ -1287,7 +1290,8 @@ export class FollowCamera {
     this.look = [0, 0];
     this.mouseActive = false;                     // page aid: H / warp drop the mouse latch (DAT_004e17d0)
     this.flags14 = 0;                             // DAT_0046e290+0x14 (this frame's camera request bits)
-    const g = this.place(this.base, this.base, { recede: 0, state: 0, L: 0 });
+    // reset: FUN_00329f68 / FUN_003285d0 don't run FUN_0032a1d8 and leave CAM+0x220 as it is
+    const g = this.place(this.base, this.base, { recede: 0, state: 0, L: 0, reset: true });
     this.eye = g.eye; this.at = g.at; this.M = g.M;
     this.prev = { eye: this.eye.slice(), at: this.at.slice(), f: this.M[2].slice() };
   }
@@ -1312,6 +1316,7 @@ export class FollowCamera {
     const view1 = !wc || wc.view === 1;           // uStack_15c = (FUN_0032a0f0() == 1)
     this.prev = { eye: this.eye.slice(), at: this.at.slice(), f: this.M[2].slice() };
     const L = p.stick || 0;
+    if (wc && wc.e1e2 != null) { this.idle = wc.e1e2; wc.e1e2 = null; }   // a type enter's CAM+0x1e2 (aim_core enterType)
     if (!wc || wc.type === 0xc) {
       // FUN_00330478: auto-turn gain from the left stick
       this.gain = clampf(L > 0.5 ? (L - 0.5) * S : this.gain - S * 0.3, 0, 1);
@@ -1431,7 +1436,7 @@ export class FollowCamera {
     if (W) W.cameraFrame(this.pitch);
     if (wc) FollowCamera.shoulderPre(wc);
     // place the eye: offset, collision, switch lerp, distance ease, eye kick
-    const g = this.place(base, old, { recede, state: p.state, L, view1,
+    const g = this.place(base, old, { recede, state: p.state, L, smag, view1,
                                       fast: !!wc && (wc.flags & 0x100000) !== 0,
                                       e: wc ? wc.e : 1,
                                       recoil: wc ? DAT_0046E4CC * wc.k198 * (wc.fov / BASE_FOV) : 0,
@@ -1464,7 +1469,15 @@ export class FollowCamera {
     const pf = this.pitch + Math.atan(kk * Math.tan(T.fov * 0.875 * DEG * 0.5))
                           - Math.atan(kk * Math.tan(BASE_FOV * 0.875 * DEG * 0.5));
     const RX = rotX(pf + (ctx ? ctx.recoil || 0 : 0)), RY = rotY(this.yaw), M = mm(RX, RY);
-    const off = T.offset.slice();
+    let off = T.offset.slice();
+    // l.1774 (FUN_00326500() true; on the page: the weapon translation is loaded): the offset moves
+    // toward the gun-out jump's by CAM+0x220 (FUN_0032a180), then CAM+0x220 steps (FUN_0032a1d8,
+    // fed |left stick| + |look stick| and "near" = CAM+0x1c0 < 25 with CAM+0x1e8 0x80, the last
+    // frame's collision hit). Before the y scale (l.1795)
+    if (ctx && this.weapon) {
+      off = this.weapon.jumpOffset(off);
+      if (!ctx.reset) this.weapon.camJumpFrame((ctx.L || 0) + (ctx.smag || 0), this.dist < NEAR_A220 && this.hit, CSTEP);
+    }
     off[1] *= Math.abs(RX[1][1]) * 0.8 + 0.2;
     const eoff = vm(off, M);
     // l.1812: pivot y + CAM+0x1a4 (0 except the frame after leaving first person, FUN_00331160)
@@ -1494,6 +1507,8 @@ export class FollowCamera {
           best = { d: dh, p: [0, 1, 2].map(j => h.point[j] - o[j] * sc), n: h.normal };
         }
       }
+      // CAM+0x1e8 0x80 at the end of FUN_0032ace0 (l.2488): a hit this frame (iStack_178, l.2029)
+      this.hit = !!best;
       if (best) {
         const f = fw[0] * best.n[0] + fw[1] * best.n[1] + fw[2] * best.n[2];
         const push = Math.sqrt(9.0 * (1 - f * f));

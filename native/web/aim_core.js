@@ -2,6 +2,7 @@
 // so test_aim.mjs can replay the PCSX2 traces frame by frame. aim.js wires it to the page.
 // Research and every offset: notes/aim-research.md. Names: P = player, C = body, CAM =
 // camera, HUD = view object, RET = reticle sprite object, W = weapon stats.
+import { weaponSwitch } from './jump_core.js';
 //
 // Per game frame the game runs (and so does WeaponSystem.frame):
 //   1. camera update FUN_0032ace0: type transition, fade, recoil, reticle offset; the aim
@@ -124,6 +125,15 @@ export function reticleQuads(data, k, variant, t) {
 }
 
 // ---------------------------------------------------------------- the system
+// the gun-out jump's eye offset (FUN_0032a180 / FUN_0032a1d8; RAM values in the save state)
+const JUMP_EYE_OFFSET = [2.8, 4.0, -36.0];        // DAT_0046e320
+const A220_UP = 0.06;                             // DAT_0046e42c
+const A220_DN_MOVE = 0.0075;                      // DAT_0046e430
+const A220_DN_NEAR = 0.03;                        // DAT_0046e434
+const A220_DN_VIEW = 0.1;                         // DAT_0046e438
+// FUN_00260c98: 0 below 0, 1 above 1, else (1 - cos(pi x)) / 2 (FUN_0045b428 = cosf)
+const ease260c98 = x => (x < 0 ? 0 : x > 1 ? 1 : (1.0 - Math.cos(x * 3.1415927)) * 0.5);
+
 export class WeaponSystem {
   // W: weapon.json (export_web_aim.py, FUN_0031c3f8); reticle: reticle.json (kinds, lengths)
   constructor(W, reticle = null, { step = 1.1999999284744263, lockOn = true } = {}) {
@@ -136,13 +146,53 @@ export class WeaponSystem {
     this.P = { st: 0, T: 0, acc: 0, drawn: false, m29c: 2, m2a0: 0, aim: null, facePt: null, state: 2 };
     this.cam = { view: 1, type: 0xc, phase: 1, ramp: 1, fade: 0x80, k198: 0, k19c: 0, kick: 0, flags: 0,
                  pitch: 0, fov: 73.5, e: 1, d1d8: 0, d1dc: 0, c1cc: 0,
-                 a1a0: 5, a1a4: 0 };                           // CAM+0x1a0 shoulder x (type 0xd pivot x), +0x1a4 look-at y
+                 a1a0: 5, a1a4: 0,                             // CAM+0x1a0 shoulder x (type 0xd pivot x), +0x1a4 look-at y
+                 a220: 0,                                      // CAM+0x220: the gun-out jump's eye-offset blend (camJump)
+                 e1e2: null };                                 // CAM+0x1e2 written by a type enter (FollowCamera owns the counter)
     this.eye = null; this.hit = null;                           // CAM+0x90 / +0xa0 this frame (the page sets them)
     this.hud = { mode: 0, offY: 0 };
     this.r = { kind: 0, phase: new Array(8).fill(0), end: new Array(8).fill(0), len: new Array(8).fill(0) };
     this.clock = 0;                                             // DAT_004f58ec (ms; FUN_003e2450)
     this.events = [];                                           // shots this frame (for the page)
     this.fire = null;                                           // stand-fire class FUN_00596460
+  }
+
+  // ---- the gun-out jump's camera (CAM+0x1e8 flag 0x1000000, CAM+0x220). FUN_00326500() is true
+  // in the state, so all of these run.
+  // FUN_0032a0f8(CAM, on, reset): flag 0x1000000 on / off; with reset, CAM+0x220 = 1 / 0.
+  // Callers: FUN_00575768 (the take-off: on, no reset, when P+0x2a8 bit 0 = gun drawn), the enter
+  // slots (vtable +0xc) of player states 2 / 3 (FUN_00537e70 / FUN_005380a0: off, no reset) and
+  // FUN_00576548(P, 0 / 1) in the air (off, no reset / on, reset). The draw (FUN_005766c0, 0x5766dc)
+  // passes its own a0 / a1, so a draw in the air sets the flag and CAM+0x220 = 1 (traced
+  // cam_j_draw_r1 / _r3); on the ground it doesn't and the state 3 enter clears the flag (R1 traced 0).
+  camJump(on, reset = false) {
+    const c = this.cam;
+    if (on) { c.flags |= 0x1000000; if (reset) c.a220 = 1.0; }
+    else { c.flags &= ~0x1000000; if (reset) c.a220 = 0; }
+  }
+  // player state 2 / 3 entered (FUN_00537e70 / FUN_005380a0): FUN_0032a0f8(CAM, 0, 0)
+  enterFoot() { this.camJump(false); }
+  // FUN_0032a180 (FUN_0032ace0 l.1774): the type's eye offset (type object +0x20) moves toward
+  // DAT_0046e320 = (2.8, 4, -36) by FUN_00260c98(CAM+0x220) = (1 - cos(pi x)) / 2; read before
+  // this frame's camJumpFrame
+  jumpOffset(off) {
+    const k = ease260c98(this.cam.a220);
+    return [0, 1, 2].map(j => off[j] + (JUMP_EYE_OFFSET[j] - off[j]) * k);
+  }
+  // FUN_0032a1d8(sticks, CAM, near), right after FUN_0032a180. sticks: |left stick| + |look stick|
+  // (fVar31 + fVar28); near: CAM+0x1c0 (last frame's distance) < DAT_0046e4d0 = 25 and CAM+0x1e8
+  // 0x80 (the camera collision hit last frame). View 2: with the flag CAM+0x220 rises by
+  // DAT_0046e42c = 0.06 x step to 1; without it, it falls by 0.03 x step (near), 0.0075 x step
+  // (either stick moving, sticks > 0.001) or holds. Other views: falls by 0.1 x step. Clamped 0..1.
+  camJumpFrame(sticks, near, step) {
+    const c = this.cam;
+    let v = c.a220;
+    if (c.view === 2) {
+      if (c.flags & 0x1000000) { if (v < 1.0) v += A220_UP * step; }
+      else if (near) { if (v > 0) v -= A220_DN_NEAR * step; }
+      else if (sticks > 0.001) { if (v > 0) v -= A220_DN_MOVE * step; }
+    } else if (v > 0) v -= A220_DN_VIEW * step;
+    c.a220 = v < 0 ? 0 : v > 1 ? 1 : v;
   }
 
   isAiming() { return this.P.m29c === 3; }                    // FUN_00578748: P+0x29c == 3 -> mode 6
@@ -236,6 +286,7 @@ export class WeaponSystem {
   enterType(old) {
     const c = this.cam;
     c.phase = 0; c.ramp = 0;
+    if (c.type === 0xc) c.e1e2 = 0;                           // FUN_00330240 0x330420: sb zero, CAM+0x1e2 (stick-idle counter)
     if (!(c.flags & 0x800)) return;
     const n = this.typeVec(c.type), v = [n[0] - old[0], n[1] - old[1], n[2] - old[2]];
     const e = this.eye, h = this.hit;
@@ -303,19 +354,25 @@ export class WeaponSystem {
 
   // ---- 2. input (FUN_003320c0, the parts the page has: no L1/materia, melee, reload).
   // inp: { r1Pressed, r1Held, r3Pressed, circlePressed }, onGround, far: CAM+0xb0 (FUN_003296e0(CAM, ., 0))
-  input(inp, onGround, far = null) {
+  // player: the PlayerController (jump_core weaponSwitch: the player side of FUN_005766c0 and the
+  // P+0x2a8 bits; null in the weapon-only tests)
+  input(inp, onGround, far = null, player = null) {
     this.far = far;
     const P = this.P, W = this.W;
     this.events.length = 0;
     if (!P.drawn) {
       if (inp.r3Pressed) {                                    // R3: draw + first person
-        this.setFirstPerson(); this.draw(); return;
+        this.setFirstPerson(); this.draw(onGround, player); return;
       }
-      if (inp.r1Pressed && onGround) {                        // R1: draw + weapon camera
-        this.setView(2); this.draw(); return;
+      // R1: draw + weapon camera. FUN_003320c0 l.288 (LAB_00332810): on the ground (C+0x1c0 bit
+      // 0x200) or with P+0x2a8 bit 3 clear (set by a draw in the air, cleared at a take-off from the
+      // ground: jump_core startJump). The l.288 state test (bVar1 / bVar3) is true in the on-foot
+      // and air states; the page runs this only there (not during actions).
+      if (inp.r1Pressed && (onGround || !(((player && player.P.flags2a8) ?? 0) & 8))) {
+        this.setView(2); this.draw(onGround, player); return;
       }
     } else {
-      if (inp.circlePressed) { this.holster(); return; }
+      if (inp.circlePressed) { this.holster(onGround, player); return; }
       if (inp.r3Pressed && !(P.st >= 10 && P.st <= 11)) {     // FUN_005773c8
         if (this.cam.view === 2) this.setFirstPerson(); else this.setView(2);
       }
@@ -334,20 +391,42 @@ export class WeaponSystem {
     }
   }
 
-  // FUN_005766c0(P, 1, 1) / (P, 0, 1) -> FUN_00576548(P, on): weapon state 0xc / 0xe and
-  // T = max(T, DAT_0046ee84 = 6) (DAT_0046ee80 = 15 when FUN_00326500() is false; true in the
-  // save), holster: FUN_0032a420(CAM, 1). Also P+0x2a8 bit 0, player state 3 / 2, P+0x29c 3 / 2
-  // (traced). The ladder mount calls the holster too (FUN_00576c88 / FUN_00576de8).
-  draw() { const P = this.P; P.drawn = true; P.st = 0xc; P.T = Math.max(P.T, 6); P.m29c = 3; P.state = 3; P.facePt = this.far; }
+  // FUN_005766c0(P, 1, 1) / (P, 0, 1) -> FUN_00576548(P, on) (same a0 / a1): weapon state 0xc / 0xe
+  // and T = max(T, DAT_0046ee84 = 6) (DAT_0046ee80 = 15 when FUN_00326500() is false; true in the
+  // save), holster: FUN_0032a420(CAM, 1). Also P+0x2a8 bit 0, P+0x29c 3 / 2 (traced). Then the
+  // player state: on the ground 3 / 2 (whose enter clears the flag: enterFoot), in the air 9
+  // (FUN_00538b50 doesn't touch the camera; jump_core weaponSwitch). The ladder mount calls the
+  // holster too (FUN_00576c88 / FUN_00576de8).
+  draw(onGround = true, player = null) {
+    const P = this.P; P.drawn = true; P.st = 0xc; P.T = Math.max(P.T, 6); P.m29c = 3; P.facePt = this.far;
+    if (player) player.P.flags2a8 = (player.P.flags2a8 ?? 0) | 1;   // FUN_00576548: FUN_00574808(P, 0, 1)
+    if (!onGround) this.camJump(true, true);                  // FUN_00576548(P, 1): FUN_0032a0f8(CAM, 1, 1)
+    const st = player ? weaponSwitch(player, true) : (onGround ? 3 : 9);
+    P.state = st;
+    if (st === 3) this.enterFoot();                           // state 3 enter FUN_005380a0 (not in the wind-up: 9)
+  }
   // FUN_00576548(P, 0) itself: P+0x2a8 bit 0 clear (FUN_00574808(P, 0, 0)), state 0xe, T, CAM view
   // 1. It has no drawn-gun test, nor do its callers: the ladder mount sets 0xe with the gun away too.
-  holsterCore() { const P = this.P; P.drawn = false; P.st = 0xe; P.T = Math.max(P.T, 6); this.setView(1); }
-  // circle (FUN_005766c0(P, 0, 1)): player state 2 (FUN_0055b8e0(P, 2)), P+0x29c 2 (traced)
-  holster() { this.holsterCore(); this.P.m29c = 2; this.P.state = 2; }
+  // In the air (C+0x1c0 bit 0x200 clear) it also calls FUN_0032a0f8(CAM, 0, 0).
+  holsterCore(onGround = true, player = null) {
+    const P = this.P; P.drawn = false; P.st = 0xe; P.T = Math.max(P.T, 6); this.setView(1);
+    if (player) player.P.flags2a8 = (player.P.flags2a8 ?? 0) & ~1;  // FUN_00574808(P, 0, 0)
+    if (!onGround) this.camJump(false);
+  }
+  // circle (FUN_005766c0(P, 0, 1)): P+0x29c 2 (traced); player state 2 on the ground
+  // (FUN_0055b8e0(P, 2): its enter clears the flag), 9 in the air (jump_core weaponSwitch)
+  holster(onGround = true, player = null) {
+    this.holsterCore(onGround, player); this.P.m29c = 2;
+    const st = player ? weaponSwitch(player, false) : (onGround ? 2 : 9);
+    if (st != null) this.P.state = st;
+    if (st === 2) this.enterFoot();                           // state 2 enter FUN_00537e70
+  }
   // the ladder mount (FUN_00576c88 / FUN_00576de8): FUN_005747f8(P, 4) (P+0x29c = 4), the player
   // state 0xb / 0xc (FUN_0055b8e0; player.js's ladder owns it), FUN_00576548(P, 0), then
   // FUN_00574928(P, 0) (P+0x298 / 0x299 = 0, not on the page)
-  ladderMount() { this.P.m29c = 4; this.holsterCore(); }
+  // onGround: C+0x1c0 bit 0x200 at the mount (FUN_00576548 reads it: a ladder caught in the air
+  // clears the flag)
+  ladderMount(onGround = true, player = null) { this.P.m29c = 4; this.holsterCore(onGround, player); }
 
   // ---- 4. FUN_00579570 (aimHit: CAM+0xa0 from this frame's camera)
   stateMachine(aimHit) {

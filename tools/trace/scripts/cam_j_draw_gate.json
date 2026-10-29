@@ -1,0 +1,2 @@
+{"name": "cam_j_draw_gate", "frames": 140, "doc": "worker 0108: standing jump (cross 20-24), R1 draw in the air 28-30, circle 34-36, R1 again 42-44 (P+0x2a8 bit 3 gate, FUN_003320c0 l.288), R1 after landing 110-112 (TRACE_FIELDSET=cam)",
+ "events": [{"from": 20, "to": 24, "buttons": ["cross"]}, {"from": 28, "to": 30, "buttons": ["r1"]}, {"from": 34, "to": 36, "buttons": ["circle"]}, {"from": 42, "to": 44, "buttons": ["r1"]}, {"from": 110, "to": 112, "buttons": ["r1"]}]}
