@@ -1,0 +1,2 @@
+{"name": "w105_jump_pose", "frames": 82, "log_from": 20, "doc": "worker 0105, TRACE_FIELDSET=pose: j_stand's input (cross held 10-16: h_jp0..h_jp4, h_st); logs frames 20-81 (h_jp1..h_jp4) with the bone matrices",
+ "events": [{"from": 10, "to": 16, "buttons": ["cross"]}]}

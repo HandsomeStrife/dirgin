@@ -36,7 +36,11 @@ LOGS=$OUT/logs
 DATA=$REPO/native/web/data
 
 # Clip packs play.html loads (native/web/ACTIONS.md). Order matters only for byte-identity.
-PACK_JUMP=h_jp0,h_jp1,h_jp2,h_jp3,h_jp4,h_div
+# Every clip comes from the container z128 loads (07703200 common, 0770320b handgun; FUN_005a7390,
+# export_web_vincent.py CLIP_SETS). jump: the plain set, the aimed set h_jp*_a (FUN_00598f50
+# phases 4-7, the landing FUN_00599aa0, the air shot FUN_00596830) and the second / back jumps
+# (c_wjp*, c_bj*, c_bwj*). The _au/_ad partners aren't played.
+PACK_JUMP=h_jp0,h_jp1,h_jp2,h_jp3,h_jp4,h_div,h_jp0_a,h_jp1_a,h_jp2_a,h_jp3_a,h_jp4_a,c_wjp0,c_wjp1,c_wjp2,c_bj0,c_bj1,c_bj2,c_bwj0,c_bwj1,c_bwj2
 PACK_LADDER=c_ld_d,c_ld_u,c_ld_jp,c_ld_fa0,c_ld_lid,c_ld_rid,c_ld_del,c_ld_uel,c_ld_dml,c_ld_uml,c_ld_der,c_ld_uer,c_ld_dmr,c_ld_umr,h_ld_del,h_ld_uel,h_ld_der,h_ld_uer
 PACK_SHOOT=h_wk_a,h_rn_a,h_sq_a,h_st_a,h_sq_f,h_st_f,h_wk_ad,h_rn_ad,h_sq_ad,h_st_ad,h_sq_fd,h_st_fd,h_wk_rd,h_rn_rd,h_sq_rd,h_st_rd,h_swtch,h_wk_au,h_rn_au,h_sq_au,h_st_au,h_sq_fu,h_st_fu,h_fwk_rd,h_sqm_rd,h_frn_rd,h_brn_a,h_brn_au,h_brn_ad,h_lrn_a,h_lrn_au,h_lrn_ad,h_rrn_a,h_rrn_au,h_rrn_ad
 # GUESS: the static Vincent in index.html is clip h_st frame 91, the clip frame nearest the hero

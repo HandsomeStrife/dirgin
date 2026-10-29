@@ -16,9 +16,10 @@ gitignored directory (default native/web/data/vincent/, checked with git check-i
            The cape cloth data for native/web/cloth.js, from the game files only (no dump).
            Also run at the end of every export without --pack.
 
-  --clips: default h_st,h_wk,h_rn (byte-identical to the original 3-clip export). 'all' =
-  every clip of the clip sets in --sets (default c,h = 07700000 common + 0770000b handgun;
-  m = 0770000c, r = 0770000d, ev = 0770000f + 07700011). Names are unique across sets.
+  --clips: default h_st,h_wk,h_rn (from CLIP_CONT). 'all' =
+  every clip of the clip sets in --sets (default c,h = 07703200 common + 0770320b handgun;
+  m = 0770320c, r = 0770320d, ev = 0770320f + 07703211). Names are unique across sets; a name
+  resolves to the first set holding it, in the game's search order (FUN_005a7390).
   With --clips the JSON clip entries also carry loop / in_place_axes / container / root_total.
   --pack NAME: write only vincent_NAME.glb (joint nodes + the clips, no mesh) and
   vincent_NAME.json; vincent.glb/json are left alone. Load it next to vincent.glb.
@@ -67,11 +68,21 @@ from render_p000_bound import CONT, TEXC
 
 REPO = os.path.abspath(os.path.join(HERE, "../../.."))
 DEFAULT_OUT = os.path.join(REPO, "native/web/data/vincent")
-CLIP_CONT = _REPO + "/extract/_KEL/noPath/0770000b.bin"   # h_* (handgun) clips
+CLIP_CONT = _REPO + "/extract/_KEL/noPath/0770320b.bin"   # h_* (handgun) clips (see CLIP_SETS)
 CLIPS = ["h_st", "h_wk", "h_rn"]
 NOPATH = _REPO + "/extract/_KEL/noPath/"
-CLIP_SETS = {'c': ['07700000'], 'h': ['0770000b'], 'm': ['0770000c'], 'r': ['0770000d'],
-             'ev': ['0770000f', '07700011']}            # p000's motion containers (0a = copy of 00)
+# Vincent's motion containers as z128 loads them. FUN_005a7390 (called by FUN_003449a0 /
+# FUN_005a91c8 for every clip request) looks the clip NAME up ('mod' blocks, FUN_00258e40) in the
+# resources of MP+0x3bc[0..7] (+0x14 handle), then MP+0x3c8[0..1], and takes the first hit. In the
+# sea-of-flames save state those handles are 0x17-0x1a = the images of 07703200 (= 0770320a,
+# byte-identical), 0770320b, 0770320c, 0770320d, in that order; the rest are -1. No 077000xx
+# motion file is loaded (their differing clips, e.g. h_wk / h_jp3 / h_div / h_st_a, are not in
+# RAM; the 077032xx versions are, byte for byte). The 077032xx skeleton (07703201) equals
+# 07700001's (parents, local TRS, world bind). Names are unique across the four, so the order
+# only matters in principle; resolve_clips keeps it. 'ev' (0770320f, 07703211) is NOT loaded in
+# z128: catalogue only (the 077032xx counterparts of the old 0770000f / 07700011).
+CLIP_SETS = {'c': ['07703200'], 'h': ['0770320b'], 'm': ['0770320c'], 'r': ['0770320d'],
+             'ev': ['0770320f', '07703211']}
 DEFAULT_SETS = ['c', 'h']
 GUN_CLIP_CONT = NOPATH + "07770580.bin"               # Cerberus reload clips (4-bone gun rig)
 GUN_CONT = NOPATH + "07770581.bin"
@@ -179,8 +190,8 @@ def resolve_clips(spec, sets):
     """--clips value -> [(name, container path)]."""
     if spec is None: return [(c, CLIP_CONT) for c in CLIPS]
     allc = {}
-    for st in list(CLIP_SETS):
-        for cid in CLIP_SETS[st]:
+    for st, cids in CLIP_SETS.items():          # FUN_005a7390 order: first container wins
+        for cid in cids:
             for n, _f in list_clips(NOPATH + cid + '.bin'): allc.setdefault(n, (NOPATH + cid + '.bin', st))
     if spec == 'all':
         return [(n, c) for n, (c, st) in allc.items() if st in sets]
@@ -690,7 +701,7 @@ def verify(dump, out, glb, clip, frames):
         else:
             sys.exit(f"{clip}: not in vincent.json or any vincent_*.json pack")
         print(f"{clip}: pack clip, tracks from {os.path.basename(anim)}")
-    ci = side['clips'][clip]; cont = NOPATH + ci['container'] if 'container' in ci else None
+    ci = side['clips'][clip]; cont = NOPATH + ci['container'] if 'container' in ci else CLIP_CONT   # base clips: CLIP_CONT
     res = {}
     for f in frames:
         run_ref(dump, chk, clip, f, cont)
@@ -835,8 +846,9 @@ def catalogue(out):
              'loops = measured (fully in place: pose jump last->first <= max(2 x frame step, 0.5)). '
              'purpose = a GUESS from the name, conf high/mid/low (see the code). 60 fps ASSUMED.',
         sets={k: v for k, v in CLIP_SETS.items()},
-        skipped={'0770000a': 'byte-identical copy of 07700000',
-                 '07701900/07703200 sets': 'other p000 builds (own rig + motion sets), not catalogued'},
+        skipped={'0770320a': 'byte-identical copy of 07703200',
+                 '077000xx/07701900 sets': 'other p000 motion builds, not loaded in z128 (FUN_005a7390 '
+                                           'resources in the save state are 07703200/0b/0c/0d)'},
         clips=cat, gun_clips=gun,
         gun_note='07770580 = 6 reload clips on the gun\'s own 4-bone skeleton (07770581), same names and '
                  'lengths as Vincent\'s h_*_rd (h_st_rd: 41 vs 40). No other gun motions exist.')

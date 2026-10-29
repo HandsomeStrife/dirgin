@@ -33,6 +33,9 @@ export const JUMP = {
   landMoveAfter: 2.0,        // ... or after 2 ticks once C+0x1d8 > 0 (he is moving)
   backAngle: 90.0,           // FUN_0036b008: |angle(face, move)| <= 90 deg = normal jump
   clipRate: 0.5,             // MP+0x40c for the h_jp clips (trace), x weight 128/128
+  blend591: 10,              // C+0x591 = C+0x6c0 = 10 (save state): the blend frames FUN_00340bb8(C, 1, -1) restores
+  airFireBlend: 1,           // FUN_00596830: FUN_00340bb8(C, 1, 1) before the h_jp3_a set (aim_g f49: layer 2 = 1 + 1)
+  airFireMax: 30.0,          // FUN_00596830 phase 2: the h_jp_f set ends after 30 ticks
 };
 
 // clip slots (C+0x7fc table, names read from the save state)
@@ -41,12 +44,17 @@ export const SLOT = {
   0xd5: 'c_wjp0', 0xd6: 'c_wjp1', 0xd7: 'c_wjp2', 0xd8: 'h_jp3', 0xd9: 'h_jp4',
   0xda: 'c_bj0', 0xdb: 'c_bj1', 0xdc: 'c_bj2', 0xdd: 'c_bj0', 0xde: 'c_bj1', 0xdf: 'c_bj2',
   0xe0: 'c_bwj0', 0xe1: 'c_bwj1', 0xe2: 'c_bwj2',
-  0xbc: 'h_jp0_a', 0xbd: 'h_jp1_a', 0xbe: 'h_jp2_a', 0xbf: 'h_jp3_a', 0xc0: 'h_jp4_a',
+  0xbc: 'h_jp0_a', 0xbd: 'h_jp1_a', 0xbe: 'h_jp2_a', 0xbf: 'h_jp3_a', 0xc0: 'h_jp4_a', 0xc1: 'h_jp_f',
 };
-// clip lengths (frames) of the h_jp clips in 0770000b (data/vincent/vincent_jump.json)
+// slots that are empty in z128's slot table (C+0x7fc in the save state): FUN_003455e8 says no.
+// 0xc1 (h_jp_f, the air-shot clip) is empty, so FUN_00596830 plays the h_jp3_a set (aim_g f49).
+export const UNLOADED = new Set([0xc1]);
+// clip lengths (frames): h_jp* / h_jp*_a in 0770320b, c_wjp* / c_bj* / c_bwj* in 07703200, the
+// containers z128 searches (FUN_005a7390; export_web_vincent.py CLIP_SETS; the `jump` pack,
+// data/vincent/vincent_jump.json; the c_ lengths equal the traces' hold frame n - 1)
 export const CLIP_FRAMES = { h_jp0: 3, h_jp1: 10, h_jp2: 10, h_jp3: 16, h_jp4: 15,
-  // the c_ clips are not in data/vincent: lengths from the traces' hold frame (n - 1)
-  c_wjp0: 3, c_wjp1: 10, c_wjp2: 9, c_bj0: 2, c_bj1: 11, c_bj2: 10 };
+  h_jp0_a: 3, h_jp1_a: 10, h_jp2_a: 10, h_jp3_a: 16, h_jp4_a: 15,
+  c_wjp0: 3, c_wjp1: 10, c_wjp2: 9, c_bj0: 2, c_bj1: 11, c_bj2: 10, c_bwj0: 2, c_bwj1: 11, c_bwj2: 10 };
 
 // player states (P+0x104) this file deals with
 export const ST = { FOOT: 2, JUMP: 8, FALL: 9, JUMP2: 0x1f, BACK: 0x20, BACK2: 0x21 };
@@ -157,6 +165,23 @@ export function startJump(ctrl, motionId, { kind = 0, altHeight = false, backLoa
 const req = (slot, { now = false, loop = false, blend = 0 } = {}) =>
   ({ slot, clip: SLOT[slot], now, loop, blend });
 
+// FUN_00345818(C, level, up, down, flags, param_6, 0): an aimed whole-body set. The level clip
+// plays with the up or down partner by the aim zone (C+0x590 bits 25-26); the blend is C+0x591
+// when the head layer is still blending in (FUN_00346150 = FUN_005a9768(MP): the head layer's
+// +0x24 blend length > 0; aim_g f45 / f48 yes -> 11 / 2, f82 no -> 0) or when param_6 is set
+// and the zone is unchanged, else 0 (FUN_00340bb8(C, 0, -1)). Flags 2 = now, 1 = loop; with
+// 0x80, a request for the level clip and partner already on the head is dropped (FUN_00344608:
+// C+0x570 / C+0x578), so the fall class's re-issue of h_jp3_a doesn't restart it (aim_g f50).
+// GUESS: the zone never changes: the page has no aim zones (it plays the level clip, no
+// partner; see notes/fidelity-audit.md "Jump"), so "zone unchanged" holds and the partner
+// matches whenever the level clip does.
+function aimedReq(slot, flags, param6, io, b591 = JUMP.blend591) {
+  const clip = SLOT[slot];
+  if ((flags & 0x80) && io.headClip === clip) return [];
+  const blend = (io.headBlending || param6) ? b591 : 0;
+  return [{ ...req(slot, { now: !!(flags & 2), loop: !!(flags & 1), blend }), aimed: true }];
+}
+
 // FUN_00598f50: the jump motion state (class 0x20). One update per game frame, before the
 // character's move (FUN_0034ea18). `io` = { ground, clipEnded, armed, aimChanged }:
 //   ground: C+0x1c0 bit 0x200; clipEnded: FUN_003460d8 (head clip no longer playing);
@@ -177,7 +202,7 @@ export class JumpMotion {
         this.freeze = true;
         const armed = !this.second && io.armed;
         if (this.second) out.push(req(0xd5, { now: true }));
-        else if (armed) out.push({ ...req(0xbc, { now: true }), set: [0xbc, 0xc2, 0xc8] });   // FUN_00345818
+        else if (armed) out.push(...aimedReq(0xbc, 0x82, 1, io));   // FUN_00345818(C, 0xbc, 0xc2, 0xc8, 0x82, 1, 0)
         else out.push(req(0x16, { now: true }));
         // FUN_003412d0(C, 0x50, 1): sound 0x50 (not ported)
         this.phase = this.second ? 8 : armed ? 4 : 1;
@@ -201,28 +226,30 @@ export class JumpMotion {
         if (this.t > J.phase2Mark && this.phase === 2) this.phase = 3;   // FUN_005ae618(MP, 2)
         if (io.ground) this.done = true;                 // FUN_005ae618(MP, 3); +8 |= 1
         break;
-      case 4:
+      case 4:                                             // armed wind-up (h_jp0_a)
         if (io.clipEnded || this.t >= J.freezeMax) {
           this.freeze = false;
-          out.push({ ...req(0xbd), set: [0xbd, 0xc3, 0xc9] });
-          this.phase = 5; this.t = 0; return this.tick(out, true);
+          out.push(...aimedReq(0xbd, 2, 0, io));          // FUN_00345818(C, 0xbd, 0xc3, 0xc9, 2, 0, 0)
+          this.phase = 5; this.t = 0; return this.tick(out);
         }
         break;
       case 5:
       case 6: {
-        const nextSet = this.phase === 5 ? [0xbe, 0xc4, 0xca] : [0xbf, 0xc5, 0xcb];
-        const curSet = this.phase === 5 ? [0xbd, 0xc3, 0xc9] : [0xbe, 0xc4, 0xca];
+        // the next part after its clip or 20 ticks (phase 6 -> h_jp3_a, flags 0x83: loop);
+        // on the ground -> 7; an aim-zone change re-issues the current set (flags 2: restarts)
+        const cur = this.phase === 5 ? 0xbd : 0xbe;
         if (!io.clipEnded && this.t < J.aimPhaseMax) {
           if (io.ground) { this.phase = 7; break; }
-          if (io.aimChanged) out.push({ ...req(curSet[0]), set: curSet });
+          if (io.aimChanged) out.push(...aimedReq(cur, 2, 0, io));
           break;
         }
-        out.push({ ...req(nextSet[0]), set: nextSet });
-        this.phase = this.phase === 5 ? 6 : 7; this.t = 0; return this.tick(out, true);
+        if (this.phase === 5) out.push(...aimedReq(0xbe, 2, 0, io));     // h_jp2_a
+        else out.push(...aimedReq(0xbf, 0x83, 0, io));                     // h_jp3_a, looped
+        this.phase = this.phase === 5 ? 6 : 7; this.t = 0; return this.tick(out);
       }
       case 7:
-        if (!io.ground) { if (io.aimChanged) out.push({ ...req(0xbf), set: [0xbf, 0xc5, 0xcb] }); }
-        else this.done = true;
+        if (!io.ground) { if (io.aimChanged) out.push(...aimedReq(0xbf, 0x83, 0, io)); }
+        else this.done = true;                            // FUN_005ae618(MP, 3); +8 |= 1
         break;
     }
     return this.tick(out);
@@ -232,12 +259,14 @@ export class JumpMotion {
 
 // FUN_005a1510: the back-jump motion state (player states 0x20 / 0x21; its id 0x59 is the one
 // FUN_00575698 and FUN_00538a30 name). Same shape as JumpMotion with the c_bj clips; h_jp3
-// is queued with blend 4. io as JumpMotion, plus io.usable(slot) (FUN_003455e8; default: yes).
+// is queued with blend 4. Armed (phases 4-7): c_bj0-2 played now (FUN_003456c0, flags 2), then
+// the h_jp3_a set through FUN_00345818 (flags 0x83, the aimedReq blend rule), as FUN_00598f50.
+// io as JumpMotion, plus io.usable(slot) (FUN_003455e8; default: yes).
 export class BackJumpMotion extends JumpMotion {
   constructor(second = false) { super(second); this.id = 0x59; }
   update(io) {
     const J = JUMP, out = [];
-    const usable = io.usable ?? (() => true);
+    const usable = io.usable ?? (slot => !UNLOADED.has(slot));
     switch (this.phase) {
       case 0: {
         this.freeze = true;
@@ -278,10 +307,11 @@ export class BackJumpMotion extends JumpMotion {
           break;
         }
         if (this.phase === 5) out.push(req(0xdf, { now: true }));
-        else out.push({ ...req(0xbf), set: [0xbf, 0xc5, 0xcb] });
+        else out.push(...aimedReq(0xbf, 0x83, 0, io));   // FUN_00345818(C, 0xbf, 0xc5, 0xcb, 0x83, 0, 0): now, loop
         this.phase = this.phase === 5 ? 6 : 7; this.t = 0; return this.tick(out);
       case 7:
-        if (!io.ground) { if (io.aimChanged) out.push({ ...req(0xbf), set: [0xbf, 0xc5, 0xcb] }); }
+        // the zone-change re-issue, as phase 6 (FUN_00345818(C, 0xbf, 0xc5, 0xcb, 0x83, 0, 0))
+        if (!io.ground) { if (io.aimChanged) out.push(...aimedReq(0xbf, 0x83, 0, io)); }
         else this.done = true;
         break;
     }
@@ -332,7 +362,7 @@ export class LandMotion {
   update(io) {
     const out = [];
     if (this.phase === 0) {
-      if (io.armed) out.push({ ...req(0xc0, { now: true }), set: [0xc0, 0xc6, 0xcc] });
+      if (io.armed) out.push(...aimedReq(0xc0, 0x82, 0, io));   // FUN_00345818(C, 0xc0, 0xc6, 0xcc, 0x82, 0, 0)
       else out.push(req(0x1a, { now: true }));
       // FUN_00341410(C, 3), FUN_003412d0(C, 0x51, 0): landing sound (not ported)
       this.t = 0; this.phase = 1;
@@ -343,6 +373,64 @@ export class LandMotion {
         this.done = true; this.next = io.armed ? 9 : 8;
       }
       if (this.done) return out;                          // returns before t += step
+    }
+    this.t = f32(this.t + JUMP.STEP);
+    return out;
+  }
+}
+
+// FUN_00596830: the air-shot motion state (class 0x4e, vtable 0x5a6380; FUN_00592918 builds it
+// for id 0x4e). A shot in the air enters it (FUN_00577480 -> FUN_00560b58, Jump.airShot). With
+// slot 0xc1 (h_jp_f) empty, as in z128, phase 0 sets the blend to 1, plays the h_jp3_a set
+// (flags 0x83: now, loop; dropped if h_jp3_a already plays), and is done with next motion 0x22.
+// Traced aim_g: R1 f48 -> h_jp3_a 0.6 with blend 2 in the record of f49 (h_jp2_a never plays).
+// The h_jp_f branch (phases 1-2: FUN_00345818(C, 0xc1, 199, 0xcd, 0x82, 0, 0), 30 ticks) can't
+// run in z128 and is not ported.
+export class AirFireMotion {
+  constructor() { this.id = 0x4e; this.phase = 0; this.t = 0; this.done = false; this.next = null; this.freeze = false; }
+  update(io) {
+    const out = [];
+    const usable = io.usable ?? (slot => !UNLOADED.has(slot));
+    if (this.phase === 0) {
+      // FUN_00345530(C, 1); C+0x664 == 2 -> FUN_00340de0(C, 1) (C+0x664 = 0 in z128)
+      // the h_jp_f branch is not ported (slot 0xc1 is empty in z128): if a slot table ever has it,
+      // leave the feature out (the h_jp3_a set below) instead of breaking the frame loop
+      if (usable(0xc1) && !AirFireMotion.warned) {
+        AirFireMotion.warned = true;
+        console.warn('FUN_00596830: slot 0xc1 (h_jp_f) is loaded but its branch is not ported: playing the h_jp3_a set');
+      }
+      out.push(...aimedReq(0xbf, 0x83, 0, io, JUMP.airFireBlend));   // after FUN_00340bb8(C, 1, 1)
+      this.done = true; this.next = 0x22; this.phase = 2;             // returns 0x22 (before t += step)
+      return out;
+    }
+    this.t = f32(this.t + JUMP.STEP);
+    return out;
+  }
+}
+
+// FUN_00599820: the fall motion state (class 0x22, vtable 0x5a5a70; built by FUN_00599780).
+// Phase 0 picks the blend by the previous motion id (FUN_00341780 stores it at +0): 0x16, 6-0xa,
+// 0x30, 3, 0x12, 0x1c-0x1d -> FUN_00340bb8(C, 1, -1) and param_6 1; 0x1000-0x107f -> blend 6,
+// param_6 1; any other (0x4e, the air shot) -> FUN_00340bb8(C, 0, -1) and param_6 0. Then
+// FUN_005ae618(MP, 2) (not ported; the trace shows it at aim_g f49), and armed: the h_jp3_a set
+// (flags 0x83, dropped when h_jp3_a already plays: aim_g f50 no restart), else h_jp3 (flags 3:
+// now, loop). Phase 2: done on the ground (FUN_005ae618(MP, 3); +8 |= 1).
+export class FallMotion {
+  constructor(prev = 3) { this.id = 0x22; this.prev = prev; this.phase = 0; this.t = 0; this.done = false; this.freeze = false; }
+  update(io) {
+    const out = [];
+    if (this.phase === 0) {
+      const p = this.prev;
+      let param6 = 1, b591 = JUMP.blend591, cut = false;
+      if (p >= 0x1000 && p < 0x1080) b591 = 6;
+      else if (!(p === 0x16 || (p >= 6 && p <= 0xa) || p === 0x30 || p === 3 || p === 0x12 || p === 0x1c || p === 0x1d)) {
+        param6 = 0; cut = true;                           // FUN_00340bb8(C, 0, -1): C+0x591 unchanged
+      }
+      if (io.armed) out.push(...aimedReq(0xbf, 0x83, param6, io, b591));
+      else out.push(req(0x19, { now: true, loop: true, blend: cut ? 0 : b591 }));
+      this.phase = 2;
+    } else if (this.phase === 2) {
+      if (io.ground) this.done = true;
     }
     this.t = f32(this.t + JUMP.STEP);
     return out;
@@ -361,25 +449,30 @@ export class ClipClock {
   constructor(clip = null, frame = 0, frames = CLIP_FRAMES) {
     this.frames = frames; this.clip = clip; this.frame = frame; this.loop = false; this.queue = [];
     this.serial = 0; this.blend = 0;                    // each clip switch: serial + 1, the request's blend frames
+    this.blendLen = 0;                                  // the head layer's +0x24 blend length (aim_g: 11 -> 9.8 -> ... -> 0)
   }
   apply(reqs) {
     for (const r of reqs) {
-      if (r.now) { this.clip = r.clip; this.frame = 0; this.loop = r.loop; this.queue = []; this.serial++; this.blend = r.blend; }
+      if (r.now) { this.clip = r.clip; this.frame = 0; this.loop = r.loop; this.queue = []; this.serial++; this.take(r.blend); }
       else this.queue.push(r);
     }
   }
+  take(blend) { this.blend = blend; this.blendLen = blend > 0 ? blend + 1 : 0; }
+  // FUN_00346150 -> FUN_005a9768(MP): the head layer is still blending in (+0x24 > 0)
+  blending() { return this.blendLen > 0; }
   ended() {
     const n = this.frames[this.clip];
     return !this.loop && n !== undefined && this.frame >= n - 1;
   }
   advance(step = JUMP.STEP) {
+    if (this.blendLen > 0) { this.blendLen = f32(this.blendLen - step); if (this.blendLen <= 0) this.blendLen = 0; }   // FUN_005aa5b8
     const n = this.frames[this.clip];
     if (n === undefined) return;
     const f = f32(this.frame + f32(f32(JUMP.clipRate * step)));
     if (this.loop) { this.frame = f >= n ? 0 : f; return; }
     if (f > n - 1 && this.queue.length) {               // passes the last frame: the queued clip
       const r = this.queue.shift(); this.clip = r.clip; this.frame = 0; this.loop = r.loop;
-      this.serial++; this.blend = r.blend; return;
+      this.serial++; this.take(r.blend); return;
     }
     this.frame = Math.min(f, n - 1);
   }
@@ -427,10 +520,19 @@ export class Jump {
     this.head = !!this.motion;
     if (this.motion) {
       const io = { ground: ctrl.onGround, clipEnded: this.clock ? this.clock.ended() : true,
-                   armed: !!opts.armed, aimChanged: !!opts.aimChanged, groundSpeed: ctrl.C.groundSpeed };
+                   armed: !!opts.armed, aimChanged: !!opts.aimChanged, groundSpeed: ctrl.C.groundSpeed,
+                   headClip: this.clock ? this.clock.clip : null, headBlending: this.clock ? this.clock.blending() : false };
+      if (opts.usable) io.usable = opts.usable;
       const out = this.motion.update(io);
       reqs.push(...out);
-      if (this.motion instanceof JumpMotion && this.motion.done) {
+      if (this.motion instanceof AirFireMotion && this.motion.done) {
+        // the class returns 0x22 with its done flag: the fall class runs from the next frame (aim_g:
+        // FUN_00599820's FUN_005ae618(MP, 2) shows at f49). FUN_00538aa0 (state 8) answers the done
+        // event with 0 (no state change) while airborne.
+        // GUESS: the dispatcher that reads the return value isn't decoded (the trace agrees); in
+        // state 9 the same (its handler 0x538bd8 isn't read; see notes/jump-research.md)
+        this.motion = new FallMotion(0x4e);
+      } else if ((this.motion instanceof JumpMotion || this.motion instanceof FallMotion) && this.motion.done) {
         // done -> event -> FUN_00538aa0: state 2 (3 with P+0x100 bit 44); FUN_00538a30: motion 0x21
         // GUESS: that the done flag is what raises the event, on this frame (not decoded; the
         // traces agree to the frame; see notes/jump-research.md)
@@ -444,6 +546,23 @@ export class Jump {
     }
     if (reqs.length) { if (!this.clock) this.clock = new ClipClock(); this.clock.apply(reqs); }
     return reqs;
+  }
+
+  // FUN_00577480 (a shot fired, in FUN_00579570) -> FUN_00560b58(P, 1), its airborne branch: in
+  // states 8, 9, 0xf, 0x10, 0x1f-0x21 (FUN_0055aa88) the motion becomes 0x4e (FUN_00341780: the
+  // old class's exit, e.g. FUN_00598ee8, clears the wind-up freeze; C+0x79c &= ~0xc0, so the
+  // second jump's bit 0x20 stays); from the back jump (0x20 / 0x21, FUN_0055aaa8) the state
+  // becomes 9 first. Call it after the weapon step, before motionUpdate (the game's order:
+  // FUN_005786e8 runs FUN_00579570 before the character's motion update), so the new class's
+  // phase 0 runs this frame (aim_g f48). Not ported: the P+0x100 bits 40-41 = 1 branch (motion
+  // 0x11; the bits are 0 in the save state) and the ground branch (aim.js's stand-fire class).
+  airShot(ctrl) {
+    const st = ctrl.P.state;
+    if (!(st === 8 || st === 9 || st === 0xf || st === 0x10 || (st >= 0x1f && st <= 0x21))) return false;
+    if (st === ST.BACK || st === ST.BACK2) ctrl.P.state = ST.FALL;                 // FUN_0055b8e0(P, 9, 0, 0)
+    this.motion = new AirFireMotion();
+    this.events.push({ frame: ctrl.frames, ev: 'airShot' });
+    return true;
   }
 
   // FUN_005aa5b8's advance of the head layer (held after landing until the locomotion clips take over)

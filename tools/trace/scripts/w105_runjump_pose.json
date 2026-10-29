@@ -1,0 +1,2 @@
+{"name": "w105_runjump_pose", "frames": 90, "log_from": 28, "doc": "worker 0105, TRACE_FIELDSET=pose: j_run's input (run from 10, cross at 30-36, release at 95); logs frames 28-89 (take-off to landing) with the bone matrices",
+ "events": [{"from": 10, "to": 90, "ly": -1.0}, {"from": 30, "to": 36, "buttons": ["cross"]}]}

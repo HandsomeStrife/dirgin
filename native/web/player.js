@@ -292,16 +292,21 @@ export class PlayerController {
     this.stickInput(input);                       // FUN_00333150: runs in every state
     stickMode(this, this.stickW);                 // FUN_00333150: P+0x29c (the back jump's turn-round bit)
     this.intent(owned);                           // FUN_00578748: the ramp runs in every state
-    // the jump / landing motion state (FUN_00598f50 / FUN_00599aa0), before FUN_0034ea18.
-    // GUESS: armed = false: with the gun out the game plays the h_jp*_a sets (phases 4-7), but
-    // those clips aren't exported (not in 07700000 / 0770000b) and aim_g shows h_jp2_a skipped
-    // (phases 5-6 not matched); the plain set has the same 3-frame wind-up, so the freeze and
-    // the flight are unchanged. See notes/fidelity-audit.md "Jump".
-    this.jump.motionUpdate(this, { armed: false });
+    // FUN_00579570 (weapon state machine) runs right after FUN_00578748 in FUN_005786e8, before the
+    // character's motion update: a shot fired in the air switches the motion to the air-shot class
+    // 0x4e now (FUN_00577480 -> FUN_00560b58; jump_core airShot), whose phase 0 runs below.
+    if (this.weapon && this.weaponHook && this.weaponHook.weapon) {
+      if (this.weaponHook.weapon(input, !!this.active)) this.jump.airShot(this);
+    }
+    // the jump / landing / air-shot / fall motion state (FUN_00598f50 / FUN_00599aa0 / FUN_00596830 /
+    // FUN_00599820), before FUN_0034ea18. armed: C+0x590 bit 24 (gun out) and slot 0xbc loaded (it
+    // is in z128: aim_g plays h_jp0_a); FUN_00598f50 / FUN_00599aa0 / FUN_00599820 then play the
+    // h_jp*_a sets.
+    this.jump.motionUpdate(this, { armed: !!(this.weapon && this.weapon.drawn()) });
     const frozen = this.jump.frozen;              // C+0x1c0 bit 0x20: FUN_0034ea18 returns at once
     if (loco && !frozen) this.moveTick();         // FUN_0034ea18 -> FUN_0034c388 case 0xc
     if (loco && !frozen) this.rotate();           // FUN_0034ea18 -> FUN_0034de50 mode 4 (6 with the weapon out)
-    if (this.weapon && this.weaponHook) this.weaponHook.post(input, !!this.active);   // FUN_00579570, clips
+    if (this.weapon && this.weaponHook) this.weaponHook.post(input, !!this.active);   // the state classes' clips
     this.jumpStepped = false;
     if (ctx.anim && ctx.anim.gameFrame) ctx.anim.gameFrame(this, STEP);   // FUN_00343160 / FUN_005aa5b8
     if (!this.jumpStepped) this.jumpAdvance();    // no animator (tests): the jump clips' clock still runs
@@ -917,8 +922,9 @@ export class SpeedAnimator {
     const take = () => {
       if (clock.serial !== this.jumpSerial || clock !== this.jumpClock) {   // a new Jump (respawn) restarts the count
         this.jumpSerial = clock.serial; this.jumpClock = clock;
-        // GUESS: a requested clip the page doesn't have (c_wjp*, c_bj*: not in the exported
-        // containers) keeps the current head pose; the clock still times it (notes/fidelity-audit.md "Jump")
+        // GUESS: a requested clip the page doesn't have (the jump pack not loaded: every clip the
+        // jump motions request is in it) keeps the current head pose; the clock still times it
+        // (notes/fidelity-audit.md "Jump")
         if (!this.ensure(clock.clip)) return;
         const len = clock.blend > 0 ? clock.blend + 1 : 0;
         this.out = len ? { key: this.head.key, frame: this.head.frame, prevFrame: this.head.frame, loop: this.head.loop !== false } : null;

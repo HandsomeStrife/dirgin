@@ -129,7 +129,7 @@ re-take-off, the back-jump angle test, turn negation and apex margin.
 - FUN_005ae618(MP, 1/2/3): a motion-player mode switch during the jump; meaning not decoded
   (the cloth? see cloth.json's h_jp windows).
 - The high jump (kind 1) and the cfg+0xc0 height: translated, never taken in z128.
-- The armed phases 4-7 and the landing's armed set: translated, not trace-checked.
+- The armed phases 4-7 and the landing's armed set: corrected and trace-checked by worker 0104 (below).
 - GUESS: state 9 (fall) / state 0x20 → second jump: their vt+0x24 (0x538bd8 / 0x53a478)
   mapping to the motion id is not read; jump_core assumes FUN_00538a30's (0x1f → 0x20,
   0x21 → 0x59).
@@ -138,8 +138,8 @@ re-take-off, the back-jump angle test, turn negation and apex margin.
 - GUESS: P+0x80 (the back jump's turn-round angle test) = the facing C+0x20 (equal in the
   save state; its writer isn't found). j_back passes with it.
 - GUESS: the motion player's hold / queue take-over rule (ClipClock), see Clips above.
-- c_wjp / c_bj clip lengths come from the traces (the c_ clips are not exported to
-  data/vincent); c_bwj (second back jump) lengths unknown, so ClipClock can't end them.
+- c_wjp / c_bj / c_bwj: exported in the jump pack since worker 0104 (07703200; lengths equal
+  the traces'). The second back jump (c_bwj) is not traced.
 - h_jp3's loop never wraps in these traces (6 frames of h_jp3 before landing); the loop flag
   is from the play flags (lflags 5) but untested by a long fall.
 - The first airborne step of a running jump is 2.5e-4 longer in the game than in player.js
@@ -198,3 +198,52 @@ return 1; else clamp to n - 1, return 1. FUN_005aa5b8 advances the blend-out lay
 head - 1) with the same function, so a non-looped clip blending out stays on its last frame.
 Traced j_stand f78-88: out h_jp4 14.0 (lflags 6) while h_st blends in over 11. Page fixed in
 player.js advLayer; one-shot pack clips use the pack's `frames` (glb duration is (n - 1)/60).
+
+## Armed jump, air shot, the c_ clips (worker 0104, 2026-10-29)
+
+Why aim_g skips h_jp2_a: R1 at f48 fires in the air. FUN_00579570 (in FUN_005786e8, right
+after FUN_00578748, so before the character's motion update) -> FUN_00577480 -> FUN_00560b58(P, 1):
+in states 8, 9, 0xf, 0x10, 0x1f-0x21 (FUN_0055aa88; 0x20/0x21 first become state 9) the motion
+becomes **0x4e** (FUN_00341780; FUN_00592918 builds class 0x4e = vtable 0x5a6380, update
+FUN_00596830). Its phase 0, with slot 0xc1 (h_jp_f) empty in z128's slot table: FUN_00340bb8(C, 1, 1),
+FUN_00345818(C, 0xbf, 0xc5, 0xcb, 0x83, 0, 0) = h_jp3_a now + loop with blend 1, done, returns
+**0x22**. The fall class 0x22 (FUN_00599780 / FUN_00599820, vtable 0x5a5a70) runs from the next
+frame (its FUN_005ae618(MP, 2) shows in mp_head at f49): after 0x4e it uses blend 0 / param_6 0
+and re-issues the h_jp3_a set with flags 0x83, which FUN_00344608 drops (flag 0x80 + same level
+clip C+0x570 and partner C+0x578), so h_jp3_a runs on; on the ground it is done and state 8's
+handler FUN_00538aa0 gives state 2 (3 with P+0x100 bit 44) -> landing 0x21 -> h_jp4_a.
+
+Corrections to the armed phases of FUN_00598f50 (jump_core had them queued): phase 4 plays
+h_jp1_a **now** (flags 2), phases 5/6 time out to h_jp2_a (flags 2) / h_jp3_a (flags 0x83 = now +
+loop). Blend rule of FUN_00345818 (zones 1/2): blend = C+0x591 (10) when the head layer is still
+blending in (FUN_00346150 = FUN_005a9768(MP): head layer +0x24 > 0) or when param_6 is set and the
+zone is unchanged; else 0. Trace: h_jp0_a 11 (param_6 1), h_jp1_a 11 (h_jp0_a still blending),
+h_jp3_a 2 (blend 1), h_jp4_a 0 (h_jp3_a done blending). The page has no zones (GUESS: zone
+constant). armed = C+0x590 bit 24 (gun out) and slot 0xbc loaded (it is in z128).
+
+Containers: h_jp*_a/_au/_ad are in 0770320b (+ 077033cb / 0770354b), c_wjp / c_bj / c_bwj in
+07703200 (+ 0770320a / 07703540 / 0770354a). z128's slot table names c_bwj0-2 (only in the
+077032xx family); the 077035xx copies are 49-bone clips (another skeleton, MOD +8 = 0x31 vs 0x5d),
+so z128's Vincent uses 07703200 / 0770320b. Settled by worker 0105: FUN_005a7390 looks every
+clip name up in MP+0x3bc's resources, first hit wins; in the save state those are 07703200,
+0770320b, 0770320c, 0770320d (no 077000xx file is loaded), and z128's h_jp3 / h_div are
+0770320b's byte for byte. export_web_vincent.py CLIP_SETS now names that family for every clip
+(base, packs, catalogue, cloth windows); 0770320b's h_jp3 matches the w105_jump_pose bone
+matrices to 0.002 per frame (0770000b's: 0.023-0.035). h_div is 32 frames (was 34).
+
+Armed back jump (FUN_005a1510, worker 0105): phases 6 / 7 play the h_jp3_a set through
+FUN_00345818(C, 0xbf, 0xc5, 0xcb, 0x83, 0, 0) (now + loop, the aimedReq blend rule), as
+FUN_00598f50; the page queued it without a loop before. test_jump_page.mjs "armed back jump".
+
+Check: test_jump_page.mjs replays aim_g through the page's step with aim_core's WeaponSystem
+(the shot is the translation's own decision; f60's R1 fires nothing, as in the game): every
+jump-clip frame exact on clip, frame, blend countdown and blend-out layer. Synthetic (decomp only):
+holstered vs drawn, the no-shot timeline h_jp0_a -> h_jp1_a -> h_jp2_a -> h_jp3_a (loop) -> h_jp4_a,
+a shot during h_jp3_a (no restart). The pack check covers every clip in jump_core's SLOT (frames,
+loop). Mutation (scratchpad mutate.py of worker 0104): 17/17 killed. Image: review/jump-clips.png
+(game vs page: armed f47 / f56, second jump f40 / f56, back jump f40 / f56; poses match, camera
+framing differs = the jump camera hooks; the game grabs land about a frame late).
+Not ported: FUN_00596830's h_jp_f branch (slot 0xc1 empty in z128); the P+0x100 bits 40-41 = 1
+branch of FUN_00560b58 (motion 0x11; bits 0 in the save state); the fall class for walk-off falls
+(the page has no motion object in state 9 until a shot); the back jump's armed set (FUN_005a1510
+phases 6/7, aimedReq flags 0x83, worker 0105) is untraced.

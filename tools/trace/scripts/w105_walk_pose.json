@@ -1,0 +1,2 @@
+{"name": "w105_walk_pose", "frames": 122, "log_from": 60, "doc": "worker 0105, TRACE_FIELDSET=pose: walk (half stick up) from frame 10; logs frames 60-121 (steady h_wk) with the bone matrices",
+ "events": [{"from": 10, "to": 122, "ly": -0.5}]}

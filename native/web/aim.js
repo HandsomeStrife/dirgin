@@ -301,12 +301,17 @@ export async function setupAim({ ctrl, anim, motions, col, follow, output, vin, 
       btn.r1Edge = btn.r3Edge = btn.circleEdge = false;
     },
     actionEnter: a => ctl.actionEnter(a),
-    // FUN_00579570 (every frame, FUN_005786e8), then the clip requests of the state classes
-    post(input, inAction) {
+    // FUN_00579570 (every frame, FUN_005786e8: right after FUN_00578748, before the character's
+    // motion update). Returns true when a shot was fired this frame (FUN_00577480 -> FUN_00560b58).
+    weapon(input, inAction) {
       const before = core.cam.pitch;
       core.stateMachine(lastRay ? lastRay.hit : null);
       if (core.cam.pitch !== before) follow.pitch = core.cam.pitch;   // shot: pitch carry-over (message 0x3e9)
       core.reticleFrame(1000 / 50);                  // GUESS: DAT_004f58ec counts ms (phase 1 = 100 -> 5 frames, traced)
+      return core.events.some(e => e.type === 'shot');
+    },
+    // the clip requests of the state classes (after the move)
+    post(input, inAction) {
       if (!inAction) ctl.clips();
     },
   };

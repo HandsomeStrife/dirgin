@@ -29,8 +29,9 @@ const LIM = { eye: 0.02, at: 0.002, ang: 1e-4, fwd: 1e-4, far: 0.05 };
 let fails = 0;
 // The loop below rebuilds one game frame by hand (setupAim needs the DOM). Check that the page's
 // own wiring runs the same steps in the same order: play.js follow.tick -> ctrl.step; player.js
-// step(): weaponHook.pre -> intent / move -> weaponHook.post; aim.js hook: the aim ray from this
-// frame's camera -> core.input, then core.stateMachine -> pitch carry-over -> reticleFrame.
+// step(): weaponHook.pre -> intent -> weaponHook.weapon (FUN_00579570, in FUN_005786e8 after
+// FUN_00578748) -> jump motion -> move -> weaponHook.post (clips); aim.js hook: the aim ray from
+// this frame's camera -> core.input, then core.stateMachine -> pitch carry-over -> reticleFrame.
 {
   const src = f => readFileSync(new URL(f, import.meta.url), 'utf8');
   const region = (s, a, b) => { const i = s.indexOf(a), j = s.indexOf(b, i + a.length); return i < 0 || j < 0 ? '' : s.slice(i, j); };
@@ -42,10 +43,10 @@ let fails = 0;
   };
   order('play.js frame', region(src('./play.js'), 'while (acc >= TICK', 'acc -= TICK'), ['follow.tick(', 'ctrl.step(']);
   order('player.js step', region(src('./player.js'), 'if (owned) this.locate();', 'this.frames++;'),
-        ['this.weaponHook.pre(', 'this.stickInput(', 'this.intent(', 'this.moveTick()', 'this.rotate()', 'this.weaponHook.post(']);
+        ['this.weaponHook.pre(', 'this.stickInput(', 'this.intent(', 'this.weaponHook.weapon(', 'this.jump.motionUpdate(', 'this.moveTick()', 'this.rotate()', 'this.weaponHook.post(']);
   const hookSrc = region(src('./aim.js'), 'const hook = {', 'ctrl.weapon = core');
   order('aim.js hook.pre', region(hookSrc, 'pre(input', 'actionEnter'), ['aimRay()', 'core.eye =', 'core.hit =', 'core.input(']);
-  order('aim.js hook.post', region(hookSrc, 'post(input', 'ctl.clips()'), ['core.stateMachine(', 'follow.pitch = core.cam.pitch', 'core.reticleFrame(']);
+  order('aim.js hook.weapon', region(hookSrc, 'weapon(input', 'post(input'), ['core.stateMachine(', 'follow.pitch = core.cam.pitch', 'core.reticleFrame(', "core.events.some(e => e.type === 'shot')"]);
 }
 for (const file of files) {
   if (!existsSync(file)) { console.log('missing', file); fails++; continue; }

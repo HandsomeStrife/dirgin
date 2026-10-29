@@ -16,7 +16,8 @@ import path from 'node:path';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '../..');
 const PL = await import(pathToFileURL(path.resolve(process.argv[2] ?? path.join(here, 'player.js'))).href);
-const { CLIP_FRAMES, canJump } = await import(pathToFileURL(path.join(here, 'jump_core.js')).href);
+const { CLIP_FRAMES, SLOT, UNLOADED, canJump, AirFireMotion } = await import(pathToFileURL(path.join(here, 'jump_core.js')).href);
+const { WeaponSystem } = await import(pathToFileURL(path.join(here, 'aim_core.js')).href);
 const { Collision } = await import(pathToFileURL(path.join(here, 'collision.js')).href);
 const { PlayerController, SpeedAnimator, padAxis, stickToWorld } = PL;
 
@@ -122,10 +123,89 @@ function run(name, { state = true, clips = true, dir = OUT } = {}) {
 }
 
 for (const n of ['e_jumps', 'i_air_release', 'j_stand', 'j_run', 'j_steer', 'j_double', 'j_back']) run(n);
-// aim_g_air: a standing jump with the gun out (no weapon in this replay; the page plays the plain
-// h_jp set for the armed h_jp*_a sets, see player.js step): flight and ground bit only (facing: the aim turn; the game's
-// on-foot state is 3 there, the weapon's)
+// aim_g_air without a weapon: flight and ground bit only (the game's on-foot state is 3 there)
 run('aim_g_air', { state: false, clips: false, dir: path.join(OUT, 'aim') });
+
+// aim_g_air with the gun out, through the page's step with the real weapon translation (aim_core
+// WeaponSystem: FUN_00579570 decides the shots; its camera is fed from the trace as test_aim.mjs
+// does). The game: h_jp0_a (f41, blend 10) -> h_jp1_a (f45) -> R1 f48 = a shot in the air ->
+// air-shot class 0x4e: h_jp3_a with blend 1 (h_jp2_a never plays) -> fall class 0x22 (no restart)
+// -> landing h_jp4_a (cut) -> h_st_a. Checked on every frame where either head is a jump clip:
+// head clip, frame, blend countdown (+0x24), and the blend-out layer's clip / frame.
+// node ... test_jump_page.mjs [player.js] [jump_core.js]: a mutant jump_core can't be swapped in
+// (player.js imports it), so the mutation runs edit the file in place (scratchpad mutate script).
+function runArmed() {
+  const file = path.join(OUT, 'aim', 'aim_g_air.jsonl');
+  if (!existsSync(file)) { console.log('skip armed aim_g_air: no trace'); return; }
+  ran++;
+  const J = p => JSON.parse(readFileSync(path.join(here, p), 'utf8'));
+  const [, ...R] = load(file);
+  const hex = h => Buffer.from(h, 'hex'), F = (h, o) => hex(h).readFloatLE(o), U = (h, o) => hex(h).readUInt32LE(o);
+  const V = (h, o) => ({ x: F(h, o), y: F(h, o + 4), z: F(h, o + 8) });
+  const r0 = R[0], p0 = r0.matrix[3], f0 = r0.matrix[2];
+  const ctrl = new PlayerController(col, { pos: { x: p0[0], y: p0[1], z: p0[2] }, heading: Math.atan2(f0[0], f0[2]) });
+  ctrl.C.face = { x: f0[0], y: f0[1], z: f0[2] };
+  ctrl.P.state = stateOf(r0);
+  const anim = stubAnim(headOf(r0));
+  ctrl.attach({ anim });
+  const sim = new WeaponSystem(J('data/aim/weapon.json'), J('data/aim/reticle.json'));
+  sim.P.acc = F(r0.p_weapon, 4); sim.P.st = U(r0.p_weapon, 0x14); sim.P.T = F(r0.p_weapon, 0);
+  sim.hud.mode = U(r0.hud, 0); sim.r.kind = hex(r0.ret)[0];
+  let i = 0, shots = 0;
+  const btn = m => R[i].pad_in.buttons & m, prevBtn = m => (i ? R[i - 1].pad_in.buttons : 0) & m;
+  ctrl.weapon = sim;
+  ctrl.weaponHook = {
+    pre() {
+      const r = R[i], nx = R[i + 1], st = U(r.p_weapon, 0x14), nst = U(nx.p_weapon, 0x14);
+      const shot = (nst === 2 && st !== 2 && st !== 1) || (st === 1 && nst === 2);
+      const k198u = Math.fround(Math.fround(Math.fround(Math.fround(sim.cam.k19c - sim.cam.k198) * 0.3) * 1.1999999284744263) + sim.cam.k198);
+      sim.switchAngles();
+      sim.cameraFrame(F(nx.cam_170, 4) - (shot && !(sim.W.flags & 0x10) ? k198u : 0));
+      sim.kickDecay();
+      sim.eye = V(nx.cam_60, 0x30); sim.hit = V(nx.cam_60, 0x40);
+      sim.input({ r1Pressed: !!(btn(8) && !prevBtn(8)), r1Held: !!btn(8), r3Pressed: !!(btn(0x400) && !prevBtn(0x400)),
+                  circlePressed: !!(btn(0x20) && !prevBtn(0x20)) }, (r.mflags & 0x200) !== 0, V(nx.cam_60, 0x50));
+    },
+    weapon() { sim.stateMachine(V(R[i + 1].cam_60, 0x40)); sim.reticleFrame(20); const s = sim.events.some(e => e.type === 'shot'); if (s) shots++; return s; },
+    post() { sim.events.length = 0; },
+  };
+  let prevButtons = 0;
+  const S = { clip: 0, clipF: null, fr: 0, frF: null, b: 0, bF: null, o: 0, oF: null, n: 0, pos: 0 };
+  const seen = [];
+  for (i = 0; i + 1 < R.length; i++) {
+    const d = R[i], pad = d.pad_in;
+    const cross = (pad.buttons & CROSS) !== 0 && (prevButtons & CROSS) === 0;
+    prevButtons = pad.buttons;
+    ctrl.step({ x: 0, z: 0, stick: 0, run: false, keys: new Set(), pressed: new Set(), cross });
+    const g = R[i + 1], gh = headOf(g), gp = g.matrix[3];
+    const our = NAME[anim.head.key] ?? anim.head.key;
+    if (!JUMPISH.test(gh.clip) && !JUMPISH.test(our)) continue;
+    S.n++;
+    if (seen[seen.length - 1] !== gh.clip) seen.push(gh.clip);
+    S.pos = Math.max(S.pos, Math.hypot(ctrl.pos.x - gp[0], ctrl.pos.y - gp[1], ctrl.pos.z - gp[2]));
+    if (our !== gh.clip) { S.clip++; S.clipF ??= `${g.frame} ${our} vs ${gh.clip}`; }
+    else if (Math.abs(anim.head.frame - gh.frame) > FRAME_TOL) { S.fr++; S.frF ??= `${g.frame} ${our} ${anim.head.frame.toFixed(2)} vs ${gh.frame.toFixed(2)}`; }
+    const rem = anim.out ? anim.blend.rem : 0;
+    if (Math.abs(rem - gh.blend_len) > 1e-3) { S.b++; S.bF ??= `${g.frame} ${rem.toFixed(2)} vs ${gh.blend_len.toFixed(2)}`; }
+    // (the blend-out under h_jp0_a is the aimed idle h_st_a, which aim.js's clip classes play: not
+    // run in this replay, so only jump-clip blend-out layers are compared)
+    if (gh.blend_len > 0 && JUMPISH.test(outOf(g).clip)) {
+      const go = outOf(g), oo = anim.out, oc = oo ? (NAME[oo.key] ?? oo.key) : null;
+      if (oc !== go.clip || Math.abs(oo.frame - go.frame) > FRAME_TOL) { S.o++; S.oF ??= `${g.frame} ${oc} ${oo?.frame.toFixed(2)} vs ${go.clip} ${go.frame.toFixed(2)}`; }
+    }
+    if (process.env.JP_DUMP === 'armed') console.log(g.frame, our, anim.head.frame.toFixed(2), rem.toFixed(2), '|', gh.clip, gh.frame.toFixed(2), gh.blend_len.toFixed(2));
+  }
+  const L = `armed aim_g_air (${S.n} jump-clip frames)`;
+  ok(seen.join(' ') === 'h_jp0_a h_jp1_a h_jp3_a h_jp4_a', `${L}: game clip order ${seen.join(' ')}`);
+  ok(S.clip === 0, `${L}: head clip off ${S.clip}${S.clipF ? ', first ' + S.clipF : ''}`);
+  ok(S.fr === 0, `${L}: head clip frame off ${S.fr}${S.frF ? ', first ' + S.frF : ''}`);
+  ok(S.b === 0, `${L}: head blend countdown off ${S.b}${S.bF ? ', first ' + S.bF : ''}`);
+  ok(S.o === 0, `${L}: blend-out layer clip / frame off ${S.o}${S.oF ? ', first ' + S.oF : ''}`);
+  ok(S.pos <= POS_TOL, `${L}: position max ${S.pos.toExponential(2)}`);
+  const air = ctrl.jump.events.filter(e => e.ev === 'airShot').map(e => e.frame);
+  ok(shots >= 1 && air.length === 1 && air[0] === 48, `${L}: shots ${shots}, air-shot class entered on frames [${air}] (game: R1 f48 only; f60 fires nothing)`);
+}
+runArmed();
 // ✕ priority (FUN_00333150): an action that takes the press (the ladder) or owns him keeps it;
 // otherwise the page's Space edge (input.pressed) is the jump
 {
@@ -152,6 +232,84 @@ run('aim_g_air', { state: false, clips: false, dir: path.join(OUT, 'aim') });
   c.step({ x: 0, z: 1, stick: 1, keys: new Set(), pressed: new Set(), cross: true });
   ok(c.jump.frozen && c.pos.x === p1.x && c.pos.z === p1.z && c.heading === h1, `wind-up: frozen, no move / turn (moved ${Math.hypot(c.pos.x - p1.x, c.pos.z - p1.z).toExponential(1)})`);
 }
+// the armed choice (player.js step): C+0x590 bit 24 = the gun is out. A weapon that is attached
+// but holstered plays the plain h_jp0; drawn plays h_jp0_a (FUN_00598f50 phase 0)
+for (const drawn of [false, true]) {
+  const r0 = load(path.join(OUT, 'j_stand.jsonl'))[1], p0 = r0.matrix[3];
+  const c = new PlayerController(col, { pos: { x: p0[0], y: p0[1], z: p0[2] }, heading: 0 });
+  c.weapon = { drawn: () => drawn, isAiming: () => false, P: { facePt: null } };
+  c.weaponHook = { pre() {}, weapon: () => false, post() {} };
+  c.step({ x: 0, z: 0, keys: new Set(), pressed: new Set(), cross: true });
+  const want = drawn ? 'h_jp0_a' : 'h_jp0';
+  ok(c.jump.clock && c.jump.clock.clip === want, `armed choice, gun ${drawn ? 'drawn' : 'holstered'}: ${c.jump.clock?.clip} (want ${want})`);
+}
+// the armed timeline with no shot (decomp only; no trace has it): FUN_00598f50 phases 4-7 play
+// h_jp0_a -> h_jp1_a -> h_jp2_a -> h_jp3_a (flags 0x83: looped) -> landing h_jp4_a. Then a shot
+// while h_jp3_a plays: FUN_00596830's h_jp3_a request (flags 0x83) is dropped (FUN_00344608: same
+// level clip and partner), so the clip runs on, and the fall class follows.
+{
+  const r0 = load(path.join(OUT, 'j_stand.jsonl'))[1], p0 = r0.matrix[3];
+  const c = new PlayerController(col, { pos: { x: p0[0], y: p0[1], z: p0[2] }, heading: 0 });
+  let fire = false;
+  c.weapon = { drawn: () => true, isAiming: () => false, P: { facePt: null } };
+  c.weaponHook = { pre() {}, weapon: () => { const f = fire; fire = false; return f; }, post() {} };
+  const seq = [];
+  let loop3 = null, shotAt = null, after = null;
+  for (let i = 0; i < 70; i++) {
+    if (c.jump.clock && c.jump.clock.clip === 'h_jp3_a' && c.jump.clock.frame >= 3 && shotAt === null && !c.onGround) {
+      fire = true; shotAt = c.jump.clock.frame;
+    }
+    c.step({ x: 0, z: 0, keys: new Set(), pressed: new Set(), cross: i === 0 });
+    const k = c.jump.clock && c.jump.clock.clip;
+    if (k && seq[seq.length - 1] !== k) seq.push(k);
+    if (k === 'h_jp3_a' && loop3 === null) loop3 = c.jump.clock.loop;
+    if (shotAt !== null && after === null) after = { clip: k, frame: c.jump.clock.frame, motion: c.jump.motion?.id };
+  }
+  ok(seq.join(' ') === 'h_jp0_a h_jp1_a h_jp2_a h_jp3_a h_jp4_a', `armed, no shot: ${seq.join(' ')}`);
+  ok(loop3 === true, `armed, no shot: h_jp3_a looped (${loop3})`);
+  ok(after && after.clip === 'h_jp3_a' && Math.abs(after.frame - (shotAt + 0.6)) < 1e-4 && after.motion === 0x22 && c.jump.events.some(e => e.ev === 'airShot'),
+     `shot during h_jp3_a: not restarted (${after?.clip} ${after?.frame?.toFixed(2)} after ${shotAt?.toFixed(2)}, motion 0x${after?.motion?.toString(16)})`);
+}
+// the armed back jump (decomp only; no trace has it): FUN_005a1510 phases 4-7 play c_bj0 ->
+// c_bj1 -> c_bj2 (FUN_003456c0, flags 2), then the h_jp3_a set through FUN_00345818 with flags
+// 0x83 (now, looped; lines ~201 / ~223), then the landing h_jp4_a. Run-up, then ✕ with the stick
+// pulled back (more than 90 deg from the facing: FUN_00575768 -> state 0x20).
+{
+  const r0 = load(path.join(OUT, 'j_stand.jsonl'))[1], p0 = r0.matrix[3];
+  const c = new PlayerController(col, { pos: { x: p0[0], y: p0[1], z: p0[2] }, heading: 0 });
+  c.weapon = { drawn: () => true, isAiming: () => false, P: { facePt: null } };
+  c.weaponHook = { pre() {}, weapon: () => false, post() {} };
+  for (let i = 0; i < 30; i++) c.step({ x: 1, z: 0, stick: 1, keys: new Set(), pressed: new Set() });
+  const seq = []; let motion = null, loop3 = null, req3 = null;
+  for (let i = 0; i < 90; i++) {
+    // ✕ one frame after the stick is pulled back: the take-off reads last frame's move (C+0x2d0)
+    c.step({ x: -1, z: 0, stick: 1, keys: new Set(), pressed: new Set(), cross: i === 1 });
+    if (i === 1) motion = c.jump.motion?.id;
+    const k = c.jump.clock && c.jump.clock.clip;
+    if (k && seq[seq.length - 1] !== k) {
+      seq.push(k);
+      if (k === 'h_jp3_a') { loop3 = c.jump.clock.loop; req3 = c.jump.clock.frame; }
+    }
+  }
+  ok(motion === 0x59, `armed back jump: motion 0x${motion?.toString(16)} (want 0x59, FUN_005a1510)`);
+  ok(seq.slice(0, 5).join(' ') === 'c_bj0 c_bj1 c_bj2 h_jp3_a h_jp4_a', `armed back jump: ${seq.join(' ')}`);
+  ok(loop3 === true, `armed back jump: h_jp3_a looped (${loop3}; flags 0x83)`);
+  ok(req3 !== null && req3 < 0.61, `armed back jump: h_jp3_a played now (first seen at frame ${req3})`);
+}
+// FUN_00596830 with slot 0xc1 (h_jp_f) loaded: its branch isn't ported, so the page leaves it
+// out (plays the h_jp3_a set, warns once) and the frame loop keeps running
+{
+  const warn = console.warn; let warned = 0; console.warn = () => { warned++; };
+  let got = null, threw = null;
+  try {
+    for (let k = 0; k < 2; k++) {
+      const m = new AirFireMotion();
+      got = m.update({ usable: () => true, headClip: 'h_jp2_a', headBlending: false });
+    }
+  } catch (e) { threw = e; } finally { console.warn = warn; }
+  ok(!threw && got && got.length === 1 && got[0].aimed && got[0].loop && got[0].now && warned === 1,
+     `air shot, slot 0xc1 loaded: no throw (${threw?.message ?? 'ok'}), h_jp3_a set requested, ${warned} warning(s)`);
+}
 // the gate branches no trace reaches (FUN_00577230 P+0x118 bit 0x40000; FUN_0055bb40 / FUN_0055bb78 states)
 {
   const c = { P: { state: 2 }, C: {}, onGround: true };
@@ -173,10 +331,15 @@ ok(ran > 0, `traces replayed: ${ran}`);
     Object.assign(anim, { mixer: { clipAction: () => ({ setLoop() {} }) }, actions: {}, names: {}, frames: {}, library: new Map() });
     // the glb's durations: keys 0..n-1 for a one-shot (export_web_vincent.py keys_note)
     anim.addClips(Object.entries(meta).map(([name, c]) => ({ name, duration: c.duration_s })), meta);
-    for (const k of ['h_jp0', 'h_jp1', 'h_jp2', 'h_jp3', 'h_jp4']) {
-      anim.ensure(k);
-      ok(anim.frames[k] === CLIP_FRAMES[k], `pack frame count ${k}: ${anim.frames[k]} (game ${CLIP_FRAMES[k]})`);
+    // every clip the jump motion states can request (SLOT, minus the slots empty in z128) is in
+    // the pack with the frame count jump_core's clock uses
+    const want = [...new Set(Object.entries(SLOT).filter(([s]) => !UNLOADED.has(+s)).map(([, n]) => n))];
+    for (const k of want) {
+      const has = anim.ensure(k);
+      ok(has && anim.frames[k] === CLIP_FRAMES[k], `pack clip ${k}: ${has ? anim.frames[k] + ' frames' : 'missing'} (jump_core ${CLIP_FRAMES[k]})`);
     }
+    // loop flags: h_jp3 / h_jp3_a loop (played with flag 1), the rest are one-shots
+    for (const k of want) ok(meta[k] && meta[k].loop === /^h_jp3/.test(k), `pack clip ${k}: loop ${meta[k]?.loop}`);
   }
 }
 process.exit(fail ? 1 : 0);
