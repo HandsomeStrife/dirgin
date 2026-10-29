@@ -1,0 +1,2 @@
+{"name": "j_land_draw", "frames": 100, "doc": "worker 0112: standing jump cross 10-16 (lands f52), draw (R1) 58-60 while the landing motion 0x21 (h_jp4) runs: FUN_0055b8e0(P, 3, 0, 0) -> FUN_00537d58 case 3 (TRACE_FIELDSET=aim; out/aim)",
+ "events": [{"from": 10, "to": 16, "buttons": ["cross"]}, {"from": 58, "to": 60, "buttons": ["r1"]}]}

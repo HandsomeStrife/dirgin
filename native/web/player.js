@@ -263,6 +263,7 @@ export class PlayerController {
         for (const a of this.actions) {
           if (!a.canEnter(ctx)) continue;
           this.active = a;
+          if (this.jump) this.jump.ladderMount(this);
           if (this.weaponHook && this.weaponHook.actionEnter) this.weaponHook.actionEnter(a);
           const req = a.enter(ctx);
           if (req && req.clip && ctx.anim) ctx.anim.play(req.clip, req);
@@ -274,7 +275,13 @@ export class PlayerController {
         const res = a.update(ACTION_TICK, ctx) || {};
         if (res.locomotion) loco = true;
         else { this.applyOwned(res); owned = true; loco = false; }
-        if (res.done && this.active === a) { this.active = null; a.exit(ctx); }
+        if (res.done && this.active === a) {
+          // GUESS: the ladder's own exit (its fall landed) back to state 2. The game's ladder states
+          // 0xb / 0xc answer a motion-done event with state 10 (0x17 in the other FUN_00316cf8 branch;
+          // FUN_00538ec8 / FUN_00538fa0), whose chain isn't decoded; see notes/fidelity-audit.md
+          if (res.locomotion && this.onGround && this.P.state === 9) enterState(this.P, 2);
+          this.active = null; a.exit(ctx);
+        }
       }
       this.ticks++;
       ctx.input = { ...input, pressed: new Set() };   // an edge is seen by one tick only
@@ -303,7 +310,7 @@ export class PlayerController {
     // FUN_00599820), before FUN_0034ea18. armed: C+0x590 bit 24 (gun out) and slot 0xbc loaded (it
     // is in z128: aim_g plays h_jp0_a); FUN_00598f50 / FUN_00599aa0 / FUN_00599820 then play the
     // h_jp*_a sets.
-    this.jump.motionUpdate(this, { armed: !!(this.weapon && this.weapon.drawn()) });
+    this.jump.motionUpdate(this, { armed: !!(this.weapon && this.weapon.drawn()), action: !!this.active });
     const frozen = this.jump.frozen;              // C+0x1c0 bit 0x20: FUN_0034ea18 returns at once
     if (loco && !frozen) this.moveTick();         // FUN_0034ea18 -> FUN_0034c388 case 0xc
     if (loco && !frozen) this.rotate();           // FUN_0034ea18 -> FUN_0034de50 mode 4 (6 with the weapon out)
@@ -334,12 +341,13 @@ export class PlayerController {
       this.body.state = res.onGround ? 0 : 2;
       if (!res.onGround) {
         this.startFall(0);                        // hand-over to the body's own fall
-        // GUESS: an action that drops him (ladder jump-off) hands over in the fall state 9,
-        // so the first fall frame is not an on-foot frame (same GUESS state switch as
-        // moveTick's 2 <-> 9; see notes/fidelity-audit.md)
+        // GUESS: an action that drops him (ladder jump-off) hands over in the fall state 9, so the
+        // first fall frame is not an on-foot frame. The game's ladder states (0xb / 0xc) leave by
+        // motion-done events to state 10 (FUN_00538ec8 / FUN_00538fa0), not decoded further; see
+        // notes/fidelity-audit.md
         if (this.P.state >= 2 && this.P.state <= 5) enterState(this.P, 9);
       } else if (this.P.state === 9) {
-        enterState(this.P, 2);                        // back on his feet (same GUESS switch; a ladder exit)
+        enterState(this.P, 2);                        // back on his feet (same ladder GUESS; a ladder exit)
       }
     }
     if (res.vy !== undefined) this.vy = res.vy;
@@ -510,11 +518,7 @@ export class PlayerController {
     C.moveDir = norm3(C.dir);
     // ground bit 0x200 = !FUN_003577c8(body)
     this.onGround = !airborne(B);
-    // GUESS: player state on foot <-> fall. The state-2 class's event handler FUN_00537f38
-    // returns state 9 when the ground bit is clear, but which event fires it, and the
-    // fall state's landing, aren't decoded. 9 while airborne, 2 again once landed.
-    if (!this.onGround && this.P.state >= 2 && this.P.state <= 5) enterState(this.P, 9);
-    else if (this.onGround && this.P.state === 9) enterState(this.P, 2);
+    // (the player state follows in the next motion update: jump_core motionUpdate / stateEvent)
     this.vel = { x: C.dir.x * C.spd, z: C.dir.z * C.spd };
     this.speed = C.groundSpeed / 60;
     this.stuck = this.onGround && C.spd > 0 && prev.x === this.pos.x && prev.z === this.pos.z;

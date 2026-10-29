@@ -134,7 +134,7 @@ run('aim_g_air', { state: false, clips: false, dir: path.join(OUT, 'aim') });
 // head clip, frame, blend countdown (+0x24), and the blend-out layer's clip / frame.
 // node ... test_jump_page.mjs [player.js] [jump_core.js]: a mutant jump_core can't be swapped in
 // (player.js imports it), so the mutation runs edit the file in place (scratchpad mutate script).
-function runArmed(name = 'aim_g_air', order = 'h_jp0_a h_jp1_a h_jp3_a h_jp4_a', after = null) {
+function runArmed(name = 'aim_g_air', order = 'h_jp0_a h_jp1_a h_jp3_a h_jp4_a', after = null, { state = false, from = 0 } = {}) {
   const file = path.join(OUT, 'aim', name + '.jsonl');
   if (!existsSync(file)) { console.log(`skip armed ${name}: no trace`); return; }
   ran++;
@@ -170,7 +170,7 @@ function runArmed(name = 'aim_g_air', order = 'h_jp0_a h_jp1_a h_jp3_a h_jp4_a',
     post() { sim.events.length = 0; },
   };
   let prevButtons = 0;
-  const S = { clip: 0, clipF: null, fr: 0, frF: null, b: 0, bF: null, o: 0, oF: null, n: 0, pos: 0 };
+  const S = { clip: 0, clipF: null, fr: 0, frF: null, b: 0, bF: null, o: 0, oF: null, n: 0, pos: 0, st: 0, stF: null };
   const seen = [];
   for (i = 0; i + 1 < R.length; i++) {
     const d = R[i], pad = d.pad_in;
@@ -179,6 +179,8 @@ function runArmed(name = 'aim_g_air', order = 'h_jp0_a h_jp1_a h_jp3_a h_jp4_a',
     ctrl.step({ x: 0, z: 0, stick: 0, run: false, keys: new Set(), pressed: new Set(), cross });
     const g = R[i + 1], gh = headOf(g), gp = g.matrix[3];
     const our = NAME[anim.head.key] ?? anim.head.key;
+    if (g.frame < from) continue;
+    if (state && ctrl.P.state !== stateOf(g)) { S.st++; S.stF ??= `${g.frame} ${ctrl.P.state} vs ${stateOf(g)}`; }
     if (!JUMPISH.test(gh.clip) && !JUMPISH.test(our)) continue;
     S.n++;
     if (seen[seen.length - 1] !== gh.clip) seen.push(gh.clip);
@@ -202,6 +204,7 @@ function runArmed(name = 'aim_g_air', order = 'h_jp0_a h_jp1_a h_jp3_a h_jp4_a',
   ok(S.b === 0, `${L}: head blend countdown off ${S.b}${S.bF ? ', first ' + S.bF : ''}`);
   ok(S.o === 0, `${L}: blend-out layer clip / frame off ${S.o}${S.oF ? ', first ' + S.oF : ''}`);
   ok(S.pos <= POS_TOL, `${L}: position max ${S.pos.toExponential(2)}`);
+  if (state) ok(S.st === 0, `${L}: player state off ${S.st}${S.stF ? ', first ' + S.stF : ''}`);
   if (after) return after(ctrl, L, shots);
   const air = ctrl.jump.events.filter(e => e.ev === 'airShot').map(e => e.frame);
   ok(shots >= 1 && air.length === 1 && air[0] === 48, `${L}: shots ${shots}, air-shot class entered on frames [${air}] (game: R1 f48 only; f60 fires nothing)`);
@@ -235,6 +238,106 @@ runArmed();
     ok(jumped.drawn && jumped.hs.length === 1 && jumped.hs[0] === 1 && jumped.st === 9 && jumped.bits === 1,
        `${k} falling after a take-off: fall restarted with h ${jumped.hs} (want 1), state ${jumped.st}`);
   }
+}
+// worker 0110: the motion-done events (FUN_00341af0 -> FUN_0056a038 case 0 -> state handler +0x1c ->
+// FUN_0055b8e0). A walk-off (hand-built: no ledge is reachable from the save state): the locomotion
+// class is done once the ground bit is clear, state 2's FUN_00537f38 gives 9, the old class's +0x24
+// (FUN_00537d58 case 9) gives the fall class 0x22; it lands through FUN_00538aa0 (2, or 3 with the
+// gun out: P+0x100 bit 44) and FUN_00538a30's landing class 0x21. Not while an action owns him.
+{
+  const JC = await import(new URL('./jump_core.js', import.meta.url).href);
+  ok(JC.stateEvent(2, 3, false, false) === 9 && JC.stateEvent(3, 8, false, true) === 9 &&
+     JC.stateEvent(2, 0x1e, false, false) === 0x10 && JC.stateEvent(2, 0x21, true, false) === 0 &&
+     JC.stateEvent(2, 0x1c, true, true) === 3,
+     'FUN_00537f38: ground clear -> 9 (0x1e / 0x3f -> 0x10); ground set: 0x1c / 0x1e / 0x3f -> 2 / 3, others 0');
+  ok(JC.stateEvent(8, 0x4e, false, false) === 0 && JC.stateEvent(9, 0x55, false, true) === 0 &&
+     JC.stateEvent(8, 0x4e, true, true) === 3 && JC.stateEvent(0x20, 0x59, false, false) === 2 &&
+     JC.stateEvent(9, 0x22, true, false) === 2,
+     'FUN_00538aa0: 0x55 / 0x4e airborne -> 0, else 2 (3 with bit 44); states 8 / 9 / 0x1f-0x21');
+  const r0 = load(path.join(OUT, 'j_stand.jsonl'))[1], p0 = r0.matrix[3];
+  for (const drawn of [false, true]) {
+    const c = new PlayerController(col, { pos: { x: p0[0], y: p0[1], z: p0[2] }, heading: 0 });
+    let feet = 0;
+    c.weapon = { drawn: () => drawn, enterFoot() { feet++; } };
+    c.P.state = drawn ? 3 : 2; c.onGround = false;
+    c.jump.motionUpdate(c, { action: true });
+    const owned = c.P.state;
+    c.jump.motionUpdate(c, {});
+    const s1 = c.P.state, m1 = c.jump.motion && c.jump.motion.id;
+    c.jump.motionUpdate(c, {});                         // the fall class's phase 0 (still airborne)
+    const s2 = c.P.state;
+    c.onGround = true;
+    c.jump.motionUpdate(c, {});                         // on the ground: done -> event 0x22
+    const s3 = c.P.state, m3 = c.jump.motion && c.jump.motion.id;
+    const L = drawn ? 'gun out' : 'gun away';
+    ok(owned === (drawn ? 3 : 2) && s1 === 9 && m1 === 0x22 && s2 === 9 && s3 === (drawn ? 3 : 2) && m3 === 0x21 && feet === 1,
+       `walk-off (${L}): owned ${owned}, ground lost -> state ${s1} motion ${m1 && m1.toString(16)}, landed -> state ${s3} motion ${m3 && m3.toString(16)}, enter ${feet}`);
+    // the landing class done while the ground bit is clear again: FUN_00537f38 -> 9, a new fall class
+    c.jump.motion.done = true; c.onGround = false;
+    c.jump.motion.update = () => [];
+    c.jump.motionUpdate(c, {});
+    ok(c.P.state === 9 && c.jump.motion && c.jump.motion.id === 0x22, `${L}: landing class done in the air -> state ${c.P.state}`);
+  }
+}
+// the ladder hand-over GUESS (player.js): a drop hands over in state 9; the action's own landing
+// (locomotion + done, ground bit set) gives state 2. A stub action in ladder.js's result shape.
+{
+  const r0 = load(path.join(OUT, 'j_stand.jsonl'))[1], p0 = r0.matrix[3];
+  const c = new PlayerController(col, { pos: { x: p0[0], y: p0[1], z: p0[2] }, heading: 0 });
+  let n = 0;
+  c.addAction({ name: 'ladder', canEnter: () => n === 0, enter: () => null, exit: () => {},
+                update: () => (++n === 1 ? { onGround: false } : c.onGround ? { locomotion: true, done: true } : { locomotion: true }) });
+  const idle = { x: 0, z: 0, keys: new Set(), pressed: new Set() };
+  c.step(idle);
+  const dropped = c.P.state;
+  for (let i = 0; i < 120 && c.active; i++) c.step(idle);
+  ok(dropped === 9 && !c.active && c.P.state === 2, `ladder stub: drop -> state ${dropped}, its landing -> state ${c.P.state}`);
+}
+// worker 0112: FUN_0055b8e0's motion half for the ground draw / holster (FUN_00537d58 case 3,
+// FUN_00538120 case 2; moving = C+0x1d8 != 0), and the ladder mount: FUN_0055b8e0(P, 0xb / 0xc)
+// sets the ladder's motion 0x26 / 0x27 (jumptable 0x589e70), so a running jump / fall class stops.
+{
+  const JC = await import(new URL('./jump_core.js', import.meta.url).href);
+  ok(JC.stateMotion(2, 3, false) === 5 && JC.stateMotion(2, 3, true) === 9 && JC.stateMotion(3, 2, false) === 3 &&
+     JC.stateMotion(3, 2, true) === 8 && JC.stateMotion(3, 9) === 0x22 && JC.stateMotion(9, 3) === 0x21,
+     'stateMotion: 2 -> 3: 5 / 9 moving; 3 -> 2: 3 / 8 moving; 2 / 3 -> 9: 0x22; air -> 2 / 3: 0x21');
+  const r0 = load(path.join(OUT, 'j_stand.jsonl'))[1], p0 = r0.matrix[3];
+  const c = new PlayerController(col, { pos: { x: p0[0], y: p0[1], z: p0[2] }, heading: 0 });
+  c.P.state = 9; c.jump.motion = new JC.FallMotion(0x20);
+  let n = 0;
+  c.addAction({ name: 'ladder', canEnter: () => n === 0, enter: () => null, exit: () => {},
+                update: () => (++n, {}) });
+  c.step({ x: 0, z: 0, keys: new Set(), pressed: new Set() });
+  ok(c.active && c.jump.motion === null && !c.jump.events.some(e => e.ev === 'land'),
+     `ladder mount: the running fall class stops (motion ${c.jump.motion && c.jump.motion.id})`);
+  // mount on the frame after landing (state 8, jump class not done yet): the game's mount state
+  // 0xb / 0xc isn't an air state, so he must not stay in 8 with no motion left (can't jump again)
+  const d = new PlayerController(col, { pos: { x: p0[0], y: p0[1], z: p0[2] }, heading: 0 });
+  const idle = { x: 0, z: 0, keys: new Set(), pressed: new Set() };
+  for (let i = 0; i < 5; i++) d.step(idle);
+  JC.enterState(d.P, 8); d.P.jumpBits = 1; d.jump.motion = new JC.JumpMotion(false);
+  let m = 0;
+  d.addAction({ name: 'ladder', canEnter: () => m === 0, enter: () => null, exit: () => {},
+                update: () => (++m < 3 ? {} : { locomotion: true, done: true }) });
+  for (let i = 0; i < 40; i++) d.step(idle);
+  const st = d.P.state, bits = d.P.jumpBits, again = d.jump.takeOff(d, true, {});
+  ok(st === 2 && bits === 0 && again === 8,
+     `ladder mount on the landing frame: state ${st}, bits ${bits}, jump -> ${again} after the ladder (want 2, 0, 8)`);
+}
+// worker 0112: a draw / holster on the ground during the landing: FUN_005766c0 -> FUN_0055b8e0(P, 3 / 2,
+// 0, 0), whose motion half (the old state's +0x24: FUN_00537d58 case 3 -> 5 / 9, FUN_00538120 case 2
+// -> 3 / 8) replaces the landing class 0x21 at once (jump_core Jump.enter). j_gun_land_holster:
+// gun out, lands f81 (state 3), circle f82 -> state 2 + h_st, h_jp4_a never plays. j_land_draw:
+// lands f51, h_jp4 from f52, R1 f58 -> state 3 + h_st_a. Clip and state checked on every frame.
+// (j_gun_land_holster is compared from f83, after the holster: no jump clip may show where the game
+// plays h_st. Before that the game holds h_jp1_a at 9.0 one frame longer than ClipClock's GUESS
+// queue rule (f61 vs f60), and the offset runs to the landing: a separate gap, notes/jump-research.md)
+for (const [n, order, f, st, next, from] of [['j_gun_land_holster', '', 82, 2, 3, 83],
+                                             ['j_land_draw', 'h_jp0 h_jp1 h_jp2 h_jp3 h_jp4', 58, 3, 5, 0]]) {
+  runArmed(n, order, (ctrl, L) => {
+    const ev = ctrl.jump.events.filter(e => e.ev === 'loco').map(e => `${e.frame}:${e.next}`);
+    ok(ev.length === 1 && ev[0] === `${f}:${next}`, `${L}: landing class replaced by the motion of FUN_0055b8e0(P, ${st}) on [${ev}] (game: f${f}, motion ${next})`);
+  }, { state: true, from });
 }
 runArmed('aim_j_draw_windup', 'h_jp0 h_jp3_a h_jp4_a', (ctrl, L) => {
   const ev = ctrl.jump.events.filter(e => e.ev === 'forceFall').map(e => e.frame);

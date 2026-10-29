@@ -131,14 +131,20 @@ re-take-off, the back-jump angle test, turn negation and apex margin.
   (the cloth? see cloth.json's h_jp windows).
 - The high jump (kind 1) and the cfg+0xc0 height: translated, never taken in z128.
 - The armed phases 4-7 and the landing's armed set: corrected and trace-checked by worker 0104 (below).
-- GUESS: state 9 (fall) / state 0x20 → second jump: their vt+0x24 (0x538bd8 / 0x53a478)
-  mapping to the motion id is not read; jump_core assumes FUN_00538a30's (0x1f → 0x20,
-  0x21 → 0x59).
-- GUESS: the jump motion's done flag is the event that sends state 8 → 2 (handlers decoded,
-  the event plumbing not; the frame agrees on all traces).
+- Decoded (worker 0110): state 9 / 0x1f's vt+0x24 (0x538bd8 / 0x538c80) is FUN_00538a30; 0x20 / 0x21's
+  (0x53a478 / 0x53a528) differ only for new state 0x21. The done flag is the event: FUN_00343160 ->
+  FUN_00341af0 -> FUN_00341988 -> FUN_0056a038 case 0 -> handler +0x1c (FUN_00538aa0 for all air
+  states) -> FUN_0055b8e0. See fidelity-audit.md "Player state changes from motion-done events".
 - GUESS: P+0x80 (the back jump's turn-round angle test) = the facing C+0x20 (equal in the
   save state; its writer isn't found). j_back passes with it.
 - GUESS: the motion player's hold / queue take-over rule (ClipClock), see Clips above.
+  Open (worker 0112): it is off by one frame for the gun-out standing jump: the game holds h_jp1_a
+  at 9.0 for two records (f59-60) and starts h_jp2_a at f61; the page starts it at f60, and the
+  offset runs to the landing (aim/j_gun_land_holster; test_jump_page compares that trace from f83).
+  Review: the game also holds h_jp2_a at 9.0 for two records (f75-76), so by f77 the page is 2
+  frames behind, not 1 (the same ClipClock queue GUESS at each queued phase). From f83 state,
+  position and blend match every frame.
+  The unarmed h_jp1 (j_land_draw, j_stand) matches. Not investigated.
 - c_wjp / c_bj / c_bwj: exported in the jump pack since worker 0104 (07703200; lengths equal
   the traces'). The second back jump (c_bwj) is not traced.
 - h_jp3's loop never wraps in these traces (6 frames of h_jp3 before landing); the loop flag

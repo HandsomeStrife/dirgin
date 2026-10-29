@@ -100,7 +100,7 @@ function runPage(name, R) {
   };
   const err = { eye: [0, 0], at: [0, 0], yaw: [0, 0], pitch: [0, 0], a220: [0, 0], pos: [0, 0] };
   const put = (k, v, f) => { if (v > err[k][0]) err[k] = [v, f]; };
-  let flagOff = 0, flagF = null, bitsOff = 0, bitsF = null, jOff = 0, jF = null, stateOff = 0, maxA = 0, n = 0;
+  let flagOff = 0, flagF = null, bitsOff = 0, bitsF = null, jOff = 0, jF = null, stateOff = 0, stateF = null, maxA = 0, n = 0;
   for (i = 0; i + 1 < R.length; i++) {
     const r = R[i], g = R[i + 1], pad = r.pad_in;
     const lx = padAxis(pad.lx - 128, pad.ly - 128), ly = padAxis(pad.ly - 128, pad.lx - 128);
@@ -120,11 +120,9 @@ function runPage(name, R) {
     // P+0x2a8 bit 0 (drawn) and bit 3 (drawn in the air: FUN_003320c0 l.288's R1 gate)
     if (g.p_2a8 !== undefined && (((ctrl.P.flags2a8 ?? 0) ^ g.p_2a8) & 9) !== 0) { bitsOff++; bitsF ??= g.frame; }
     // P+0x100 bits 46-47 (the take-off bits: jump_core enterState / startJump / weaponSwitch)
-    // compared where the page and the game agree on air / ground state (FUN_0055aa88): the page's
-    // GUESS 9 -> 2 landing (player.js moveTick) runs one frame before the game's (state 9 handler
-    // 0x538bd8 not decoded), and the bits follow the state change (FUN_0055b8e0)
-    if (airState(ctrl.P.state) !== airState(hex(g.p_state)[4])) stateOff++;
-    else if ((ctrl.P.jumpBits ?? 0) !== jbits(g)) { jOff++; jF ??= g.frame; }
+    // and the state byte P+0x104 itself (2 / 3 on foot by P+0x100 bit 44: jump_core stateEvent)
+    if (ctrl.P.state !== hex(g.p_state)[4]) { stateOff++; stateF ??= g.frame; if (process.env.STATE_DEBUG) console.log(name, g.frame, ctrl.P.state, hex(g.p_state)[4]); }
+    if ((ctrl.P.jumpBits ?? 0) !== jbits(g)) { jOff++; jF ??= g.frame; }
     maxA = Math.max(maxA, ga);
     if (process.env.CAM_DEBUG) console.log(g.frame, (cam.yaw - F(g.cam_170, 8)).toExponential(2), 'want', [ctrl.C.dir.x, ctrl.C.dir.z].map(v => v.toFixed(4)).join(','), (R[i + 1].want_dir_speed || []).slice(0, 3).filter((_, j) => j !== 1).map(v => v.toFixed(4)).join(','), 'gain', cam.gain.toFixed(3), hex(g.cam_170).readFloatLE(0x38).toFixed(3), ctrl.P.state, hex(g.p_state)[4], d3(cam.eye, V3(g.cam_60, 0x30)).toExponential(2), core.cam.a220.toFixed(4), ga.toFixed(4), (core.cam.flags >>> 24) & 1, (gfl >>> 24) & 1);
     n++;
@@ -133,9 +131,10 @@ function runPage(name, R) {
   if (flagOff) bad.push(`flag 0x1000000 off ${flagOff} (first f${flagF})`);
   if (bitsOff) bad.push(`P+0x2a8 bits 0/3 off ${bitsOff} (first f${bitsF})`);
   if (jOff) bad.push(`P+0x100 bits 46-47 off ${jOff} (first f${jF})`);
+  if (stateOff) bad.push(`P+0x104 state off ${stateOff} (first f${stateF})`);
   console.log(name.padEnd(14), 'page ', `frames ${n} (CAM+0x220 max ${maxA.toFixed(3)})  ` +
               Object.keys(err).map(k => `${k} ${err[k][0].toExponential(1)} (f${err[k][1]})`).join('  ') +
-              (stateOff ? `  air/ground state off ${stateOff}` : '') + (bad.length ? '  FAIL ' + bad.join(',') : '  ok'));
+              (bad.length ? '  FAIL ' + bad.join(',') : '  ok'));
   return bad.length ? 1 : 0;
 }
 if (process.env.CAM_ONLY) CASES.splice(0, CASES.length, ...process.env.CAM_ONLY.split(',').map(x => x.split(':')));

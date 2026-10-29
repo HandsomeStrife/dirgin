@@ -1,0 +1,2 @@
+{"name": "j_gun_land_holster", "frames": 120, "doc": "worker 0112: gun out (R1 10-12), standing jump cross 40-44, holster (circle) 82-84 while the landing motion 0x21 runs: FUN_0055b8e0(P, 2, 0, 0) -> FUN_00538120 case 2 (TRACE_FIELDSET=aim; out/aim)",
+ "events": [{"from": 10, "to": 12, "buttons": ["r1"]}, {"from": 40, "to": 44, "buttons": ["cross"]}, {"from": 82, "to": 84, "buttons": ["circle"]}]}

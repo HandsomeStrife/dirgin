@@ -77,6 +77,50 @@ export function enterState(P, st) {
   if (!airState(st)) P.jumpBits = 0;                      // FUN_0055b8e0: FUN_00565df8(P, 0)
 }
 
+// ---------------------------------------------------------------- 0. motion-done events
+// When the character's motion class sets its done flag (class +8 bit 0), FUN_00343160 (once per
+// class: C+0x564 bit 0x20) calls FUN_00341af0: event = the class's motion id (+0x70), sent by
+// FUN_00341988(C, 0, &ev) to the player's message slot FUN_0056a038 (P vtable 0x58dff8 +0x1dc),
+// case 0 (0x56a088): new = the current state class's +0x1c handler (FUN_0055b8c0: the state table
+// FUN_00537628) (P, ev); P+0x118 bit 0x10000 -> FUN_0055b8e0(P, 0, 1, 0) instead (clear in the save
+// state, 0x20209: not ported); new != 0 -> FUN_0055b8e0(P, new, 0, 0), and FUN_00343160 drops the
+// class's own next motion. Returns the new state, or 0 (no change).
+// The handlers on the page (state vtables 0x58ae60 / 0x58ae30 / 0x58ad10 / 0x58ace0, slot +0x1c).
+// b44 = P+0x100 bit 44, written with C+0x590 bit 24 (the gun out) by FUN_00565d78.
+//  states 2 / 3: FUN_00537f38. The save state's P+0x28 = 0x20901f (bit 0x20 clear: both "player"
+//   branches taken) and C+0x1c0 bit 0x400000 is clear in z128, so: ground bit 0x200 set: events
+//   0x1c / 0x1e / 0x3f -> 2 (3 with b44), others 0 (0x36 / 0x37 have side effects: not on the page);
+//   clear: 0x1e / 0x3f -> 0x10, others -> 9.
+//  states 8 / 9 / 0x1f / 0x20 / 0x21 (vtables 0x58ad10 / 0x58ace0 / 0x58acb0 / 0x58ac80 / 0x58ac50):
+//   FUN_00538aa0. P+0x17c's +0x20 = 0x30c in the save (FUN_00316cf8 false: no state 7),
+//   so: events 0x55 / 0x4e while airborne -> 0, else 2 (3 with b44).
+// Other states: null (handler not on the page).
+export function stateEvent(st, ev, ground, b44) {
+  if (st === 2 || st === 3) {
+    if (ground) return (ev === 0x1c || ev === 0x1e || ev === 0x3f) ? (b44 ? 3 : 2) : 0;
+    return (ev === 0x1e || ev === 0x3f) ? 0x10 : 9;
+  }
+  if (st === ST.JUMP || st === ST.FALL || st === ST.JUMP2 || st === ST.BACK || st === ST.BACK2) {
+    if ((ev === 0x55 || ev === 0x4e) && !ground) return 0;
+    return b44 ? 3 : 2;
+  }
+  return null;
+}
+
+// FUN_0055b8e0(P, new, 0, 0)'s motion: the OLD state class's +0x24 slot (P, new). From 8 / 9 / 0x1f
+// (FUN_00538a30) and 0x20 / 0x21 (FUN_0053a478 / FUN_0053a528, which differ only for new state
+// 0x21): 2 / 3 -> 0x21 (landing). From 2 (FUN_00537d58): 3 -> 5 (armed stand), 9 (armed walk) when
+// moving; 9 -> 0x22 (fall). From 3 (FUN_00538120): 2 -> 3 (stand), 8 (walk) when moving; 9 -> 0x22.
+// moving: C+0x1d8 != 0 (the ground speed). Others: null (not on the page).
+export function stateMotion(old, st, moving = false) {
+  if ((old === ST.JUMP || old === ST.FALL || old === ST.JUMP2 || old === ST.BACK || old === ST.BACK2)
+      && (st === 2 || st === 3)) return 0x21;
+  if (old === 2 && st === 3) return moving ? 9 : 5;
+  if (old === 3 && st === 2) return moving ? 8 : 3;
+  if ((old === 2 || old === 3) && st === ST.FALL) return 0x22;
+  return null;
+}
+
 // ---------------------------------------------------------------- 1. the gate
 // FUN_00575698: may a jump start from the current motion state? (also the second jump)
 //   motionId = *(C+2000)+0x70: 0x20 jump, 0x22 fall, 0x59 back jump; standing/walking is 3/8.
@@ -344,8 +388,8 @@ export class BackJumpMotion extends JumpMotion {
 // still on the ground) a draw goes to state 9 without a restart. FUN_0055bb40 (states 0x80-0xbf)
 // is 0 in the states the page draws from. Returns the new player state, or null (holster in
 // states 0x1f / 0x20 / 0x21: no change); the ground states are returned, not written (the caller's).
-// Not ported: FUN_00565d78 (P+0x100 bit 44, C+0x590 bit 24, no reader on the page), the state-4/5
-// choice by P+0x100 bits 40-41 (0 traced).
+// Not ported: FUN_00565d78 (P+0x100 bit 44, C+0x590 bit 24; the page reads the drawn gun instead:
+// Jump.event's b44), the state-4/5 choice by P+0x100 bits 40-41 (0 traced).
 export function weaponSwitch(ctrl, on) {
   const P = ctrl.P;
   const took = (P.jumpBits ?? 0) !== 0;                   // (P+0x100 >> 0x2e & 3) != 0
@@ -357,7 +401,13 @@ export function weaponSwitch(ctrl, on) {
     if (((ctrl.C.flags79c ?? 0) & 0x20) && Math.abs(f32(B.rise - B.t)) < 0.1) h = 0;
     ctrl.startFall(h);
   }
-  if (!took && ctrl.onGround) return on ? 3 : 2;          // FUN_0055b8e0(P, 3 / 2, 0, 0) (LAB_00576930)
+  if (!took && ctrl.onGround) {                           // FUN_0055b8e0(P, 3 / 2, 0, 0) (LAB_00576930)
+    // with its motion: a draw / holster during the landing cuts to the (armed) stand / walk at once
+    // (traced: j_land_draw f58, j_gun_land_holster f82)
+    if (ctrl.jump) ctrl.jump.enter(ctrl, on ? 3 : 2);
+    else enterState(P, on ? 3 : 2);
+    return on ? 3 : 2;
+  }
   if (!on) {
     const st = P.state;
     if (st === ST.JUMP2 || st === ST.BACK || st === ST.BACK2) return null;   // ' ', '!', 0x1f
@@ -539,6 +589,61 @@ export class ClipClock {
 // pieces (takeOff, stickMode, motionUpdate, advance) between its own steps.
 export class Jump {
   constructor() { this.motion = null; this.clock = null; this.events = []; this.head = false; }
+  // FUN_0055b8e0(P, st, 0, 0): the old state's motion for the new state (stateMotion), the state
+  // change, then FUN_005641c0(P, motion, 0): FUN_00341780(C, motion, 0) unless it is already the
+  // motion. Same state: no change (returns false). The locomotion motions (3 / 5 / 8 / 9) have no
+  // class on the page: motion null hands the head layer back to the locomotion clips this frame.
+  // The new state's enter slot (+0xc) is the caller's (event below; aim_core draw / holster).
+  enter(ctrl, st) {
+    const P = ctrl.P, old = P.state;
+    if (st === old) return false;
+    const prev = this.motionId(ctrl);
+    const m = stateMotion(old, st, ctrl.C.groundSpeed !== 0);   // C+0x1d8
+    enterState(P, st);
+    if (m === 0x21) {
+      this.motion = new LandMotion();
+      this.events.push({ frame: ctrl.frames, ev: 'land', state: st });
+    } else if (m === 0x22) {
+      this.motion = new FallMotion(prev);                 // runs from the next frame
+      this.events.push({ frame: ctrl.frames, ev: 'fall' });
+    } else if (m === 3 || m === 5 || m === 8 || m === 9) {
+      if (this.motion) this.events.push({ frame: ctrl.frames, ev: 'loco', next: m });
+      this.motion = null;
+    }
+    return true;
+  }
+
+  // the ladder mount (FUN_00576c88 / FUN_00576de8): FUN_0055b8e0(P, 0xb / 0xc, 0, 0). Every old
+  // state's +0x24 slot on the page falls to FUN_00537aa0 for 0xb / 0xc: jumptable 0x589e70 ->
+  // 0x537b44 / 0x537b4c, li v0, 0x26 / 0x27: the ladder's motion class, which FUN_005641c0 sets in
+  // place of the running one. So a jump / fall / landing motion stops at the mount (the page's
+  // ladder owns the clips). The ladder state itself stays with player.js's ladder GUESS.
+  ladderMount(ctrl) {
+    if (this.motion) this.events.push({ frame: ctrl.frames, ev: 'ladder' });
+    this.motion = null;
+    // The game's mount enters 0xb / 0xc, not an air state, so FUN_0055b8e0 clears the take-off
+    // bits. GUESS: the page keeps no ladder state (player.js ladder GUESS), so a mount on the
+    // frame after landing (state 8 / 0x1f / 0x20, done event not sent yet) goes to 2 instead;
+    // without it he stays in an air state on the ground with no motion left to land him, and
+    // can't jump (see notes/fidelity-audit.md, ladder rows).
+    if (airState(ctrl.P.state)) enterState(ctrl.P, 2);
+  }
+
+  // FUN_0056a038 case 0 for one done event: the state handler, then FUN_0055b8e0(P, new, 0, 0)
+  // (enter above). Returns the new state or 0.
+  event(ctrl, ev) {
+    const P = ctrl.P, old = P.state;
+    const b44 = !!(ctrl.weapon && ctrl.weapon.drawn && ctrl.weapon.drawn());   // P+0x100 bit 44
+    const st = stateEvent(old, ev, ctrl.onGround, b44);
+    if (!st || !this.enter(ctrl, st)) return 0;
+    if (st === 2 || st === 3) {
+      // the enter slot (+0xc) of state 2 / 3, FUN_00537e70 / FUN_005380a0: FUN_0032a0f8(CAM, 0, 0)
+      // (traced: cam_j_gun f82)
+      if (ctrl.weapon) ctrl.weapon.enterFoot();
+    }
+    return st;
+  }
+
   motionId(ctrl) {
     if (this.motion) return this.motion.id;
     return ctrl.P.state === ST.FALL ? 0x22 : 3;
@@ -580,27 +685,26 @@ export class Jump {
       if (opts.usable) io.usable = opts.usable;
       const out = this.motion.update(io);
       reqs.push(...out);
-      if (this.motion instanceof AirFireMotion && this.motion.done) {
-        // the class returns 0x22 with its done flag: the fall class runs from the next frame (aim_g:
-        // FUN_00599820's FUN_005ae618(MP, 2) shows at f49). FUN_00538aa0 (state 8) answers the done
-        // event with 0 (no state change) while airborne.
-        // GUESS: the dispatcher that reads the return value isn't decoded (the trace agrees); in
-        // state 9 the same (its handler 0x538bd8 isn't read; see notes/jump-research.md)
-        this.motion = new FallMotion(0x4e);
-      } else if ((this.motion instanceof JumpMotion || this.motion instanceof FallMotion) && this.motion.done) {
-        // done -> event -> FUN_00538aa0: state 2 (3 with P+0x100 bit 44); FUN_00538a30: motion 0x21
-        // GUESS: that the done flag is what raises the event, on this frame (not decoded; the
-        // traces agree to the frame; see notes/jump-research.md)
-        enterState(ctrl.P, ST.FOOT);
-        // entering state 2 / 3 runs its vtable +0xc slot, FUN_00537e70 / FUN_005380a0 (state table
-        // FUN_00537628: vtables 0x58ae60 / 0x58ae30): FUN_0032a0f8(CAM, 0, 0) (traced: cam_j_gun f82)
-        if (ctrl.weapon) ctrl.weapon.enterFoot();
-        this.motion = new LandMotion();
-        this.events.push({ frame: ctrl.frames, ev: 'land' });
-      } else if (this.motion instanceof LandMotion && this.motion.done) {
-        this.events.push({ frame: ctrl.frames, ev: 'loco', next: this.motion.next });
-        this.motion = null;                               // back to the locomotion clips
+      if (this.motion.done) {
+        // the done flag sends the class's id to the state handler (FUN_00341af0, stateEvent above)
+        const m = this.motion, st = this.event(ctrl, m.id);
+        if (st) {
+          // the state changed: FUN_00343160 drops the class's own next motion (lVar13 = 0)
+        } else if (m instanceof AirFireMotion) {
+          // FUN_00538aa0 answers 0x4e with 0 while airborne; the class returns 0x22: the fall class
+          // runs from the next frame (aim_g: FUN_00599820's FUN_005ae618(MP, 2) shows at f49)
+          this.motion = new FallMotion(0x4e);
+        } else if (m instanceof LandMotion) {
+          this.events.push({ frame: ctrl.frames, ev: 'loco', next: m.next });
+          this.motion = null;                             // back to the locomotion clips (class 3 / 6 / 8 / 9)
+        }
       }
+    } else if (!opts.action && onFoot(ctrl.P.state) && !ctrl.onGround) {
+      // the locomotion classes (stand 3 FUN_00593e70, armed stand 6 FUN_00594978, walk / run 8 / 9
+      // FUN_00594f98) set their done flag when C+0x1c0 bit 0x200 is clear: a walk-off or drop.
+      // (The stand class tests it from its second frame, phase 1; the page has no locomotion
+      // classes, so it tests every frame: different only when the ground goes on a stand's first frame.)
+      this.event(ctrl, this.motionId(ctrl));
     }
     if (reqs.length) { if (!this.clock) this.clock = new ClipClock(); this.clock.apply(reqs); }
     return reqs;
