@@ -689,8 +689,10 @@ export class SpeedAnimator {
     this.actions.idle.play();
     this.rate = 0.5;                              // MP+0x40c
     // game clip state: head layer (key, frame) and the blend-out layer
-    this.head = { key: 'idle', frame: 0, prevFrame: 0 };
-    this.out = null;                              // { key, frame, prevFrame }
+    // loop = the layer's play flag +0x1e bit 0 (FUN_005aa2a8: set = wrap to 0 at n, clear = hold n - 1);
+    // the table clips play looped (traced lflags 0x87), the jump clips per request (h_jp4: 6)
+    this.head = { key: 'idle', frame: 0, prevFrame: 0, loop: true };
+    this.out = null;                              // { key, frame, prevFrame, loop }
     this.blend = { len: 0, rem: 0, w: 1 };        // layer +0x24 remaining, MP+0x408
     this.installed = false;                       // C+0x658 > 0 (table installed)
     this.cur = -1;                                // C+0x659: current table index
@@ -714,7 +716,11 @@ export class SpeedAnimator {
     const a = this.mixer.clipAction(clip);
     a.setLoop(THREE.LoopRepeat, Infinity);
     a.timeScale = 0;
-    this.actions[key] = a; this.names[key] = key; this.frames[key] = Math.round(clip.duration * 60);
+    // the clip's own frame count (pack metadata `frames`): a one-shot has keys 0..n-1 and no
+    // closing key, so its glb duration is (n - 1)/60 (h_jp4: 14 vs the game's 15, which made the
+    // blend-out layer wrap one frame early)
+    this.actions[key] = a; this.names[key] = key;
+    this.frames[key] = this.clipFrames?.get(key) ?? Math.round(clip.duration * 60);
     return true;
   }
 
@@ -746,8 +752,8 @@ export class SpeedAnimator {
   // Blends over C+0x591 + 1 like a table switch; ends (FUN_003460d8) on the last frame.
   playRequest(key) {
     if (!this.ensure(key)) return false;
-    this.out = { key: this.head.key, frame: this.head.frame, prevFrame: this.head.frame };
-    this.head = { key, frame: 0, prevFrame: 0 };
+    this.out = { key: this.head.key, frame: this.head.frame, prevFrame: this.head.frame, loop: this.head.loop !== false };
+    this.head = { key, frame: 0, prevFrame: 0, loop: false };
     this.blend = { len: GAME.blendFrames + 1, rem: GAME.blendFrames + 1, w: 0 };
     this.request = { key, ended: false };
     this.current = key;
@@ -755,7 +761,17 @@ export class SpeedAnimator {
   }
   clearRequest() { if (this.request) { this.request = null; this.cur = -1; } }
 
-  addClips(clips) { for (const c of clips) if (!this.library.has(c.name)) this.library.set(c.name, c); }
+  // meta: the pack's clips table (vincent_<pack>.json `clips`, { name: { frames } })
+  addClips(clips, meta = null) {
+    this.clipFrames ??= new Map();
+    if (meta === null && clips.length) console.warn('clip pack has no clips table (old export? re-run export_web_vincent.py --pack): one-shot clips will end one frame early');
+    for (const c of clips) {
+      if (this.library.has(c.name)) continue;
+      this.library.set(c.name, c);
+      const n = meta?.[c.name]?.frames;
+      if (Number.isInteger(n) && n > 0) this.clipFrames.set(c.name, n);
+    }
+  }
   has(name) { return this.library.has(name); }
   duration(name) { const c = this.library.get(name); return c ? c.duration : 0; }
   clipName() { return this.override ? this.override.name : this.names[this.current]; }
@@ -867,20 +883,26 @@ export class SpeedAnimator {
     if (this.drawHook) this.drawHook();
     // FUN_005aa5b8 -> FUN_005aa2a8 on the head layer and the blend-out layer
     const req = this.request;
-    const adv = L => {
-      L.prevFrame = L.frame;
-      L.frame = f32(L.frame + f32(f32(rate * 1.0) * step));   // weight byte 128 / 128
-      const n = this.frames[L.key];
-      if (req && L === this.head && L.key === req.key) {      // one-shot: hold n - 1
-        if (L.frame >= n - 1) { L.frame = n - 1; req.ended = true; }
-      } else if (L.frame >= n) { L.frame = 0; L.prevFrame = 0; }   // loop: reset to 0
-    };
-    adv(this.head);
+    const end = this.advLayer(this.head, rate, step);
+    if (req && this.head.key === req.key && end) req.ended = true;   // one-shot: holds n - 1
     if (blending) {
-      adv(this.out);
+      this.advLayer(this.out, rate, step);
       b.rem = f32(b.rem - step);
       if (b.rem <= 0) b.rem = 0;
     }
+  }
+
+  // FUN_005aa2a8 on one layer: frame += rate x weight/128 x step; a looped layer (+0x1e bit 0)
+  // resets to 0 at n, any other holds n - 1 (traced: j_stand f78-89, the blend-out h_jp4 stays
+  // at 14.0 while h_st blends in). Returns 1 at the end, like the game.
+  advLayer(L, rate, step) {
+    L.prevFrame = L.frame;
+    L.frame = f32(L.frame + f32(f32(rate * 1.0) * step));   // weight byte 128 / 128
+    const n = this.frames[L.key];
+    if (L.loop === false) {
+      if (n - 1 <= L.frame) { L.frame = n - 1; return 1; }
+    } else if (n <= L.frame) { L.frame = 0; L.prevFrame = 0; return 1; }
+    return 0;
   }
 
   // the jump's motion states own the head layer (jump_core.js FUN_00598f50 / FUN_00599aa0): its
@@ -899,9 +921,9 @@ export class SpeedAnimator {
         // containers) keeps the current head pose; the clock still times it (notes/fidelity-audit.md "Jump")
         if (!this.ensure(clock.clip)) return;
         const len = clock.blend > 0 ? clock.blend + 1 : 0;
-        this.out = len ? { key: this.head.key, frame: this.head.frame, prevFrame: this.head.frame } : null;
+        this.out = len ? { key: this.head.key, frame: this.head.frame, prevFrame: this.head.frame, loop: this.head.loop !== false } : null;
         this.blend = { len, rem: len, w: len ? 0 : 1 };
-        this.head = { key: clock.clip, frame: clock.frame, prevFrame: clock.frame };
+        this.head = { key: clock.clip, frame: clock.frame, prevFrame: clock.frame, loop: !!clock.loop };
         this.current = clock.clip;
       } else if (this.head.key === clock.clip) {
         this.head.prevFrame = this.head.frame; this.head.frame = clock.frame;
@@ -913,15 +935,16 @@ export class SpeedAnimator {
     else { b.w = 1; this.out = null; }
     if (this.drawHook) this.drawHook();
     if (blending) {
-      const L = this.out, n = this.frames[L.key];
-      L.prevFrame = L.frame;
-      L.frame = f32(L.frame + f32(f32(this.rate * 1.0) * step));
-      if (L.frame >= n) { L.frame = 0; L.prevFrame = 0; }
+      this.advLayer(this.out, this.rate, step);
       b.rem = f32(b.rem - step);
       if (b.rem <= 0) b.rem = 0;
     }
-    const before = this.head.frame;
+    const before = this.head.frame, serial = clock.serial;
     ctrl.jumpAdvance();                           // FUN_005aa5b8 on the head layer
+    // a queued clip took over: FUN_005aa2a8 returned 1 with the old (non-looped) layer held at
+    // n - 1, then FUN_005aa5b8 stepped to the queued layer (traced: j_double f65, c_wjp2 8.0 blending out)
+    if (clock.serial !== serial && this.head.loop === false && this.frames[this.head.key] !== undefined)
+      this.head.frame = this.frames[this.head.key] - 1;
     take();                                       // a queued clip taking over (frame 0) or the next frame
     if (this.head.frame < before) this.head.prevFrame = this.head.frame;   // loop wrap: no interpolation back
   }
@@ -933,8 +956,8 @@ export class SpeedAnimator {
     let frame = 0;
     if (!first) frame = Math.min(Math.max(this.head.frame * 2, 0), this.frames[key] * 2 - 1) * 0.5;  // FUN_005a8fd0
     const len = (idx === 0 && !first ? GAME.blendToIdle : GAME.blendFrames) + 1;
-    this.out = { key: prevKey, frame: this.head.frame, prevFrame: this.head.frame };
-    this.head = { key, frame, prevFrame: frame };
+    this.out = { key: prevKey, frame: this.head.frame, prevFrame: this.head.frame, loop: this.head.loop !== false };
+    this.head = { key, frame, prevFrame: frame, loop: true };
     this.blend = { len, rem: len, w: 0 };
     this.cur = idx;
     this.current = key;

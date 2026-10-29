@@ -191,3 +191,10 @@ jump_core's `Jump.frame(ctrl, input, cross, opts)` is the reference order. In
 6. player.js's GUESS state switch in `moveTick` (2 ↔ 9) leaves 8 / 0x1f alone, which is right;
    keep it.
 7. Keyboard: Space is already ✕ for the ladder (ladder.js `KEY`); the jump uses the same key.
+
+## Landing hand-back (worker 0103)
+FUN_005aa2a8: `frame += rate x weight/128 x step`; if layer +0x1e bit 0 (loop): reset to 0 at n,
+return 1; else clamp to n - 1, return 1. FUN_005aa5b8 advances the blend-out layer (MP+0x44a =
+head - 1) with the same function, so a non-looped clip blending out stays on its last frame.
+Traced j_stand f78-88: out h_jp4 14.0 (lflags 6) while h_st blends in over 11. Page fixed in
+player.js advLayer; one-shot pack clips use the pack's `frames` (glb duration is (n - 1)/60).

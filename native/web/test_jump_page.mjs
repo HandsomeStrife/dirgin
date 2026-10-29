@@ -31,6 +31,9 @@ let fail = 0, ran = 0;
 const ok = (c, m) => { console.log((c ? 'ok   ' : 'FAIL ') + m); if (!c) fail++; };
 const load = p => readFileSync(p, 'utf8').trim().split('\n').map(l => JSON.parse(l));
 const headOf = d => { const h = Buffer.from(d.mp_head, 'hex'); return d.mp_layers[h[8] & 7]; };
+// the blend-out layer FUN_005aa5b8 poses under the head (MP+0x44a = head index - 1) while the head's
+// countdown +0x24 is running
+const outOf = d => { const h = Buffer.from(d.mp_head, 'hex'); return d.mp_layers[(h[8] - 1) & 7]; };
 const stateOf = d => Buffer.from(d.p_state, 'hex')[4];
 const groundOf = d => (d.mflags >> 9) & 1;
 const KEY = { h_st: 'idle', h_wk: 'walk', h_rn: 'run' }, NAME = { idle: 'h_st', walk: 'h_wk', run: 'h_rn' };
@@ -60,7 +63,7 @@ function run(name, { state = true, clips = true, dir = OUT } = {}) {
   const anim = stubAnim(headOf(r0));
   ctrl.attach({ anim });
   let prevButtons = 0, inJump = false;
-  const S = { pos: 0, posF: null, posAll: 0, st: 0, stF: null, gnd: 0, gndF: null, clip: 0, clipF: null, fr: 0, frF: null, w: 0, wF: null, wn: 0, fc: 0, fcF: null, b: 0, bF: null, bn: 0, n: 0 };
+  const S = { pos: 0, posF: null, posAll: 0, st: 0, stF: null, gnd: 0, gndF: null, clip: 0, clipF: null, fr: 0, frF: null, w: 0, wF: null, wn: 0, fc: 0, fcF: null, b: 0, bF: null, bn: 0, o: 0, oF: null, on: 0, n: 0 };
   for (let i = 0; i + 1 < R.length; i++) {
     const d = R[i], pad = d.pad_in;
     // aim traces log no camera matrix: only usable while the stick is centred (aim_g)
@@ -92,6 +95,14 @@ function run(name, { state = true, clips = true, dir = OUT } = {}) {
       const rem = anim.out ? anim.blend.rem : 0;
       if (Math.abs(rem - gh.blend_len) > 1e-3) { S.b++; S.bF ??= `${g.frame} ${rem.toFixed(2)} vs ${gh.blend_len.toFixed(2)}`; }
     }
+    // what the pose blends FROM: the blend-out layer's clip and frame (Dan's standing-jump flicker:
+    // the page looped h_jp4 back to its frame 0 under the h_st blend; the game holds 14.0)
+    if (gh.blend_len > 0) {
+      S.on++;
+      const go = outOf(g), oo = anim.out;
+      const oc = oo ? (NAME[oo.key] ?? oo.key) : null;
+      if (oc !== go.clip || Math.abs(oo.frame - go.frame) > FRAME_TOL) { S.o++; S.oF ??= `${g.frame} ${oc} ${oo?.frame.toFixed(2)} vs ${go.clip} ${go.frame.toFixed(2)}`; }
+    }
     if (!g.mp_rate) continue;                       // jump field set: no MP+0x408
     const gw = Buffer.from(g.mp_rate, 'hex').readFloatLE(8), ow = anim.out ? anim.blend.w : 1;
     if ((JUMPISH.test(gh.clip) || (anim.out && JUMPISH.test(anim.out.key))) && Math.abs(ow - gw) > 1e-3 && S.wF === null) S.wF = `${g.frame} ${ow.toFixed(3)} vs ${gw.toFixed(3)}`;
@@ -105,6 +116,7 @@ function run(name, { state = true, clips = true, dir = OUT } = {}) {
   if (clips) ok(S.clip === 0, `${L}: head clip off ${S.clip}${S.clipF ? ', first ' + S.clipF : ''}`);
   if (clips) ok(S.fr === 0, `${L}: head clip frame off ${S.fr}${S.frF ? ', first ' + S.frF : ''}`);
   if (clips) ok(S.b === 0, `${L}: head blend countdown off ${S.b} of ${S.bn}${S.bF ? ', first ' + S.bF : ''}`);
+  if (clips) ok(S.o === 0, `${L}: blend-out layer clip / frame off ${S.o} of ${S.on}${S.oF ? ', first ' + S.oF : ''}`);
   if (S.wn && clips) ok(S.w <= 1e-3, `${L}: blend weight MP+0x408 (jump clips / hand-back, ${S.wn} frames) max err ${S.w.toExponential(2)}${S.wF ? ', first ' + S.wF : ''}`);
   else if (clips) console.log(`--   ${L}: no MP+0x408 in this field set`);
 }
@@ -150,4 +162,21 @@ run('aim_g_air', { state: false, clips: false, dir: path.join(OUT, 'aim') });
   ok(!canJump(c, 3, { pressed: true, inputLock: 2 }) && !canJump(c, 3, { pressed: true, weaponBlock: true }), 'gate: input lock / weapon block close it');
 }
 ok(ran > 0, `traces replayed: ${ran}`);
+// the page's frame counts for the pack clips (SpeedAnimator.ensure via addClips + the pack's
+// `clips` table): a one-shot's glb duration is (n - 1)/60, the hold / wrap need the game's n
+{
+  const side = path.join(here, 'data/vincent/vincent_jump.json');
+  if (!existsSync(side)) console.log('skip pack frame counts: no data/vincent/vincent_jump.json');
+  else {
+    const meta = JSON.parse(readFileSync(side, 'utf8')).clips;
+    const anim = Object.create(SpeedAnimator.prototype);
+    Object.assign(anim, { mixer: { clipAction: () => ({ setLoop() {} }) }, actions: {}, names: {}, frames: {}, library: new Map() });
+    // the glb's durations: keys 0..n-1 for a one-shot (export_web_vincent.py keys_note)
+    anim.addClips(Object.entries(meta).map(([name, c]) => ({ name, duration: c.duration_s })), meta);
+    for (const k of ['h_jp0', 'h_jp1', 'h_jp2', 'h_jp3', 'h_jp4']) {
+      anim.ensure(k);
+      ok(anim.frames[k] === CLIP_FRAMES[k], `pack frame count ${k}: ${anim.frames[k]} (game ${CLIP_FRAMES[k]})`);
+    }
+  }
+}
 process.exit(fail ? 1 : 0);

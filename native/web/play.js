@@ -469,7 +469,7 @@ async function loadPacks(names, anim, motions) {
           catch (e) { console.warn(`clip pack ${n}: ${e.message}: mixer pose`); }
         }
       } else if (!side.local_pose) console.warn(`clip pack ${n}: no local_pose (old export): mixer pose`);
-      anim.addClips(g.animations);
+      anim.addClips(g.animations, side.clips);
       Object.assign(motions, side.clips || {});
       got.push(`${n} (${g.animations.length})`);
     } catch (e) {
@@ -594,7 +594,11 @@ async function main() {
     for (const a of await loadActions()) { ctrl.addAction(a.action); if (a.help) actionHelp.push(a.help); }
   }
   let packsLoaded = [];
-  const packsReady = loadPacks(PACKS, anim, motions).then(g => { packsLoaded = g; return g; });
+  // the game frame waits for the packs: the game never runs a level before its motion data is in
+  // memory. Without this a ✕ pressed while the jump pack was still downloading played the whole
+  // jump on a frozen idle pose (jumpFrame keeps the head when the clip is missing).
+  let packsDone = false;
+  const packsReady = loadPacks(PACKS, anim, motions).then(g => { packsLoaded = g; packsDone = true; return g; });
   // the weapon (aim.js): FUN_00579570 in ctrl.step, the camera's weapon views (follow.weapon), the
   // reticle in the frame (output.hud). isFrozen: the report freeze (declared below; false until then)
   const weapon = AIM ? await setupAim({ ctrl, anim, motions, col, follow, output, vin, canvas,
@@ -720,6 +724,7 @@ async function main() {
     requestAnimationFrame(frame);
     const dt = frozen ? 0 : Math.min(clock.getDelta(), 8 * TICK);   // GUESS: same cap as below (port convenience)
     acc += dt;
+    if (!packsDone) { acc = 0; pressed.clear(); }   // clip packs still loading: draw only, no game frame
     let n = 0;
     while (acc >= TICK && n < 8) {
       // the camera runs first in the game frame: it follows the player as the last frame
@@ -756,7 +761,7 @@ async function main() {
     frames++; fpsAcc += dt;
     if (fpsAcc >= 0.5) { fps = frames / fpsAcc; frames = 0; fpsAcc = 0; }
     const p = ctrl.pos;
-    hud.textContent = `${fps.toFixed(0)} fps   collision: ${colName}\n` +
+    hud.textContent = `${fps.toFixed(0)} fps   collision: ${colName}${packsDone ? '' : '   loading clips…'}\n` +
       `pos  ${p.x.toFixed(2)}, ${p.y.toFixed(2)}, ${p.z.toFixed(2)}\n` +
       `clip ${anim.override ? 'action' : anim.current} (${anim.clipName()}) x${anim.rate.toFixed(2)}` +
       `${ctrl.active ? '   action ' + ctrl.active.name : ''}` +
