@@ -165,8 +165,11 @@ def body_skin(buf, NB, sk):
             l = l[:4]; tot = sum(w for w, _ in l)
             for k, (w, b) in enumerate(l): J4[base + s, k] = b; W4[base + s, k] = w / tot
     J4[J4 < 0] = 0
-    Nn = np.asarray(N, float); ln = np.linalg.norm(Nn, axis=1, keepdims=True); ln[ln < 1e-9] = 1
-    return np.asarray(V, float), Nn / ln, J4, W4, tris, st
+    # Normals kept as the game sums them: w x bone x int8/128 (FUN_005b1190 / VU0 0x120,
+    # vf31.y = 32 on ITOF12), NOT normalised (|N| 0.980-0.992 on p000). Program D lights with
+    # that length, and three.js's skinning keeps it (play.js LIGHT_VS uses objectNormal as is).
+    # Was normalised: hero dump 163235, page hair/body vertex colours +1..+5 levels too bright.
+    return np.asarray(V, float), np.asarray(N, float), J4, W4, tris, st
 
 
 _CLIPS = {}
@@ -461,9 +464,9 @@ def export(dump, out, mutate_parents=False, clip_spec=None, sets=DEFAULT_SETS, p
         idx = np.arange(s0 * 3, (s0 + cnt) * 3, dtype='<u2')
         assert s0 + cnt <= len(tris) or s0 >= len(tris), 'a draw run straddles body and cape'
         # lit: VU1 program D with the game's body normals (play.js, export_web_light.py).
-        # The cape is lit by program D in the game too (hero dump: ambient-only corners =
-        # 126 x A x 122/128 exactly), but which normal its draw uses is not decoded, so
-        # it stays prelit (notes/fidelity-audit.md "Character lighting").
+        # The cape prim stays lit = false here: its glb normals are geometric, not the game's.
+        # play.js lights the cloth meshes that replace it, with the game's cape normals
+        # (cloth.json skin normals, FUN_005b06d0; notes/fidelity-audit.md "Cape lighting").
         prims.append(dict(attributes=attrs, indices=A(idx, 5123, 'SCALAR', 34963), mode=4,
                           material=1 if kind == 'alpha' else 0,
                           extras=dict(drawOrder=order, firstTri=s0, triCount=cnt, alpha=kind == 'alpha',
@@ -612,10 +615,16 @@ def cloth(out):
     from fractions import Fraction as Fr
     fma = lambda a, b, c: float(Fr(a) * Fr(b) + Fr(c))
     skin = []
-    for v, b, w, loc, _n in cp.skin:
+    for v, b, w, loc, nl in cp.skin:
         M = Wb[b].tolist(); l = [float(x) for x in loc]
         q = [fma(M[r][2], l[2], fma(M[r][0], l[0], M[r][1] * l[1])) + M[r][3] for r in range(3)]
-        skin.append([int(v), int(b), float(w), *l, *q])
+        # the influence's int8 normal x 1/127 (FUN_005b06d0: vf31.y = 0x3c010204; VU0 0x198
+        # scales the bone rows by it), carried to bind model space like q (no translation):
+        # cloth.js sums w x skinMat3 x nq = w x W[bone] x n/127, the game's normal buffer
+        # (block+0x1c + N*0x30), which FUN_005b1260 copies into the cape's VU slots.
+        n = [float(x) / 127.0 for x in nl]
+        nq = [fma(M[r][2], n[2], fma(M[r][0], n[0], M[r][1] * n[1])) for r in range(3)]
+        skin.append([int(v), int(b), float(w), *l, *q, *nq])
     # cloth group (FUN_005b0d30 / b38 / 09f8 / 0c50); indices are cloth-buffer vertex numbers
     lst = [int(v) | (0x8000 if pin else 0) for v, pin in zip(g['verts'], g['pinned'])]
     # constraints as the game stores them (group +0x20, 8 bytes): u8 a, u8 b = indices into
@@ -652,7 +661,7 @@ def cloth(out):
         N=int(cp.N), mesh_scale=float(cp.mesh_scale),
         group=dict(gravity=float(g['gravity']), blend=float(g['blend']), damping=float(g['damping']),
                    list=lst, constraints=cons),
-        skin_fields='vertex, bone, weight, local x y z (x meshScale/4096), bind-model x y z',
+        skin_fields='vertex, bone, weight, local x y z (x meshScale/4096), bind-model x y z, bind-model normal x y z (int8/127)',
         skin=skin, corner_vertex=cvi, cape_first_tri=int(first),
         clip_windows=windows, clip_windows_fields='[flag +0x19, u16 +0x1a]; window = 2 x u16 when flag == 2')
     json.dump(side, open(p, 'w'), separators=(',', ':'))

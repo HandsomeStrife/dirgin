@@ -47,6 +47,9 @@ export class CapeCloth {
     this.vel = new Float32Array(this.N * 3);
     this.pos = new Float32Array(this.N * 3);
     this.target = new Float32Array(this.N * 3);
+    // scratch sums for skin() / skinNormals(), reused every call (zeroed before use);
+    // made on first use on any object these run on (play.js calls them on its render-only rskin)
+    this.acc = null;
     // skin records, FUN_005b06d0: [vertex, bone, weight, local xyz, bind-model xyz]
     this.skinRec = data.skin;
     this.windows = data.clip_windows || {};
@@ -84,7 +87,8 @@ export class CapeCloth {
   skin(skinMat) {
     const T = this.target;
     T.fill(0);
-    const acc = new Float64Array(this.N * 3);
+    const acc = this.acc || (this.acc = new Float64Array(this.N * 3));
+    acc.fill(0);
     for (const r of this.skinRec) {
       const v = r[0], w = r[2], m = skinMat(r[1]);
       const x = r[6], y = r[7], z = r[8];
@@ -93,6 +97,29 @@ export class CapeCloth {
       acc[3 * v + 2] += w * (m[2] * x + m[6] * y + m[10] * z + m[14]);
     }
     T.set(acc);
+  }
+
+  // ---- FUN_005b06d0, the normal half: per influence w x (bone 3x3 x int8 normal / 127),
+  // summed into block+0x1c + N*0x30 and NOT normalised (|n| 0.94-1.0 on p000). These are
+  // the cape's lighting normals: FUN_005b2550 points the draw group's +0x1c at that buffer
+  // and FUN_005b1260 copies them unchanged into the VU slots (the cloth positions go in
+  // through the inverse character matrix; the normals are the keyed target's, never the
+  // simulated cloth's). The cape is two coincident layers with opposite normals, so the
+  // drawn (camera-facing) layer brings its own. Checked against the GIF colours of all
+  // three GS dumps (notes/fidelity-audit.md "Cape lighting"). out = Float32Array(N*3),
+  // world (skinMat's 3x3 maps the bind-model normal, skin record fields 9-11).
+  skinNormals(skinMat, out) {
+    const acc = this.acc || (this.acc = new Float64Array(this.N * 3));
+    acc.fill(0);
+    for (const r of this.skinRec) {
+      const v = r[0], w = r[2], m = skinMat(r[1]);
+      const x = r[9], y = r[10], z = r[11];
+      acc[3 * v]     += w * (m[0] * x + m[4] * y + m[8] * z);
+      acc[3 * v + 1] += w * (m[1] * x + m[5] * y + m[9] * z);
+      acc[3 * v + 2] += w * (m[2] * x + m[6] * y + m[10] * z);
+    }
+    out.set(acc);
+    return out;
   }
 
   // Set the targets directly (tests): t = Float32Array(N*3), world.

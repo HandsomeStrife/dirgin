@@ -159,28 +159,34 @@ async function loadVincent() {
 // the MP+0x41c / +0x420 ambient tints, the env-slot blend FUN_005ab738.
 // Hero dump 163235 vs this model at h_st f91: vertices whose triangle matches the dump
 // pose (<2 deg) are within 1 level at the median (body, opaque and alpha hair).
+// The cape (cloth meshes, not skinned) takes the same program D with the cloth buffer's
+// normals (cloth.js skinNormals, FUN_005b06d0), written per render in its parent's space.
 const LIGHT_VS = `
-  #if defined( USE_SKINNING ) && defined( USE_COLOR_ALPHA )
+  #if ( defined( USE_SKINNING ) || defined( PROGRAM_D_CLOTH ) ) && defined( USE_COLOR_ALPHA )
   {
+    #ifdef PROGRAM_D_CLOTH
+    vec3 n = mat3( modelMatrix ) * normal;                // cape: cloth normal (MeshBasic has no objectNormal unskinned)
+    #else
     vec3 n = mat3( modelMatrix ) * objectNormal;          // world (= game world) normal, unit-scale MP+0x10
+    #endif
     vec3 lit = uC0 * max( dot( uL0, n ), 0.0 ) + uC1 * max( dot( uL1, n ), 0.0 )
              + uC2 * max( dot( uL2, n ), 0.0 ) + uAmb;     // MULA/MADDA L, MAX 0, MULA/MADD C + A
     vColor.rgb = floor( min( vColor.rgb * 128.0 * lit, 255.0 ) ) / 128.0;   // MUL vcol, MINIi 255, FTOI0
   }
   #endif`;
-function litPatch(m, U) {
+function litPatch(m, U, cloth = false) {
   const prev = m.onBeforeCompile, prevKey = m.customProgramCacheKey;
   m.onBeforeCompile = (sh, r) => {
     prev.call(m, sh, r);
     Object.assign(sh.uniforms, U);
-    sh.vertexShader = 'uniform vec3 uL0, uC0, uL1, uC1, uL2, uC2, uAmb;\n' +
+    sh.vertexShader = (cloth ? '#define PROGRAM_D_CLOTH\n' : '') + 'uniform vec3 uL0, uC0, uL1, uC1, uL2, uC2, uAmb;\n' +
       sh.vertexShader.replace('#include <fog_vertex>', '#include <fog_vertex>' + LIGHT_VS);
   };
-  m.customProgramCacheKey = () => prevKey.call(m) + '|programD';
+  m.customProgramCacheKey = () => prevKey.call(m) + (cloth ? '|programD-cloth' : '|programD');
   m.needsUpdate = true;
 }
 
-async function setupCharLighting(vin) {
+async function setupCharLighting(vin, cape) {
   let L;
   try {
     const r = await fetch('data/vincent/light.json');
@@ -201,6 +207,9 @@ async function setupCharLighting(vin) {
     uAmb: { value: V(...L.env.ambient).multiplyScalar(s) },
   };
   for (const m of new Set(lit.map(o => o.material))) litPatch(m, U);
+  // the cape: lit only on the cloth meshes, which carry the game's normals (with ?cloth=0 the
+  // glb cape keeps its geometric normals, not the game's, and stays prelit)
+  if (cape) for (const m of cape.materials) litPatch(m, U, true);
 
   // FUN_0026a710: DAT_004e88a4 = 1e6, then every loaded BMD's grid (FUN_00270d08); the
   // threshold carries over, so the result is the global least d^2/k.
@@ -299,9 +308,16 @@ async function setupCapeCloth(vin, anim, pose) {
   const posAttr = new THREE.BufferAttribute(new Float32Array(n * 3), 3);
   posAttr.setUsage(THREE.DynamicDrawUsage);
   geom.setAttribute('position', posAttr);
+  // lighting normals: the cloth buffer's (FUN_005b06d0 -> FUN_005b1260), replacing the glb's
+  // geometric ones; written with the positions each render
+  const nrmAttr = data.skin[0]?.length >= 12 ? new THREE.BufferAttribute(new Float32Array(n * 3), 3) : null;
+  if (nrmAttr) { nrmAttr.setUsage(THREE.DynamicDrawUsage); geom.setAttribute('normal', nrmAttr); }
+  else console.warn('cape lighting off: cloth.json has no skin normals (old export)');
   const parent = src.parent;
+  const materials = [];
   for (const o of [src, twin].filter(Boolean)) {      // same scene-graph slot = same draw order
     const m = new THREE.Mesh(geom, o.material);
+    materials.push(o.material);
     m.name = o.name + '#cloth'; m.frustumCulled = false; m.userData = { ...o.userData, cloth: true };
     const p = o.parent, i = p.children.indexOf(o);
     p.children[i] = m; m.parent = p; o.parent = null;
@@ -316,6 +332,7 @@ async function setupCapeCloth(vin, anim, pose) {
   const off = new Float32Array(N3);                   // cloth pos - target at the last game frame, parent space
   const tgt = new Float32Array(N3);
   const rskin = { N: cloth.N, skinRec: cloth.skinRec, target: new Float32Array(N3) };   // render targets (world)
+  const rnrm = new Float32Array(N3), nrm = new Float32Array(N3);                        // render normals (world, parent)
   let lastKey = undefined;
   function skinNow() {                                // targets at the pose the scene graph holds now
     vin.body.updateMatrixWorld(true);
@@ -369,7 +386,24 @@ async function setupCapeCloth(vin, anim, pose) {
         out[3 * i] = tgt[j] + off[j]; out[3 * i + 1] = tgt[j + 1] + off[j + 1]; out[3 * i + 2] = tgt[j + 2] + off[j + 2];
       }
       posAttr.needsUpdate = true;
+      // Normals at the rendered (interpolated) pose, not the game frame's pose: part of the
+      // display-interpolation GUESS above (notes/fidelity-audit.md "Web frame loop and cape
+      // cloth", row "Cape drawn between game frames"). At a game frame's own pose they are the game's.
+      if (nrmAttr) {                                  // world -> parent (rotation)
+        cloth.skinNormals.call(rskin, skinMat, rnrm);
+        const e = inv.copy(parent.matrixWorld).invert().elements, o = nrmAttr.array;
+        for (let j = 0; j < N3; j += 3) {
+          const x = rnrm[j], y = rnrm[j + 1], z = rnrm[j + 2];
+          nrm[j] = e[0] * x + e[4] * y + e[8] * z; nrm[j + 1] = e[1] * x + e[5] * y + e[9] * z; nrm[j + 2] = e[2] * x + e[6] * y + e[10] * z;
+        }
+        for (let i = 0; i < n; i++) {
+          const j = 3 * cv[i];
+          o[3 * i] = nrm[j]; o[3 * i + 1] = nrm[j + 1]; o[3 * i + 2] = nrm[j + 2];
+        }
+        nrmAttr.needsUpdate = true;
+      }
     },
+    materials: nrmAttr ? materials : [],
     state: () => ({ total: cloth.total, remaining: cloth.remaining, k: +cloth.k().toFixed(4) }),
   };
 }
@@ -564,7 +598,7 @@ async function main() {
   const cape = params.get('cloth') === '0' ? null : await setupCapeCloth(vin, anim, logicPose);
   // character lighting (setupCharLighting): FUN_005ab0b0 runs in the draw, once per game
   // frame, with the draw's MP+0x10 (the logic pose: ctrl.prev, prevHeading), after the cloth
-  const light = await setupCharLighting(vin);
+  const light = await setupCharLighting(vin, cape);
   if (light) {
     const ap = new THREE.Vector3(), Y = new THREE.Vector3(0, 1, 0);
     const actorPoint = () => ap.copy(light.centre).applyAxisAngle(Y, bodyYaw(ctrl.prevHeading)).add(ctrl.prev);
