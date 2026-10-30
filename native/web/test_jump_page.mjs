@@ -213,6 +213,53 @@ for (const n of ['l_ladder_jump_a', 'l_ladder_jump_b', 'l_ladder_jump_c']) run(n
     ctrl.step({ x: 0, z: 0, stick: 0, run: false, keys: new Set(), pressed: new Set(), cross: true });
     ok(ctrl.P.state === 2 && !ctrl.jump.head, `player.js: ✕ taken by the ladder without a mount: state ${ctrl.P.state}, jump ${!!ctrl.jump.head}`);
   }
+  // OPTION airgrab (play.html?airgrab=1, not in the game): a ✕ in an air state that passes the
+  // ladder choice rule mounts. _b's inputs (✕ mid-air at the ladder face, f535) through the page's
+  // step with the option on: the frames before the ✕ still match the game, the ✕ mounts (no
+  // second jump). Then a mid-air ✕ away from every ladder is still the second jump.
+  const airgrabRun = (name, fx, pos = null) => {
+    const file = path.join(OUT, name + '.jsonl');
+    if (!existsSync(file)) { console.log(`skip ${name} airgrab: no trace`); return null; }
+    ran++;
+    const R = load(file).slice(1).filter(d => d.frame >= 480), r0 = R[0], p0 = r0.matrix[3], f0 = r0.matrix[2];
+    const off = pos ? [pos[0] - p0[0], pos[1] - p0[1], pos[2] - p0[2]] : [0, 0, 0];
+    const ctrl = new PlayerController(col, { pos: { x: p0[0] + off[0], y: p0[1] + off[1], z: p0[2] + off[2] }, heading: Math.atan2(f0[0], f0[2]) });
+    ctrl.C.face = { x: f0[0], y: f0[1], z: f0[2] };
+    ctrl.P.state = stateOf(r0);
+    const anim = stubAnim(headOf(r0));
+    anim.has = n => n.startsWith('c_ld') || SpeedAnimator.prototype.has.call(anim, n);   // the ladder clips (owned by ladder.js)
+    anim.play = (n, o) => { if (!n.startsWith('c_ld')) SpeedAnimator.prototype.play.call(anim, n, o); };
+    ctrl.attach({ anim });
+    ctrl.addAction(ladderAction({ airgrab: true }));
+    let prev = 0, stOff = 0, firstOff = null, at = null;
+    for (let i = 0; i + 1 < R.length && R[i].frame <= fx + 20; i++) {
+      const d = R[i], pad = d.pad_in, m = R[i + 1].cam_matrix;
+      const sx = padAxis(pad.lx - 128, pad.ly - 128), sy = padAxis(pad.ly - 128, pad.lx - 128);
+      const w = stickToWorld(sx, sy, m[0], m[2]);
+      const cross = (pad.buttons & CROSS) !== 0 && (prev & CROSS) === 0;
+      prev = pad.buttons;
+      const before = ctrl.P.state;
+      ctrl.step({ x: w.x, z: w.z, stick: w.mag, run: false, keys: new Set(), pressed: new Set(cross ? ['Space'] : []), cross });
+      if (d.frame < fx && ctrl.P.state !== stateOf(R[i + 1])) { stOff++; firstOff ??= d.frame; }
+      if (d.frame === fx) at = { cross, before, active: ctrl.active?.name ?? null, phase: ctrl.active?.phase, jump: ctrl.jump.head?.clip ?? null, state: ctrl.P.state };
+    }
+    return { at, stOff, firstOff, end: { active: ctrl.active?.name ?? null, phase: ctrl.active?.phase, pos: { ...ctrl.pos } } };
+  };
+  {
+    const r = airgrabRun('l_ladder_jump_b', 535);
+    if (r) {
+      ok(r.stOff === 0 && r.at.cross && (r.at.before === 8 || r.at.before === 9) && r.at.active === 'ladder' && r.at.state !== 0x1f &&
+         r.end.active === 'ladder' && r.end.phase !== null,
+         `airgrab: l_ladder_jump_b ✕ f535 mid-air (state ${r.at.before}) mounts: action ${r.at.active} (${r.at.phase}), state ${r.at.state}; ` +
+         `before the ✕ state off ${r.stOff}${r.firstOff !== null ? ' first ' + r.firstOff : ''}; f555 ${r.end.active} ${r.end.phase} feet y ${r.end.pos.y.toFixed(2)}`);
+    }
+    // the same inputs 60 units along -z (no ladder box near): the ✕ is the second jump (state 0x1f)
+    const p = (() => { const f = path.join(OUT, 'l_ladder_jump_b.jsonl'); if (!existsSync(f)) return null;
+                       const r0 = load(f).slice(1).find(d => d.frame >= 480).matrix[3]; return [r0[0], r0[1], r0[2]]; })();
+    const away = p && airgrabRun('l_ladder_jump_b', 535, [p[0], p[1], p[2] - 60]);
+    if (away) ok(away.at.cross && away.at.active === null && away.at.state === 0x1f,
+                 `airgrab: mid-air ✕ away from the ladder: action ${away.at.active}, state ${away.at.state.toString(16)} (second jump)`);
+  }
   globalThis.fetch = realFetch;
 }
 // aim_g_air without a weapon: flight and ground bit only (the game's on-foot state is 3 there)

@@ -32,6 +32,13 @@ const RAY_UP = 7;
 
 // Test aid: play.html?ladder=N puts him at ladder N's bottom once, on load (z128's start
 // deck doesn't connect to the ladder floor on foot in the current collision).
+// OPTION airgrab: play.html?airgrab=1 (off by default; not in the game, which never mounts from the
+// air, notes/jump-research.md worker 0131): a ✕ press in an air state (8 / 9 / 0x1f-0x21) whose
+// pose passes the ladder choice rule (selects: feet + 7 up in a trigger box, facing it) grabs
+// the ladder instead of the second jump. ladderAction({ airgrab }) overrides it (tests).
+const AIRGRAB = (() => { try { return new URLSearchParams(location.search).get('airgrab') === '1'; } catch { return false; } })();
+const airState = st => st === 8 || st === 9 || (st >= 0x1f && st <= 0x21);
+
 let warpTo = (() => { try { const v = new URLSearchParams(location.search).get('ladder'); return v === null ? null : +v; } catch { return null; } })();
 
 const wrapPi = a => Math.atan2(Math.sin(a), Math.cos(a));
@@ -61,13 +68,17 @@ function prep(L) {
   return { ...L, F, n, d, climb, base, faceTop, faceBottom };
 }
 
-// is p inside trigger box b (local coordinates via its axes)
-function inBox(b, p) {
+// p in trigger box b's local coordinates (via its axes)
+function local(b, p) {
   const o = b.origin, ax = b.axes;
   const v = [p.x - o[0], p.y - o[1], p.z - o[2]];
-  const l = ax.map(a => (v[0] * a[0] + v[1] * a[1] + v[2] * a[2]) / (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]));
+  return ax.map(a => (v[0] * a[0] + v[1] * a[1] + v[2] * a[2]) / (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]));
+}
+// is p inside trigger box b; up: extra height above the box's top (local -y; 0 = the box itself)
+function inBox(b, p, up = 0) {
+  const l = local(b, p);
   return l[0] >= b.min[0] && l[0] <= b.max[0] && l[2] >= b.min[2] && l[2] <= b.max[2] &&
-         l[1] >= b.min[1] && l[1] <= b.max[1];
+         l[1] >= b.min[1] - up && l[1] <= b.max[1];
 }
 
 // FUN_005513c8 (gimmick vtable +0x154; FUN_00589978 -> FUN_005494a0) for the ladder types (the
@@ -102,7 +113,7 @@ function frac(ctx, clip, f, k) {
 }
 const frames = (ctx, clip) => (ctx.motions[clip] ? ctx.motions[clip].frames : 16);
 
-export function ladderAction() {
+export function ladderAction({ airgrab = AIRGRAB } = {}) {
   load();
   let L = null;           // the ladder in use
   let ph = null;          // phase: { kind, clip, t, len, rate, from, to, hFrac, vFrac, ... }
@@ -282,6 +293,24 @@ export function ladderAction() {
           take = true;
         }
       }
+      // OPTION airgrab: in an air state, the choice rule on this frame's pose (the game has no air
+      // choice; FUN_0055abd8 limits it to states 2..5) picks the ladder, and ✕ grabs it.
+      if (airgrab && !take && ctx.input.pressed?.has(KEY) && airState(st) && ladders &&
+          ctx.anim?.has('c_ld_u') && ctx.anim.has('c_ld_d')) {
+        // OPTION airgrab: the bottom box's footprint and facing test, its height extended up the
+        // ladder face to the face top (the box covers only the bottom ~17 units; mid-air at the
+        // face, l_ladder_jump_b f535, the ray origin is 4.8 above it); the top box as chosen on foot
+        const z = l => l.bottom.axes[2], h = ctx.ctrl.heading, pos = ctx.ctrl.pos;
+        for (const l of ladders) {
+          // box-local min y is already ~17 above the bottom: extend it only up to the face top
+          const up = Math.max(0, l.bottomY - l.faceTop + l.bottom.min[1]);
+          if (inBox(l.bottom, origin(pos), up) && Math.sin(h) * z(l)[0] + Math.cos(h) * z(l)[2] > 0) {
+            pending = { l, from: 'air' }; take = true; this.ate = true; break;
+          }
+          // OPTION airgrab: chosen by the top box -> the game's top mount (c_ld_d), not a slide down
+          if (selects(l.top, pos, h)) { pending = { l, from: 'top', air: true }; take = true; this.ate = true; break; }
+        }
+      }
       // the map update's choice for the next frame (a frame's ticks share its pose: same result)
       if (take) gimmick = null; else choose(ctx);
       return take;
@@ -296,14 +325,24 @@ export function ladderAction() {
         ph = { kind: 'warp', to: { x, y: g ?? L.bottomY, z } };
         return null;
       }
-      if (pending.from === 'bottom') {
+      if (pending.from === 'air') {
+        // OPTION airgrab: the bottom mount's c_ld_u slide (hHalf, turn to the ladder) onto the
+        // nearest rung of the ladder's own grid at his feet, no lower than rung 0 and no higher
+        // than the last rung below the top exit (TOP_PROBE), so the climb that follows is the
+        // game's rung steps
+        const top = L.base - RUNG * Math.floor((L.base - (L.faceTop + TOP_PROBE)) / RUNG);
+        const y = Math.max(top, Math.min(L.base, rungY(p.y)));
+        move(ctx, 'mountAir', 'c_ld_u', climbPos(y), { hHalf: true, heading: L.heading });
+      } else if (pending.from === 'bottom') {
         // c_ld_u: slide onto the climb spot over the first half, rise 6 (glb) on the clip curve
         // onto rung 0 of the ladder's own grid, whatever floor bump he stood on
         move(ctx, 'mountBottom', 'c_ld_u', climbPos(L.base), { hHalf: true, heading: L.heading });
       } else {
         // c_ld_d: turn to face the ladder, back over the edge and drop 18 (glb)
         const drop = curve(ctx, 'c_ld_d', 0)[1] - curve(ctx, 'c_ld_d', frames(ctx, 'c_ld_d') - 1)[1];
-        move(ctx, 'mountTop', 'c_ld_d', climbPos(rungY(p.y + drop)), { hAxis: 1, vAxis: 1, heading: L.heading });
+        // OPTION airgrab: grabbed in the air, measure the drop from the top floor under him, not his feet
+        const feetY = pending.air ? (ctx.col.groundY(p.x, p.z, p.y) ?? L.topY) : p.y;
+        move(ctx, 'mountTop', 'c_ld_d', climbPos(rungY(feetY + drop)), { hAxis: 1, vAxis: 1, heading: L.heading });
       }
       log.push({ phase: ph.kind, tick: ctx.tick, feet: [p.x, p.y, p.z] });
       return null;                                  // move() already started the clip
