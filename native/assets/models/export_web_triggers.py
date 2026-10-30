@@ -10,7 +10,7 @@ Decoded (D) layout, read here, nothing copied into the repo:
     +0xa0 s16 script index, +0xa4 flags, +0xaa shape (FUN_005517a8, FUN_005507a0).
   - section 2 / 3 = event scripts (FUN_00310d20, FUN_0036fd58, FUN_0036fdc8): per script a table
     of (event id, fn index); per fn +8 local count, code = 8-byte (op, imm) instructions.
-  - section 1 = actor placements (0x74 B): +0 parameter set, +4 s16 script index (object +0x34;
+  - section 1 = actor placements (0x74 B): +0 parameter set, +8 AI mode, +4 s16 script index (object +0x34;
     record 44 -> 108, 45 -> 109, 66 -> 92 as notes §8), +0xc position, +0x1c facing,
     +0x40 override bits (status +0x0c, FUN_00315050), +0x54 weapon index.
   - weapon index (FUN_00318718): override bit 0x16 set -> record +0x54, else the parameter set
@@ -55,6 +55,11 @@ def triggers(d):
             lo=f32s(d, r + 0x80, 3), hi=f32s(d, r + 0x90, 3),
             script=struct.unpack_from('<h', d, r + 0xa0)[0],
             flags=SE.u32(d, r + 0xa4), shape=d[r + 0xaa]))
+    # resolved activations / wakes for the save (stage_events.activations: difficulty 1, flag0 = 0;
+    # informational: the page runs the scripts themselves in enemy_ai.js's VM)
+    nscr = len(SE.scripts(d))
+    for t in out:
+        t['acts'] = SE.activations(d, t['script']) if 0 <= t['script'] < nscr else []
     return out
 
 
@@ -84,7 +89,10 @@ def records(d):
             weapon = struct.unpack_from('<i', d, o + 0x54)[0]
         else:
             weapon = struct.unpack_from('<i', d, o0 + ps * s0 + 0x88)[0]
+        # +8 = AI mode the activation creates the AI with (FUN_00559748 -> FUN_00365c50: status
+        # +0xa0 (this record) +8; mode 8 -> 0 then FUN_0035f2e0)
         out.append(dict(rec=k, model=model, script=struct.unpack_from('<h', d, o + 4)[0],
+                        mode=struct.unpack_from('<i', d, o + 8)[0],
                         pos=f32s(d, o + 0xc, 3), face=f32s(d, o + 0x1c, 3), weapon=weapon))
     return out
 
@@ -123,7 +131,9 @@ def main():
     trig = triggers(d)
     recs = records(d)
     nscr = len(SE.scripts(d))
-    want = {t['script'] for t in trig} | {r['script'] for r in recs}
+    # + script 0 = the stage controller (events 0x22 / 0x23 stage start / restart, L; it arms the
+    # bit-0x20000 triggers by difficulty and event flag: notes/enemy-activation.md §1)
+    want = {t['script'] for t in trig} | {r['script'] for r in recs} | {0}
     scr = {str(s): script(d, s) for s in sorted(want) if 0 <= s < nscr}
     os.makedirs(out, exist_ok=True)
     res = dict(format='enemy-ai-2', stage=os.path.basename(stage), triggers=trig, records=recs,

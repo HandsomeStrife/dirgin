@@ -39,6 +39,10 @@ const BULLET_R = 5.0;             // GUESS: hit radius around the player's aim p
 // FUN_005a5xxx motion ids -> clip names (notes §9.7, trace: 0x57 = r_st_f, 0x40 = r_st_a). GUESS for
 // actor state 3 -> 0x40: the state table behind FUN_0055b8c0 vt+0x24 is not decoded.
 export const MOTION = { 0x40: 'r_st_a', 0x57: 'r_st_f' };
+// The page's save state: FUN_00242c28() = 1 (worker 0125, notes §9.11); event flags = evt_flags XOR
+// evt_key in k_enemy_engage7: only flag 2 = 7 and flag 46 = 1 (notes/enemy-activation.md §1)
+export const SAVE_DIFFICULTY = 1;
+export const SAVE_EVENT_FLAGS = Object.freeze({ 2: 7, 46: 1 });
 const ID_BASE = 22;               // GUESS: manager +0x3b2 table (cmd 0x3a): object id = record + 22 (trace meta EI0..6: rec 44 -> 66, 66 -> 88)
 
 // ---------------------------------------------------------------- RNG FUN_0040b398 / 0040b500 / 0040b5c0
@@ -193,6 +197,14 @@ function segBox(a, b, lo, hi) {
 //   damage  true: bullets test and damage the player (default false: the hit test is a GUESS,
 //           see BULLET_R; the page turns it on with ?enemydmg=1)
 //   log     (msg) => void
+//   difficulty  FUN_00242c28() (default SAVE_DIFFICULTY = 1: manager 0xa6 / 0xa7 are false)
+//   eventFlags  {N: value} event flags (FUN_003ff738, manager cmd 0xc); default SAVE_EVENT_FLAGS
+//   deadRecs    section-1 records whose status is dead at the start (the save: 41-43); FUN_00559748
+//               refuses to activate them
+//   onActivate  (record, actor|null) => void: a section-1 record was activated (cmd 0x108 ->
+//               FUN_00559748). actor = the AI actor (e027 only); null for other models (their
+//               bodies / AIs are not exported yet). Also listed per frame in `activated`.
+//   onDeactivate (record) => void: cmd 0x109 / 0x130 turned an active record off.
 export function createEnemyAI(opts) {
   const data = opts.data;
   if (!data || !Array.isArray(data.weapons) || !Array.isArray(data.records)) throw new Error('ai.json has no weapons / records (old export: rebuild data/enemies)');
@@ -227,6 +239,24 @@ export function createEnemyAI(opts) {
     return o;
   });
   const recById = id => data.records[id - ID_BASE];
+  // FUN_00550ad8 (stage start, L: its caller is a vtable slot, not traced): each trigger object is
+  // activated (+0x144(1)) unless its flags +0xa4 have bit 17 (0x20000); those wait for a script's
+  // cmd 0x108 (manager 0x3d lookup). L: an inactive trigger runs no volume test (FUN_005517a8).
+  for (const o of triggers) o.active = !((o.t.flags >>> 17) & 1);
+  // GUESS: trigger object id = 't' + index (manager +0x7b0 table, cmd 0x3d, not read; scripts only pass it on)
+  const trigObj = k => triggers[k] ? triggers[k].id : -1;
+  // Section-1 records exist as (inactive) objects from stage load; cmd 0x3a gives their id and
+  // 0x101 / 0x108 reach them by it. addActor replaces the record object with the active actor.
+  const DIFF = opts.difficulty ?? SAVE_DIFFICULTY;
+  const EVFLAGS = opts.eventFlags ?? SAVE_EVENT_FLAGS;
+  const deadRecs = new Set(opts.deadRecs ?? []);
+  const onActivate = opts.onActivate || (() => {});
+  const onDeactivate = opts.onDeactivate || (() => {});
+  const activated = [];         // records activated this frame (tick clears it)
+  data.records.forEach((rec, k) => {
+    const id = k + ID_BASE;
+    if (!objects.has(id)) objects.set(id, { kind: 'record', id, rec: k, script: rec.script, vars: new Int16Array(8), flags28: 0, ai: null, hp: deadRecs.has(k) ? 0 : 1 });
+  });
 
   // addActor: an activated e027 (FUN_00559748 gave it a body and an AI). init may carry the
   // state of a traced actor (test) or nothing (page).
@@ -235,10 +265,14 @@ export function createEnemyAI(opts) {
     if (!rec) throw new Error(`ai.json: no section-1 record ${init.rec}`);
     // FUN_00318718: weapon index (section-1 +0x54 or parameter set +0x88), -1 = none
     const W = rec.weapon >= 0 ? data.weapons[rec.weapon] ?? null : null;
+    const id = init.id ?? init.rec + ID_BASE;
+    const prev = objects.get(id);                // the record object: its vars (0x104) carry over
     const a = {
-      kind: 'actor', id: init.id ?? init.rec + ID_BASE, rec: init.rec, script: init.script ?? rec.script,
-      pos: init.pos || rec.pos.slice(), face: init.face || rec.face.slice(), vars: new Int16Array(8),
-      flags28: 0, f118: init.f118 ?? 0, target: init.target ?? null, aim120: null,
+      kind: 'actor', id, rec: init.rec, script: init.script ?? rec.script,
+      pos: init.pos || rec.pos.slice(), face: init.face || rec.face.slice(),
+      vars: prev && prev.kind === 'record' ? prev.vars : new Int16Array(8),
+      flags28: 1,                                // +0x28 bit 0 = active (FUN_00559748 tests it)
+      f118: init.f118 ?? 0, target: init.target ?? null, aim120: null,
       astate: init.astate ?? 0, hp: init.hp ?? 100, s64: 0, f19c: null,
       // body C
       C: { f564: init.f564 ?? 0, speed: 0, s214: 0, aim: null, t2b0: null, motion: null, clip: init.clip || 'r_gst' },
@@ -307,7 +341,11 @@ export function createEnemyAI(opts) {
   // else the object's +0xc handler (generic FUN_0054cd70, e027 FUN_005661e8).
   function send(o, tgt, cmd, r) {
     if (cmd < 0x100) {
-      if (cmd === 0x3a) return r[0] + ID_BASE;                // object id of section-1 record r0
+      if (cmd === 0x3a || cmd === 0x3f) return r[0] + ID_BASE; // object id of section-1 record r0 (manager +0x3b2)
+      if (cmd === 0x3d) return trigObj(r[0]);                  // object id of section-8 trigger r0 (manager +0x7b0)
+      if (cmd === 0xc) return EVFLAGS[r[0]] ?? 0;              // event flag r0 (FUN_003ff738)
+      if (cmd === 0xa6) return +(DIFF === 2);                  // FUN_00242c28() == 2
+      if (cmd === 0xa7) return +(DIFF === 3);                  // FUN_00242c28() == 3
       if (cmd === 0x2f) { if ((r[0] >>> 0) < 0x100) mshort[r[0]] = r[1]; return 0; }   // FUN_00545b20 case 0x2f
       if (cmd === 0x30) return (r[0] >>> 0) < 0x100 ? mshort[r[0]] : 0;                 // case 0x30
       // GUESS: other manager commands are skipped (return 0, the script goes on)
@@ -321,6 +359,13 @@ export function createEnemyAI(opts) {
         if (r[1] >= 0 && objects.get(r[0]) && !(objects.get(r[0]).flags28 & 0x80000))
           mailbox.push({ to: r[0], n: r[1], from: t.id });
         return 0;
+      case 0x108:                                              // FUN_0054cd70: +0x144(1, 0) (actors FUN_00559748)
+        // then manager event 7 (FUN_0053fbe8) if active: not translated (its consumer is not decoded)
+        setActive(t, 1);
+        return 0;
+      case 0x109: case 0x130:                                  // +0x144(0, 0); manager event 8 not translated
+        setActive(t, 0);
+        return 0;
       case 0x104: if (r[0] < 8) { t.vars[r[0]] = r[1]; t.flags28 |= 0x4000; } return 0;
       case 0x105: return t.vars[r[0]];
       case 0x143: if (t.kind === 'actor') cmd143(t, r); return 0;
@@ -332,6 +377,54 @@ export function createEnemyAI(opts) {
         warnOnce(`enemy_ai: object cmd 0x${cmd.toString(16)} not translated (skipped)`);
         return 0;
     }
+  }
+
+  // vtable +0x144(on, 0). Triggers: generic activate (L: the trigger class's +0x144 is not read;
+  // it gates the volume test). Records / actors: FUN_00559748 with param_3 = 0 (no event 3).
+  function setActive(t, on) {
+    if (t.kind === 'trigger') { t.active = !!on; events.push(`${on ? 'arm' : 'disarm'} ${t.id}`); return; }
+    if (t.kind !== 'record' && t.kind !== 'actor') return;
+    if (on === (t.flags28 & 1)) return;                      // FUN_00559748: already in that state
+    const rec = data.records[t.rec];
+    if (on) {
+      if (dead(t)) return;                                   // FUN_00318bf8 status dead (FUN_00316cf8): stays off
+      // AI mode: status +0xa0 (the placement) +8 (FUN_00365c50). L: the status +0x61 bit-0 path
+      // (mode from the parameter set) is not taken. Mode 8 -> 0, then FUN_0035f2e0 (not translated).
+      let mode = rec.mode ?? 0;
+      if (mode === 8) { mode = 0; warnOnce('enemy_ai: activation mode 8 (FUN_0035f2e0) not translated'); }
+      let a = null;
+      if (rec.model === 'e027') {
+        // L: FUN_0055b8e0(a, 2, 1, 0) = actor state 2 for a plain placement (+0x28 bits 2 / 5 / 1 and
+        // +0x118 bit 16 clear, C+0x664 <= 0x29; those bits are not exported)
+        a = addActor({ rec: t.rec, mode, astate: 2 });
+      } else {
+        // other models: no body / AI export yet (notes/enemy-activation.md §4.3); marked active only
+        t.flags28 |= 1;
+        warnOnce(`enemy_ai: record ${t.rec} (${rec.model}) activated without an AI (only e027 is translated)`);
+      }
+      events.push(`activate rec ${t.rec}`);
+      activated.push(t.rec);
+      onActivate(rec, a);
+      return;
+    }
+    // Off: FUN_00559748 (param_2 = 0) -> FUN_00558bb8: when the AI index (+0x140) is >= 0,
+    // FUN_003659d8(DAT_0046f4ec, +0x140) unlinks the AI from the brain list (S.q) and calls its
+    // destructor (vtable 0x4a2358 +0xc = FUN_0035e6f8), whose first call is FUN_00360820 = stopFire
+    // (the fire timer leaves the list DAT_0046f4e4 +0x2c); then +0x184 = 0, +0x140 = 0xff.
+    // Reactivation builds a new AI (FUN_00365c50 in the on path), so nothing of the old one stays.
+    // GUESS: the rest (body / weapon release, FUN_00588330, flags28 and HP kept) is not translated;
+    // notes/fidelity-audit.md 'Actor deactivation'.
+    t.flags28 &= ~1;
+    if (t.kind === 'actor') {
+      const i = actors.indexOf(t); if (i >= 0) actors.splice(i, 1);
+      if (t.ai) {
+        const j = S.q.indexOf(t.ai); if (j >= 0) S.q.splice(j, 1);           // FUN_003659d8 unlink
+        stopFire(t.ai);                                                     // FUN_0035e6f8 -> FUN_00360820
+      }
+      objects.set(t.id, { kind: 'record', id: t.id, rec: t.rec, script: t.script, vars: t.vars, flags28: 0, ai: null, hp: t.hp });
+    }
+    events.push(`deactivate rec ${t.rec}`);
+    onDeactivate(rec);
   }
 
   // FUN_005661e8 case 0x143: AI mode r0
@@ -780,6 +873,7 @@ export function createEnemyAI(opts) {
   // ------------------------------------------------ trigger volumes FUN_005517a8 (shapes 0 / 3 / 8)
   function triggerCheck(o, pNew, pOld) {
     const t = o.t;
+    if (!o.active) return;                                                    // FUN_00550ad8 / cmd 0x108 (see setActive)
     if (t.shape !== 0 && t.shape !== 3 && t.shape !== 8) return;              // shape 4 (FUN_003114d0) not translated
     if ((t.flags >> 19) & 1) return;                                          // GUESS: bit-19 swept branch not translated
     const lNew = xform(t.inv, pNew), lOld = xform(t.inv, pOld);               // FUN_005507a0
@@ -800,6 +894,7 @@ export function createEnemyAI(opts) {
   // ------------------------------------------------ one game frame
   function tick(step, playerOld, playerNew) {
     events.length = 0;
+    activated.length = 0;
     // 1. AI
     scheduler(step);
     // 2. bullets (oldest first)
@@ -829,5 +924,5 @@ export function createEnemyAI(opts) {
     return events.slice();
   }
 
-  return { S, actors, triggers, bullets, objects, addActor, tick, runEvent, recById, events };
+  return { S, actors, triggers, bullets, objects, addActor, tick, runEvent, recById, events, activated, setActive };
 }

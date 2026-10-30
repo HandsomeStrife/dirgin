@@ -308,5 +308,109 @@ for (const [side, damage, dist, flight] of [[0, true, 30, 3], [40, true, 30], [0
   ok(a.ai.mode === 0 && shots === 0 && player.hp === 780, `dead soldier: AI mode ${a.ai.mode} (0), ${shots} shots in 200 frames (0), Vincent HP ${player.hp}`);
 }
 
+// Activation after the save (notes/enemy-activation.md §1 / §2): cmd 0x108 (FUN_0054cd70 ->
+// FUN_00559748), the triggers' own "once" var0, and the bit-0x20000 triggers FUN_00550ad8 leaves off.
+// The stage scripts are the game's (ai.json); the walks are synthetic.
+{
+  const trigPos = k => data.triggers[k].m[3].slice(0, 3);
+  // walk through trigger k along world x (old -> new crosses the volume; FUN_005517a8 sweep)
+  const cross = (W, k, back = false) => {
+    const [x, y, z] = trigPos(k), a = [x - 40, y, z], b = [x + 40, y, z];
+    W.tick(1.0, back ? b : a, back ? a : b);
+    W.tick(1.0, back ? a : b, back ? a : b);       // next frame: queued 0x101 messages delivered
+  };
+  const mk = (extra = {}) => {
+    const got = [];
+    const player = { pos: [-1395, -99, -1110], hp: 780, id: 0x16, f118: 0, s64: 0 };
+    const W = AI.createEnemyAI({ data, player, rand: () => 0.5, quiet: true, deadRecs: [41, 42, 43],
+      onActivate: (rec, a) => got.push([rec.rec, !!a]), ...extra });
+    return { W, got, player };
+  };
+  const recActors = (W, k) => W.actors.filter(a => a.rec === k).length;
+
+  // trigger 56 (script 91, ev 0xd, once): 0x108 -> records 50 / 51, exactly once
+  {
+    const { W, got } = mk();
+    cross(W, 56);
+    ok(JSON.stringify(got) === '[[50,true],[51,true]]', `trigger 56: activates records ${JSON.stringify(got)} ([[50,true],[51,true]])`);
+    ok(recActors(W, 50) === 1 && recActors(W, 51) === 1, `trigger 56: one AI actor each for 50 / 51 (${recActors(W, 50)}, ${recActors(W, 51)})`);
+    const a50 = W.actors.find(a => a.rec === 50);
+    ok(a50 && a50.ai.mode === data.records[50].mode && a50.flags28 & 1, `trigger 56: record 50 active, AI mode = section-1 +8 (${a50?.ai.mode})`);
+    ok(W.objects.get(41 + 22).kind === 'record' && !(W.objects.get(41 + 22).flags28 & 1), 'trigger 56: dead record 41 woken (0x101) but not activated');
+    // run-once: turn 50 off, go back through 56 both ways -> its script's var0 guard sends nothing
+    W.setActive(W.objects.get(50 + 22), 0);
+    got.length = 0;
+    cross(W, 56, true); cross(W, 56);
+    ok(got.length === 0 && recActors(W, 50) === 0, `trigger 56 once (own var0): re-entry activates ${JSON.stringify(got)} ([])`);
+    // FUN_00559748: activating an active record is a no-op
+    got.length = 0;
+    W.setActive(W.objects.get(51 + 22), 1);
+    ok(got.length === 0 && recActors(W, 51) === 1, `0x108 to an active record: no-op (${got.length} activations, ${recActors(W, 51)} actor)`);
+    // FUN_00559748: a record whose status is dead (the save's 41) is not activated
+    W.setActive(W.objects.get(41 + 22), 1);
+    ok(got.length === 0 && recActors(W, 41) === 0, `0x108 to dead record 41: not activated (${got.length} activations)`);
+  }
+
+  // trigger 205 (flags 0x20001, script 129: wake n2 -> 50 / 51) starts off (FUN_00550ad8); on the
+  // save's difficulty 1 the stage controller (script 0 event 0x22, flag0 = 0) leaves it off; on
+  // difficulty 3 it arms it with 0x3d / 0x108.
+  ok((data.triggers[205].flags >>> 17) & 1, 'trigger 205 has flag bit 0x20000');
+  for (const diff of [1, 3]) {
+    const { W } = mk({ difficulty: diff });
+    const t205 = W.triggers[205];
+    ok(!t205.active, `difficulty ${diff}: trigger 205 off at stage start`);
+    W.runEvent({ kind: 'stage', id: 'stage', script: 0, vars: new Int16Array(8), flags28: 0 }, 0x22);
+    ok(t205.active === (diff === 3), `difficulty ${diff}: after script 0 event 0x22 trigger 205 ${t205.active ? 'armed' : 'off'} (${diff === 3 ? 'armed' : 'off'})`);
+    cross(W, 56);                                    // 50 / 51 active, mode 0
+    const fired = [];
+    const [x, y, z] = trigPos(205);
+    fired.push(...W.tick(1.0, [x - 40, y, z], [x + 40, y, z]));
+    fired.push(...W.tick(1.0, [x + 40, y, z], [x + 40, y, z]));
+    const ran = fired.some(e => e.startsWith('event t205 '));
+    const woke = fired.filter(e => / ev 2 r 2,/.test(e)).length;
+    // (on difficulty 3 script 129 first runs commands not translated yet (0xa1, 0x106), so only the
+    // run itself is checked there)
+    ok(ran === (diff === 3) && (diff === 3 || woke === 0), `difficulty ${diff}: walking through trigger 205 ${ran ? 'runs' : 'does not run'} its script (${diff === 3 ? 'runs' : 'does not'}), ${woke} wake n2 messages`);
+  }
+
+  // Deactivation mid-burst: FUN_00559748 off -> FUN_00558bb8 -> FUN_003659d8 -> AI destructor
+  // FUN_0035e6f8 -> FUN_00360820 (fire timer off). The switched-off soldier fires no more rounds;
+  // reactivated (a new AI, FUN_00365c50) and woken again by trigger 95 he has one fire timer.
+  {
+    const { W, player } = mk();
+    const rec = data.records[44];
+    player.pos = [rec.pos[0] - 30, rec.pos[1], rec.pos[2]];
+    const a = W.addActor({ rec: 44, mode: 2, hp: 1 });
+    W.addActor({ rec: 45 });                        // idle, keeps the brain queue (and fireTimers) running
+    const rounds = ev => ev.filter(e => e.startsWith(`round ${a.id} `)).length;
+    let first = false;
+    for (let i = 0; i < 200 && !first; i++) first = rounds(W.tick(1.0, player.pos, player.pos)) > 0;
+    const midBurst = first && !!a.ai.timer;
+    W.setActive(a, 0);
+    let after = 0;
+    for (let i = 0; i < 300; i++) after += rounds(W.tick(1.0, player.pos, player.pos));
+    const stale = W.S.timers.filter(e => e.ai === a.ai).length;
+    ok(midBurst && after === 0 && stale === 0 && !a.ai.timer, `deactivated mid-burst (timer running: ${midBurst}): ${after} rounds in 300 frames (0), ${stale} timers left (0)`);
+    W.setActive(W.objects.get(a.id), 1);
+    const b = W.actors.find(x => x.rec === 44);
+    cross(W, 95);                                   // wake n0 -> mode 2 (script 108)
+    let most = 0, fired = 0;
+    for (let i = 0; i < 300; i++) {
+      fired += W.tick(1.0, player.pos, player.pos).filter(e => e.startsWith(`round ${a.id} `)).length;
+      most = Math.max(most, W.S.timers.filter(e => e.ai.owner.rec === 44).length);
+    }
+    ok(b && b !== a && b.ai.mode === 2 && fired > 0 && most === 1, `reactivated: new AI mode ${b?.ai.mode} (2), ${fired} rounds, at most ${most} fire timer (1)`);
+  }
+
+  // trigger 95 unchanged: armed from the start, wakes 44 / 45 to mode 2 once (traced: notes §8)
+  {
+    const { W, got } = mk();
+    const a44 = W.addActor({ rec: 44 }), a45 = W.addActor({ rec: 45 });
+    ok(W.triggers[95].active, 'trigger 95 armed at stage start (no bit 0x20000)');
+    cross(W, 95);
+    ok(a44.ai.mode === 2 && a45.ai.mode === 2 && got.length === 0, `trigger 95: 44 / 45 AI mode ${a44.ai.mode} / ${a45.ai.mode} (2 / 2), no activations (${got.length})`);
+  }
+}
+
 console.log((fail ? `${fail} FAILED` : 'all ok') + (gaps ? ` (${gaps} known gaps)` : ''));
 process.exit(fail ? 1 : 0);

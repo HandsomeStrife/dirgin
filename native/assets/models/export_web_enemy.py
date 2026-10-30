@@ -5,6 +5,7 @@ format. Game-derived output: write only into a gitignored directory (checked wit
 git check-ignore). Game files only, no GS dump.
 
   export:  python3 -I export_web_enemy.py export [--model e027] [--out DIR] [--clips r_gst,...]
+  weapon:  python3 -I export_web_enemy.py weapon [--owner e027] [--slot 0] [--out DIR] [--map-only]
   verify:  python3 -I export_web_enemy.py verify DUMP.bin [--model e027] [--png OUT.png]
            UV-triple match of the export against the dump's draws on the model's texture.
 
@@ -39,7 +40,7 @@ Why a new parser (decoded 2026-10-29, worker 0115)
   seen-slot filter of render_skinned.assemble, slot_skin (export_web_vincent), material
   table/texture (smd_material, FUN_00259058 / FUN_005b19b8), clips (anim_rot).
 """
-import sys, os, json, io, collections, struct
+import sys, os, re, json, io, collections, struct
 import numpy as np
 from PIL import Image
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -66,6 +67,30 @@ def file_id(model, k):
 def paths(model):
     f = lambda k: NOPATH + "%08x.bin" % file_id(model, k)
     return dict(cont=f(1), tex=f(2), clips=f(0xb))
+
+
+# motion files of a character (FUN_00249cb8 k): 0 / 0xa m000, 0xb m001, 0xc.. m002.. (notes/enemy-research.md
+# section 2). e027 keeps its rifle set in 0xb; e030 / e024 / e036 have their stand clips in 0 only.
+CLIP_KS = (0x0, 0xa, 0xb, 0xc, 0xd, 0xe, 0xf, 0x10, 0x11)
+
+
+# the input files tools/byo/disc.py INPUTS checks by sha256
+LISTED = set(re.findall(r"'([0-9a-f]{8}\.bin)'", open(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                                    '../../../tools/byo/disc.py')).read()))
+
+
+def clip_file(model, clip):
+    """The first of the model's motion files (k order above) that holds a MOD clip of this name.
+    GUESS: which motion sets the game binds for a type, and their search order, are not decoded
+    (Vincent's FUN_005a7390 takes the first container that has the name); the names are unique
+    across a model's files except the identical 0 / 0xa pair, so the order only picks among copies."""
+    for k in CLIP_KS:
+        name = "%08x.bin" % file_id(model, k)
+        f = NOPATH + name
+        if name not in LISTED: continue                      # only inputs disc.py verifies
+        if os.path.exists(f) and any(n == clip for n, _f in V.list_clips(f)):
+            return f
+    sys.exit(f"{model}: no motion file holds clip {clip}")
 
 
 # ---------------------------------------------------------------- decode
@@ -139,7 +164,7 @@ def group_scale(buf, P, G):
 def decode(buf, NB, sk, variant=None):
     """render_skinned.assemble's walk with parse_drawpackets_cycl. Returns
     (verts, normals, tris, groups, tri_desc). tris as assemble's (a, b, c, uv0..2 raw
-    V2-16, col0..2); tri_desc[i] = (desc material byte, desc +4 flags, fill colour?).
+    V2-16, col0..2); tri_desc[i] = (desc material byte, desc +4 flags, fill colour?, desc[2] env slot).
     variant: only blocks with smd +0x12 == variant, in FUN_005b2ef8's order (last block
     first); None = every block in file order (for checks)."""
     bc = sk['bone_count']; Wm = [np.array(m, float) for m in sk['world_bind']]
@@ -160,7 +185,7 @@ def decode(buf, NB, sk, variant=None):
             descs = R.enum_descs(buf, NB, P, G)
             for di, (doff, vifptr) in enumerate(descs):
                 end = (P + descs[di + 1][1]) if di + 1 < len(descs) else NB
-                mat = buf[P + doff]; flags = buf[P + doff + 4]
+                mat = buf[P + doff]; flags = buf[P + doff + 4]; env = buf[P + doff + 2]
                 for sub in parse_drawpackets_cycl(buf, NB, P + vifptr, end):
                     idx = sub.get('idx'); uv = sub.get('uv'); col = sub.get('col')
                     fill = 0x7e in sub.get('fill', {}) or 0x6e in sub.get('fill', {})
@@ -176,7 +201,7 @@ def decode(buf, NB, sk, variant=None):
                             uvs = ((0.0, 0.0),) * 3
                         tris.append((base + a, base + b, base + c) + uvs +
                                     tuple(R._corner_col(col, j) for j in (ja, jb, jc)))
-                        tdesc.append((mat, flags, fill))
+                        tdesc.append((mat, flags, fill, env))
             groups.append(dict(name=f"{name}@{blk:#x}.g{gi}", P=P, G=G, sc=sc, base=base,
                                psize=psize, tris=len(tris) - t0))
             if len(tris) == t0:
@@ -238,19 +263,25 @@ def export(model, out, clip_names, variant=0):
     raw = np.array([c for t in tris for c in t[6:9]], float)
     # fill-mode V4-8: FUN_005b0ee0's STCOL 0x80 x4 through STMASK 0xaaaaaa0f -> 128 = 1.0
     col = np.where(fill[:, None], 128.0 / 128.0, raw / 128.0)
-    mat_bytes = sorted({d[0] for d in tdesc}); alpha_flags = sorted({d[1] & 2 for d in tdesc})
-    if mat_bytes != [0] or len(mats) != 1:
-        sys.exit(f"material bytes {mat_bytes} / {len(mats)} materials: only one material is handled")
+    # material byte = slot in FUN_00259058's table (FUN_005b19b8: TEX0 = table[desc[0]])
+    mat_bytes = sorted({d[0] for d in tdesc})
+    bad = [m for m in mat_bytes if m >= len(mats) or mats[m].get('ipu') or mats[m].get('envmap')]
+    if bad:
+        sys.exit(f"material bytes {bad}: no texture slot / ipu / env-map slot, not handled")
+    # FUN_005b19b8: desc +4 & 0x60 (with DAT_004fcb00 bit 4) takes the second path: TEX0 table[desc[0]] plus
+    # an env-map context (table[obj+0x451 + desc[2] - 1]); that second texture / pass is not drawn here
+    env_tris = int(sum((d[1] & 0x60) != 0 for d in tdesc))
 
     # clips (Vincent's per-frame world TRS on flat joints, in place = bone 1 x/z zeroed)
     clips = {}
     for c in clip_names:
-        cbuf, CP = V.find_clip(pth['clips'], c); nf = AR.clip_frames(cbuf, CP)
-        zy = V.y_moves(sk, pth['clips'], c); frames = []; root = []; Ws = []
+        cf = clip_file(model, c)
+        cbuf, CP = V.find_clip(cf, c); nf = AR.clip_frames(cbuf, CP)
+        zy = V.y_moves(sk, cf, c); frames = []; root = []; Ws = []
         for f in range(nf):
-            W = V.clip_mats(sk, c, f, cont=pth['clips'], zero_y=zy)
+            W = V.clip_mats(sk, c, f, cont=cf, zero_y=zy)
             frames.append([V.mat_to_trs(Mx) for Mx in W]); Ws.append(W)
-            Wr = V.clip_mats(sk, c, f, root_motion=True, cont=pth['clips'])
+            Wr = V.clip_mats(sk, c, f, root_motion=True, cont=cf)
             root.append((Wr[1][:3, 3] - W[1][:3, 3]).tolist())
         wrap = V.pose_jump(Ws[-1], Ws[0]) if nf > 1 else 0.0
         step_med = float(np.median([V.pose_jump(Ws[f], Ws[f + 1]) for f in range(nf - 1)])) if nf > 1 else 0.0
@@ -260,7 +291,7 @@ def export(model, out, clip_names, variant=0):
             for f in range(1, len(frames)):
                 if np.dot(frames[f][b][1], frames[f - 1][b][1]) < 0:
                     t, q, s = frames[f][b]; frames[f][b] = (t, -q, s)
-        clips[c] = dict(frames=frames, root=root, nf=nf, loop=loop, zero_y=zy, cont=pth['clips'],
+        clips[c] = dict(frames=frames, root=root, nf=nf, loop=loop, zero_y=zy, cont=cf,
                         loop_err=wrap, step_med=step_med)
 
     g = V.GLB(); j = g.j; j['asset']['generator'] = 'export_web_enemy.py'
@@ -271,27 +302,34 @@ def export(model, out, clip_names, variant=0):
                  COLOR_0=A(col.astype('<f4'), 5126, 'VEC4', 34962),
                  JOINTS_0=A(joints.astype('<u1'), 5121, 'VEC4', 34962),
                  WEIGHTS_0=A(weights.astype('<f4'), 5126, 'VEC4', 34962))
-    # draw runs: consecutive triangles with the same descriptor alpha flag (desc +4 bit 1 ->
-    # TEST ATE GEQUAL AREF 100, FUN_005b19b8 via smd_material), in file draw order
+    # draw runs: consecutive triangles with the same material byte and descriptor alpha flag
+    # (desc +4 bit 1 -> TEST ATE GEQUAL AREF 100, FUN_005b19b8 via smd_material), in file draw order
+    multi = len(mat_bytes) > 1
     runs = []
     for i, d in enumerate(tdesc):
-        a = bool(d[1] & 2)
-        if runs and runs[-1][2] == a: runs[-1][1] += 1
-        else: runs.append([i, 1, a])
+        a = bool(d[1] & 2); k = mat_bytes.index(d[0])
+        if runs and runs[-1][2] == a and runs[-1][3] == k: runs[-1][1] += 1
+        else: runs.append([i, 1, a, k])
+    # glTF material 2k / 2k+1 = opaque / alpha of texture slot mat_bytes[k] (one slot: 0 / 1, as before)
     prims = [dict(attributes=attrs, indices=A(np.arange(s0 * 3, (s0 + n) * 3, dtype='<u2'), 5123, 'SCALAR', 34963),
-                  mode=4, material=1 if a else 0,
-                  extras=dict(drawOrder=o, firstTri=s0, triCount=n, alpha=a))
-             for o, (s0, n, a) in enumerate(runs)]
-    rgba = M.texture_rgba(pth['tex'], mats[0])
-    png = io.BytesIO(); Image.fromarray(rgba, 'RGBA').save(png, 'PNG')
-    j['images'] = [dict(bufferView=g.view(png.getvalue()), mimeType='image/png', name=mats[0]['name'])]
+                  mode=4, material=2 * k + (1 if a else 0),
+                  extras=dict(drawOrder=o, firstTri=s0, triCount=n, alpha=a, **(dict(slot=mat_bytes[k]) if multi else {})))
+             for o, (s0, n, a, k) in enumerate(runs)]
+    texs = []
+    j['images'] = []
+    for m in mat_bytes:
+        rgba = M.texture_rgba(pth['tex'], mats[m]); texs.append(rgba)
+        png = io.BytesIO(); Image.fromarray(rgba, 'RGBA').save(png, 'PNG')
+        j['images'].append(dict(bufferView=g.view(png.getvalue()), mimeType='image/png', name=mats[m]['name']))
     j['samplers'] = [dict(magFilter=9729, minFilter=9729, wrapS=33071, wrapT=33071)]
-    j['textures'] = [dict(source=0, sampler=0)]
+    j['textures'] = [dict(source=k, sampler=0) for k in range(len(mat_bytes))]
     aref = 100 / 255.0
-    base = lambda: dict(pbrMetallicRoughness=dict(baseColorTexture=dict(index=0), metallicFactor=0.0, roughnessFactor=1.0),
-                        doubleSided=True, extensions=dict(KHR_materials_unlit={}))
-    j['materials'] = [dict(name='opaque', alphaMode='OPAQUE', **base()),
-                      dict(name='alpha', alphaMode='MASK', alphaCutoff=aref, **base())]
+    base = lambda k: dict(pbrMetallicRoughness=dict(baseColorTexture=dict(index=k), metallicFactor=0.0, roughnessFactor=1.0),
+                          doubleSided=True, extensions=dict(KHR_materials_unlit={}))
+    nm = lambda k, kind: f"{mats[mat_bytes[k]]['name']} {kind}" if multi else kind
+    j['materials'] = [x for k in range(len(mat_bytes)) for x in
+                      (dict(name=nm(k, 'opaque'), alphaMode='OPAQUE', **base(k)),
+                       dict(name=nm(k, 'alpha'), alphaMode='MASK', alphaCutoff=aref, **base(k)))]
     j['extensionsUsed'] = ['KHR_materials_unlit']
     j['meshes'] = [dict(name=stem, primitives=prims)]
     j['nodes'] = [dict(name=f'{model}_root', rotation=[1.0, 0.0, 0.0, 0.0], translation=[0.0, 0.0, 0.0],
@@ -311,7 +349,9 @@ def export(model, out, clip_names, variant=0):
     toY = lambda v: [v[0], -v[1], -v[2]]
     side = dict(
         format=f"{stem}.glb: glTF 2.0 binary, one skinned mesh, flat joints (as vincent.glb)",
-        glb=f'{stem}.glb', model=model, files={k: os.path.basename(v) for k, v in pth.items()},
+        glb=f'{stem}.glb', model=model, files=dict(cont=os.path.basename(pth['cont']), tex=os.path.basename(pth['tex']),
+                                                   clips=(lambda cs: cs[0] if len(cs) == 1 else cs)(
+                                                       sorted({os.path.basename(d['cont']) for d in clips.values()}))),
         variant=dict(value=variant, all=variants(buf),
                      rule='FUN_005b2ef8: smd blocks with s16 +0x12 == object byte +0x44b, last block '
                           'first; textures by the same byte (FUN_00259058). Who sets +0x44b: not decoded'),
@@ -319,12 +359,17 @@ def export(model, out, clip_names, variant=0):
         vertices=len(pos), triangles=len(tris), pool_vertices=len(V0),
         groups=[dict(name=gr['name'], pool=gr['psize'], triangles=gr['tris']) for gr in groups],
         layout='unindexed per-corner vertices in file draw order; each primitive indexes a run',
-        draw_runs=[dict(order=o, first_tri=s0, tri_count=n, alpha=a) for o, (s0, n, a) in enumerate(runs)],
+        draw_runs=[dict(order=o, first_tri=s0, tri_count=n, alpha=a, **(dict(slot=mat_bytes[k]) if multi else {}))
+                   for o, (s0, n, a, k) in enumerate(runs)],
         color='COLOR_0 = vertex colour / 128 (1.0 = neutral). Fill-mode V4-8 (no data): '
               'FUN_005b0ee0 STCOL 0x80 x4 + STMASK 0xaaaaaa0f -> 128 = 1.0',
         fill_mode_triangles=int(sum(d[2] for d in tdesc)),
-        texture=dict(name=mats[0]['name'], size=[int(rgba.shape[1]), int(rgba.shape[0])],
-                     tex0_rel={k: v for k, v in mats[0]['fields'].items()}),
+        texture=dict(name=mats[mat_bytes[0]]['name'], size=[int(texs[0].shape[1]), int(texs[0].shape[0])],
+                     tex0_rel={k: v for k, v in mats[mat_bytes[0]]['fields'].items()}),
+        **(dict(textures=[dict(slot=m, name=mats[m]['name'], size=[int(t.shape[1]), int(t.shape[0])])
+                          for m, t in zip(mat_bytes, texs)]) if multi else {}),
+        **(dict(envmap_triangles=env_tris, envmap='desc +4 & 0x60: FUN_005b19b8 env-map context NOT drawn '
+                '(not decoded; notes/fidelity-audit.md)') if env_tris else {}),
         alpha=dict(cutoff=aref, game='desc +4 bit 1: ATE GEQUAL 100 (FUN_005b19b8)'),
         skin=dict(rule='FUN_005b1190 + VU0 0x120 (slot_skin), top 4 renormalised', **sst),
         joints=dict(count=bc, node_index='joint b = node b+1', parent=[int(p) for p in sk['parent']],
@@ -368,14 +413,20 @@ def weapon_names(owner, slot):
     return out
 
 
-def export_weapons(owner, slot, out, variant=0):
+def export_weapons(owner, slot, out, variant=0, map_only=False):
     """Every weapon the owner's placements carry in this slot -> WEAPON.glb/json, plus
-    OWNER_weapons.json {record: weapon}."""
+    OWNER_weapons.json {record: weapon} with the owner's socket bone (marker slot + 0xf).
+    map_only: write only the map; the weapon glbs (socket space = marker offset + bind vertex)
+    come from another owner's run and are shared, which holds only for a zero marker offset."""
     V.check_ignored(out); os.makedirs(out, exist_ok=True)
     recs = weapon_names(owner, slot)
+    bone, off = socket(owner, slot + 0xf)
     for nm in sorted(set(recs.values())):
-        export_weapon(owner, slot, nm, out, variant)
-    json.dump(dict(owner=owner, slot=slot, marker=slot + 0xf,
+        if not map_only:
+            export_weapon(owner, slot, nm, out, variant)
+        elif any(off) or not os.path.exists(os.path.join(out, f'{nm}.glb')):
+            sys.exit(f"{owner}: marker {slot + 0xf} offset {off} / {nm}.glb missing: the shared weapon glb doesn't fit")
+    json.dump(dict(owner=owner, slot=slot, marker=slot + 0xf, bone=bone, marker_offset=off,
                    rule='FUN_00315e90 -> FUN_00316058: parameter set +0x44 (+8 x slot) -> FUN_00316270',
                    records={str(k): v for k, v in sorted(recs.items())}),
               open(os.path.join(out, f'{owner}_weapons.json'), 'w'), indent=1)
@@ -491,7 +542,7 @@ if __name__ == '__main__':
             export(model, out, cl, v)
     elif a[0] == 'weapon':
         export_weapons(opt('--owner', 'e027'), int(opt('--slot', '0')), opt('--out', DEFAULT_OUT),
-                       int(opt('--variant', '0')))
+                       int(opt('--variant', '0')), '--map-only' in a)
     elif a[0] == 'selftest':
         selftest()
     elif a[0] == 'verify':

@@ -113,8 +113,47 @@ the rifle through that pose's bone 26: median 0.09 / 0.06 / 0.04 / 0.12 u, max <
 soldiers incl. #66 and #67); one has 6 body corners (0.80), one has no body on screen. Winding
 (UV-unique drawn tris, export index order): cw 145 / ccw 14 -> BackSide.
 
-Inputs for tools/byo/disc.py INPUTS (not added: outside this job's files):
+Inputs for tools/byo/disc.py INPUTS (now listed there):
 077700c1 3651ff2ee1a90b9ff2c40de1078d9a1d4d829c31c8edb178a100792c082fed4e,
 077700c2 b3872f96ba1ca583b327c0edcd0279638928356d0acc734f4e2d88fecbac11a5,
 07770101 abddbc0ed50cdcf956cf807ffde04258e9a21fb0916f1168376384e7e6a3aab9,
 07770102 241f2c235d69e0b2f04b132279aff9d0d889527220348da94337b029c8387dfd.
+
+## Other types (worker 0132, 2026-10-30)
+
+z128 section 1 also places e048 x27, e030 x23, e023 x2, e001 / e024 / e036 x1 (files: e001 = 07650040..,
+e024 = 07650600..). `export_web_enemy.py export --model M` decodes all of them with e027's decoder unchanged
+(no WARN, every strip triangle kept; skin weights reproduce every decoded position):
+
+| model | variants: tris | texture slots (var 0) | idle clip (GUESS) | clip file | weapon (slot 0) |
+|---|---|---|---|---|---|
+| e048 | 1500 / 502 / 302 | 1 | r_gst | 07650c0b (m001) | w003 x16, w004 x11; marker 15 = bone 28, offset 0 |
+| e030 | 1380 / 750 / 498 / 302 | 1 | st_a | 07650780 (m000) | none |
+| e036 | 1498 / 500 / 300 | 2 | m_gst | 07650900 (m000) | w004; bone 29, offset 0 |
+| e023 | 5791 / 3001 | 8 (+3 env maps) | idle | 076505cb (m001) | none |
+| e024 | 4862 / 2528 | 8 (+3 env maps) | idle | 07650600 (m000) | none |
+| e001 | 3000 | 4 | n_st | 07650040 (m000) | none |
+
+Exporter changes: several texture slots per model (material byte = FUN_00259058 slot; glTF material 2k / 2k+1
+= opaque / alpha of slot k; one slot gives e027's old layout, e027 glb/json/local.bin md5 unchanged); clips
+are looked up across the model's motion files k = 0, 0xa, 0xb..0x11 (`clip_file`); `weapon --map-only`
+writes OWNER_weapons.json (now with `bone`, `marker_offset`) reusing the shared w003 / w004 glbs.
+
+**Env-map context (not drawn).** FUN_005b19b8 takes its second path when desc +4 & 0x60 (and DAT_004fcb00
+bit 4): base TEX0 = table[desc[0]] plus an env-map texture table[obj+0x451 + desc[2] - 1]. desc[2] = 0xff
+on every normal descriptor (it is not the flag). e023: 1273 / 451 triangles (var 0 / 1) with flag 0x40,
+e024: 1092 / 338; Vincent has 266. The base texture is drawn, the env pass is not (sidecar `envmap_triangles`).
+
+**Checks.** e048 is drawn in hero dump 163235 (texels: dump page = e048lw_1, mean |d| 0): `enemy_dump_check.py
+--model e048`: var 1, 261/261 dump triangles UV-matched (419/502 export triangles covered), rigid triangles
+max-edge error median 1.13% (100% within 10%), edge scale 1.0006; winding by position drawn cw 248 / ccw 0,
+ADC ccw 214 / cw 0 -> BackSide, as e027. One instance, drawn after Vincent (seq 63565..64319); its pose
+is not r_gst (best r_gst frame RMS 1.48 u): likely a stage-load body (record 43, e048, dead in the save).
+No dump shows e030, e036, e023, e024 or e001 (texel scan of all three z128 dumps' last frames); for those the
+check is the file's own data only: strip triangles sent = kept (e030 var 3: 1 degenerate join), UVs in 0..1,
+and the round LOD budgets (1500 / 750 / 500 / 300; e001 3000).
+
+**Idle clip: not decoded.** None of these types is active in the save state, so no C+0x570 to read. The
+page takes the stand clip of the set the type would use (enemies.js IDLE, GUESS). Rate 0.5 and the light
+rig's actor centre are e027's for every type (GUESS). Drawn only with the viewer option `?enemies=all`
+(every e0xx placement standing, 181 actors); by default the game rule is unchanged (records 44 / 45 today).

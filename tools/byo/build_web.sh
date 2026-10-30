@@ -217,12 +217,28 @@ run enemy_e027 $PY export_web_enemy.py export --model e027 --out "$DATA/enemies"
 grep '^wrote' "$LOGS/enemy_e027.log" | sed "s#$REPO/##" | cut -c1-160
 echo "ok"
 
+step "z128's other enemy types (stage section 1: e048, e030, e036, e023, e024, e001) -> data/enemies"
+# Same decode as e027; one idle clip each (GUESS which idle the game starts: enemies.js IDLE, notes/enemy-model.md)
+for mc in e048:r_gst e030:st_a e036:m_gst e023:idle e024:idle e001:n_st; do
+  m=${mc%%:*}
+  run enemy_$m $PY export_web_enemy.py export --model $m --out "$DATA/enemies" --clips ${mc#*:}
+  [ -s "$DATA/enemies/$m.glb" ] || fail "data/enemies/$m.glb missing after the enemy export (log: $LOGS/enemy_$m.log)"
+  grep '^wrote' "$LOGS/enemy_$m.log" | sed "s#$REPO/##" | cut -c1-160
+done
+echo "ok"
+
 step "enemy weapons (e027 slot 0: parameter set +0x44 -> w003 / w004 at marker 15) -> data/enemies"
 # inputs 077700c1/c2 (w003) and 07770101/02 (w004), checked by disc.py verify; the skip only guards a partial tree
 if [ -s "$NOPATH/077700c1.bin" ] && [ -s "$NOPATH/077700c2.bin" ] && [ -s "$NOPATH/07770101.bin" ] && [ -s "$NOPATH/07770102.bin" ]; then
   run enemy_weapons $PY export_web_enemy.py weapon --owner e027 --slot 0 --out "$DATA/enemies"
   [ -s "$DATA/enemies/e027_weapons.json" ] || fail "data/enemies/e027_weapons.json missing (log: $LOGS/enemy_weapons.log)"
   grep '^wrote' "$LOGS/enemy_weapons.log" | sed "s#$REPO/##" | cut -c1-160
+  # e048 (w003 / w004) and e036 (w004) carry the same weapons at marker 15 (offset 0): map only, own socket bone
+  for o in e048 e036; do
+    run enemy_weapons_$o $PY export_web_enemy.py weapon --owner $o --slot 0 --out "$DATA/enemies" --map-only
+    [ -s "$DATA/enemies/${o}_weapons.json" ] || fail "data/enemies/${o}_weapons.json missing (log: $LOGS/enemy_weapons_$o.log)"
+    grep '^wrote' "$LOGS/enemy_weapons_$o.log" | sed "s#$REPO/##" | cut -c1-160
+  done
   echo "ok"
 else
   echo "skipped: weapon files 077700c1/c2, 07770101/02 not extracted (soldiers drawn without rifles)"

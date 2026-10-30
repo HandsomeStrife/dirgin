@@ -24,7 +24,7 @@ stored in the repo. Format decoded from the game's code (PAL SLES_541.85):
   Object vtable +0x2f4 (FUN_0054e4a0 / actors FUN_00568f98) fires event N of
   the object's script (object +0x34 = script index).
 
-Usage: stage_events.py STAGE.bin [--dis N] [--cmds 0x143,0x108]
+Usage: stage_events.py STAGE.bin [--dis N] [--cmds 0x143,0x108] [--triggers] [--activations]
 """
 import struct
 import sys
@@ -164,8 +164,14 @@ def actions(d, si, ev_want=None):
                 a = [regs.get(k, 0) for k in range(4)]
                 if imm == 0xc:
                     res = 'flag%s' % a[0]
-                elif imm == 0x3a:
+                elif imm in (0x3a, 0x3f):                      # manager +0x3b2 (section 1)
                     res = 'obj[%s]' % a[0]
+                elif imm == 0x3d:                              # manager +0x7b0 (section 8)
+                    res = 'trig[%s]' % a[0]
+                elif imm == 0x3e:                              # manager +0x5b2 (section 15)
+                    res = 'prop[%s]' % a[0]
+                elif imm == 0x44:                              # manager +0xfac (section 22)
+                    res = 'misc[%s]' % a[0]
                 elif imm == 0xa6:
                     res = 'diff==2'
                 elif imm == 0xa7:
@@ -176,6 +182,47 @@ def actions(d, si, ev_want=None):
                 st.append(res)
             elif op in (17, 1):
                 pass
+    return out
+
+
+# Save state the page starts from (notes/enemy-activation.md §1): FUN_00242c28() = 1, so the
+# manager 0xa6 / 0xa7 tests (== 2 / == 3) are false; event flags (FUN_003ff738) = 0 except 2 and 46.
+SAVE_FLAGS = {2: 7, 46: 1}
+SAVE_DIFF = 1
+ACT_CMDS = {0x101: 'wake', 0x108: 'activate', 0x109: 'deactivate', 0x130: 'deactivate', 0x143: 'ai mode'}
+
+
+def eval_guard(g, flags=SAVE_FLAGS, diff=SAVE_DIFF):
+    """True / False for a guard the export can know (difficulty, event flags), None = runtime
+    (own vars 0x105, manager shorts 0x30, message args ...)."""
+    import re
+    e = g.replace('diff==2', str(int(diff == 2))).replace('diff==3', str(int(diff == 3)))
+    e = re.sub(r'flag(\d+)', lambda m: str(flags.get(int(m.group(1)), 0)), e)
+    e = e.replace('!', ' not ').replace('&&', ' and ').replace('||', ' or ').replace(' not =', '!=')
+    if re.search(r'[A-Za-z_\[]', e.replace('not', '').replace('and', '').replace('or', '')):
+        return None
+    try:
+        return bool(eval(e, {'__builtins__': {}}))
+    except Exception:
+        return None
+
+
+def activations(d, si):
+    """Resolved 0x101 / 0x108 / 0x109 / 0x130 / 0x143 sends of script si: target named by its
+    manager lookup (obj[k] = section-1 record k, trig[k] = section-8 trigger k), guards evaluated
+    for the save (difficulty 1, flag0 = 0). Branches whose known guard is false are dropped;
+    'runtime' lists the guards left to the VM (e.g. the trigger's own var0 'once')."""
+    out = []
+    for ev, i, tgt, cmd, a, g in actions(d, si):
+        if cmd not in ACT_CMDS:
+            continue
+        vals = [eval_guard(x) for x in g]
+        if False in vals:
+            continue
+        who = a[0] if cmd in (0x101,) else tgt
+        out.append(dict(ev=ev, at=i, cmd=cmd, what=ACT_CMDS[cmd], target=str(who),
+                        n=a[1] if cmd == 0x101 else a[0] if cmd == 0x143 else None,
+                        runtime=[x for x, v in zip(g, vals) if v is None]))
     return out
 
 
@@ -209,6 +256,25 @@ def main():
             print('trig %3d pos (%7.1f %6.1f %7.1f) box %s..%s shape %d fl %x script %d  %s' % (
                 k, *pos, tuple(round(x, 1) for x in lo), tuple(round(x, 1) for x in hi),
                 shape, fl, scr, ' '.join(acts[:8])))
+        return
+    if '--activations' in args:
+        # every trigger's resolved activations / wakes for the save (notes/enemy-activation.md §2)
+        so, n, stride = sections(d)[8]
+        for k in range(n):
+            r = so + k * stride
+            scr = struct.unpack_from('<h', d, r + 0xa0)[0]
+            fl = u32(d, r + 0xa4)
+            if not 0 <= scr < len(scripts(d)):
+                continue
+            acts = activations(d, scr)
+            if not acts:
+                continue
+            pos = struct.unpack_from('<3f', d, r + 0x30)
+            print('trig %3d (%7.1f %6.1f %7.1f) fl %6x%s script %d' % (
+                k, *pos, fl, ' UNARMED' if fl >> 17 & 1 else '', scr))
+            for x in acts:
+                print('    ev 0x%-3x %-10s %-9s n=%-4s if %s' % (
+                    x['ev'], x['what'], x['target'], x['n'], ' && '.join(x['runtime']) or '-'))
         return
     if '--actions' in args:
         si = int(args[args.index('--actions') + 1], 0)

@@ -1,11 +1,20 @@
-// z128's e027 soldiers. Separate module, hooked from play.js; ?enemies=0 turns it off. The AI
+// z128's enemies: e027 soldiers, and any other type export_web_enemy.py exported (e048, e030,
+// e036, e023, e024, e001). Separate module, hooked from play.js; ?enemies=0 turns it off. The AI
 // (enemy_ai.js) drives records 44 / 45 (play.js `extra`); no collision or damage taken yet.
 // Start state = the sea-of-flames save: the stage-load soldiers 41 / 42 are dead there and have
 // no body, so they are not drawn (placements.json `dead`, export_web_placements.py SAVE_STATE_DEAD).
 //
 // Data (gitignored, tools/byo/build_web.sh): data/enemies/placements.json
-// (export_web_placements.py, from 06800001.bin sections 0/1), e027.glb / e027.json /
-// e027_local.bin (export_web_enemy.py). Decode notes: notes/enemy-placement.md.
+// (export_web_placements.py, from 06800001.bin sections 0/1), MODEL.glb / MODEL.json /
+// MODEL_local.bin / MODEL_weapons.json (export_web_enemy.py). Decode notes: notes/enemy-placement.md,
+// notes/enemy-model.md.
+//
+// Which placements are drawn stays the game's rule below: alive at the save (records 44 / 45 from
+// play.js) + every record enemy_ai activates later (trigger scripts' cmd 0x108: onActivate -> add();
+// 0x109 / 0x130: onDeactivate -> remove()). e027s run the translated AI; other types stand in their
+// idle clip (GUESS, their AI is not translated). Viewer-only option ?enemies=all (off by default, not the
+// game): every enemy placement of stage section 1 (ai.json records, e0xx models) stands in its
+// idle clip, alive or not, to check the models.
 //
 // Which placements: FUN_00319190 at stage load loads a status whose placement has flag bit 3
 // and whose tag is an event actor (FUN_00376938); FUN_005453b0 -> FUN_00558f68 activates it.
@@ -42,14 +51,19 @@ import { SpeedAnimator, STEP } from './player.js';
 
 const DIR = 'data/enemies/';
 const CLIP = 'r_gst';            // GUESS: the idle the brain requests at activation (FUN_0055b8e0 from the brain; not decoded). Save state: idle soldiers play r_gst / r_gst_lk
+// GUESS: idle clip of the other types (not decoded: no actor of these types is active in the save
+// state; notes/enemy-model.md "Other types"). The stand clip of the motion set the type would use:
+// e048 carries a rifle like e027 and has the same m001 r_* set; the others' stand clip in m000 / m001.
+const IDLE = { e027: CLIP, e048: 'r_gst', e030: 'st_a', e036: 'm_gst', e023: 'idle', e024: 'idle', e001: 'n_st' };
+const ALL = typeof location !== 'undefined' && new URLSearchParams(location.search).get('enemies') === 'all';
 const RATE = 0.5;                // MP+0x40c of every idle e027 in the save state (= FUN_003456c0 rate 1.0, as Vincent's)
-const VARIANT = 0;               // GUESS: LOD byte obj+0x44b (who sets it not decoded; notes/enemy-model.md); 0 = e027.glb
+const VARIANT = 0;               // GUESS: LOD byte obj+0x44b (who sets it not decoded; notes/enemy-model.md); 0 = MODEL.glb
 // GUESS: MP+0x450 (set by script, FUN_00342240). Read from the save state's idle soldiers
 // (records 44-49, 66: 122 for six, 128 for 66), not from 41 / 42 (shot dead before the save).
 const SCALE_BYTE = 122;
 // GUESS: model bbox centre (MP+0x90 + MP+0xa0)/2 for FUN_005a72a8's actor point, read from the
 // save state's idle soldiers (object 154, e027 idle; not records 41 / 42); FUN_005a8850 ->
-// FUN_005b0380 not decoded (as Vincent's)
+// FUN_005b0380 not decoded (as Vincent's). The other types use e027's value too (?enemies=all only today).
 const ACTOR_CENTRE = [-0.2927, -8.2564, -0.7635];
 
 // Weapon (decoded, notes/enemy-model.md "Rifle"): FUN_00315e90 -> FUN_00316058 slot 0 = the
@@ -61,23 +75,29 @@ const ACTOR_CENTRE = [-0.2927, -8.2564, -0.7635];
 // Checked on hero dump 163235 (w003 low LOD, 290 drawn triangles, all UV-matched): shape fit
 // scale 0.993-1.0005, RMS 0.15-0.32 u; placed through bone 26 of each soldier's best-fit idle
 // pose: median 0.04-0.12 u from the game's rifle (4 soldiers). Winding cw 145 / ccw 14: BackSide.
-async function loadWeapons(list) {
+// Other owners: e048 (w003 / w004, bone 28) and e036 (w004, bone 29) carry the same glbs; their
+// marker 15 offset is 0 too (MODEL_weapons.json bone / marker_offset, export_web_enemy.py --map-only).
+// Types with no weapon slot in z128 (e030, e023, e024, e001) have no map (export_web_enemy.weapon_names).
+const ARMED = new Set(['e027', 'e048', 'e036']);
+const weaponGlb = {};
+async function loadWeapons(model) {
   let map;
-  try { map = await json(DIR + 'e027_weapons.json'); }
-  catch (e) { console.warn('enemy weapons not shown:', e.message); return null; }
-  const names = [...new Set(list.map(p => map.records[p.rec]).filter(Boolean))];
-  const glb = {};
-  for (const n of names) {
-    try { glb[n] = await new GLTFLoader().loadAsync(DIR + n + '.glb'); }
-    catch (e) { console.warn(`enemy weapon ${n} not shown:`, e.message); }
+  try { map = await json(DIR + model + '_weapons.json'); }
+  catch (e) {
+    console.warn(`${model} weapons not shown:`, e.message);
+    return null;
   }
-  return { map, glb };
+  return { map, bone: map.bone ?? 26 };                        // a map from before 'bone' was written: e027's 26
 }
-function attachWeapon(weapons, rec, scn, body, U, litPatch) {
+async function weaponGltf(name) {
+  try { return await (weaponGlb[name] ??= new GLTFLoader().loadAsync(DIR + name + '.glb')); }
+  catch (e) { console.warn(`enemy weapon ${name} not shown:`, e.message); return null; }
+}
+async function attachWeapon(weapons, rec, scn, body, U, litPatch) {
   const name = weapons?.map.records[rec];
-  const g = name && weapons.glb[name];
+  const g = name && await weaponGltf(name);
   if (!g) return null;
-  const sock = 'j' + String(26).padStart(2, '0');              // marker 15 -> bone 26 (e027 marker.mkd)
+  const sock = 'j' + String(weapons.bone).padStart(2, '0');    // marker 15 -> its bone (marker.mkd; e027 26)
   let joint = null;
   scn.traverse(n => { if (!joint && n.name === sock) joint = n; });
   if (!joint) { console.warn(`enemy ${rec}: no joint ${sock}, weapon not shown`); return null; }
@@ -120,27 +140,52 @@ function light2(light, p, dir, col) {
   else dir.set(0, 0, 0);
 }
 
+// extra: section-1 records the AI drives at the start (enemy_ai.js; ai.json records, up = (0,-1,0)
+// as every z128 placement). Later activations (cmd 0x108, enemy_ai onActivate) come through add().
 export async function setupEnemies({ root, litPatch, light, extra = [] }) {
   const P = await json(DIR + 'placements.json');
-  // extra: section-1 records the AI drives (enemy_ai.js; ai.json records, up = (0,-1,0) as every z128 placement)
-  // dead in the save state (the page's start): no body, nothing drawn (FUN_00559748 builds none for a dead status)
-  const list = P.placements.filter(p => p.model === 'e027' && !p.dead)
-    .concat(extra.map(r => ({ rec: r.rec, tag: 'rec' + r.rec, model: r.model, pos: r.pos, face: r.face, up: [0, -1, 0] })));   // GUESS: ai.json carries no up vector; (0,-1,0) as for 41/42 (the up check can't fire here)
-  if (!list.length) return null;
-  const stem = VARIANT === 0 ? 'e027' : `e027_v${VARIANT}`;
-  const [gltf, side, lpBuf] = await Promise.all([
-    new GLTFLoader().loadAsync(DIR + stem + '.glb'),
-    json(DIR + 'e027.json'),
-    fetch(DIR + 'e027_local.bin').then(r => { if (!r.ok) throw new Error(`e027_local.bin: HTTP ${r.status}`); return r.arrayBuffer(); }),
-  ]);
-  // weapons (export_web_enemy.py weapon): {record: name} and one static glb per name
-  const weapons = await loadWeapons(list);
-  const lp = side.local_pose;
-  if (!lp || !lp.clips[CLIP]) throw new Error(`e027.json: no local pose for ${CLIP}`);
+  // dead in the save state (the page's start): no body, nothing drawn (FUN_00559748 builds none for
+  // a dead status). deadRecs: the same records for enemy_ai (createEnemyAI deadRecs: it refuses them)
+  const deadRecs = P.save_state_dead?.records ?? P.placements.filter(p => p.dead).map(p => p.rec);
+  const fromRec = r => ({ rec: r.rec, tag: 'rec' + r.rec, model: r.model, pos: r.pos, face: r.face, up: [0, -1, 0] });   // GUESS: ai.json carries no up vector; (0,-1,0) as for 41/42 (the up check can't fire here)
+  let list = P.placements.filter(p => IDLE[p.model] && !p.dead).concat(extra.map(fromRec));
+  if (ALL) {
+    // viewer only (?enemies=all): every enemy placement standing; the AI still drives its own records
+    const A = await json(DIR + 'ai.json');
+    list = A.records.filter(r => /^e\d{3}$/.test(r.model)).map(fromRec);
+  }
+  // one export per model, loaded on first use: MODEL.glb (variant), sidecar, local pose, weapon map
+  const models = {};
+  const loadModel = m => models[m] ??= (async () => {
+    const clip = IDLE[m];
+    if (!clip) throw new Error('no idle clip known');
+    const stem = VARIANT === 0 ? m : `${m}_v${VARIANT}`;
+    const [gltf, side, lpBuf] = await Promise.all([
+      new GLTFLoader().loadAsync(DIR + stem + '.glb'),
+      json(DIR + m + '.json'),
+      fetch(DIR + m + '_local.bin').then(r => { if (!r.ok) throw new Error(`${m}_local.bin: HTTP ${r.status}`); return r.arrayBuffer(); }),
+    ]);
+    const lp = side.local_pose;
+    if (!lp || !lp.clips[clip]) throw new Error(`${m}.json: no local pose for ${clip}`);
+    // weapons (export_web_enemy.py weapon): {record: name}; one static glb per name (weaponGltf)
+    const weapons = ARMED.has(m) ? await loadWeapons(m) : null;
+    return { gltf, side, lpBuf, lp, clip, weapons };
+  })().catch(e => {
+    if (m === 'e027') throw e;                                 // the AI's soldiers: enemies off, as before
+    console.warn(`enemies: ${m} not drawn:`, e.message);
+    return null;
+  });
+  // e027 always (the AI's model; a failure turns the enemies off), then the start list's types
+  await loadModel('e027');
+  for (const m of new Set(list.map(p => p.model))) await loadModel(m);
   const s = SCALE_BYTE / 128;
   const Y = new THREE.Vector3(0, 1, 0);
   const actors = [];
-  for (const pl of list) {
+  const pending = new Set();                                   // records whose body is loading
+  async function spawn(pl) {
+    const M = await loadModel(pl.model);
+    if (!M) return null;
+    const { gltf, side, lpBuf, lp, clip, weapons } = M;
     const scn = cloneSkinned(gltf.scene);
     const prims = [];
     scn.traverse(o => {
@@ -149,7 +194,9 @@ export async function setupEnemies({ root, litPatch, light, extra = [] }) {
       o.material = o.material.clone();                         // own light-2 uniforms per soldier
       const m = o.material;
       if (m.map) { m.map.colorSpace = THREE.NoColorSpace; m.map.needsUpdate = true; }
-      m.side = THREE.BackSide;                                 // measured on e027 (see Winding above)
+      // measured on e027 and e048 (see Winding above).
+      // GUESS: e030 / e036 / e023 / e024 / e001 use the same back-face winding (not measured; no dump shows them; notes/fidelity-audit.md 'Other enemy types winding')
+      m.side = THREE.BackSide;
       prims.push(o);
     });
     const flip = new THREE.Group(); flip.rotation.x = Math.PI; flip.add(scn);   // glb Y-up -> game -Y-up
@@ -163,11 +210,10 @@ export async function setupEnemies({ root, litPatch, light, extra = [] }) {
     const heading = Math.atan2(fx, fz);
     body.position.set(...pl.pos);
     body.rotation.y = heading + Math.PI;                       // play.js bodyYaw
-    root.add(body);
     // FUN_005a9db0 through SpeedAnimator's own code (setLocalPose / poseLocal use only this.lp)
     const pose = Object.create(SpeedAnimator.prototype);
     pose.setLocalPose(lp, lpBuf, scn);
-    const a = { rec: pl.rec, tag: pl.tag, body, prims, pose, frame: 0, clip: CLIP };   // GUESS: frame 0 at activation, all in phase
+    const a = { rec: pl.rec, tag: pl.tag, model: pl.model, side, lp, body, prims, pose, frame: 0, clip };   // GUESS: frame 0 at activation, all in phase
     if (light && litPatch) {
       const p = new THREE.Vector3(...ACTOR_CENTRE).applyAxisAngle(Y, body.rotation.y).add(body.position);
       const dir = new THREE.Vector3(), col = new THREE.Vector3();
@@ -183,12 +229,60 @@ export async function setupEnemies({ root, litPatch, light, extra = [] }) {
       a.light = { point: p.toArray(), L2: dir.toArray(), C2: col.toArray() };
       a.U = U;
     }
-    a.weapon = attachWeapon(weapons, pl.rec, scn, body, a.U, litPatch);
-    pose.poseLocal(CLIP, 0, null, 0, 1);
-    actors.push(a);
+    a.weapon = await attachWeapon(weapons, pl.rec, scn, body, a.U, litPatch);
+    pose.poseLocal(clip, 0, null, 0, 1);
+    return a;
   }
+  // start list in order (play.js adds these after vin.body: the draw order above)
+  for (const pl of list) { const a = await spawn(pl); if (a) { root.add(a.body); actors.push(a); } }
+
+  // A record activated after the start (enemy_ai onActivate: cmd 0x108 -> FUN_00559748 builds its
+  // body): drawn at its placement. e027: enemy_ai's actor drives it (tick). Other models:
+  // GUESS: they stand in their idle clip at the placement (their AI is not translated; only e027's
+  // is. notes/fidelity-audit.md 'Non-e027 AI not translated').
+  // Draw order: FUN_005a7978 links a new MP right after the list head, so it draws before every
+  // older actor: the body goes in front of the first drawn actor (Vincent's body at the start).
+  async function add(record) {
+    const k = record.rec;
+    if (pending.has(k) || actors.some(a => a.rec === k)) return null;      // already drawn (?enemies=all, a re-send)
+    pending.add(k);
+    const a = await spawn(fromRec(record)).catch(e => { console.warn(`enemies: record ${k} not drawn:`, e.message); return null; });
+    if (!pending.delete(k)) { if (a) dispose(a); return null; }   // deactivated while loading: never drawn
+    if (!a) return null;
+    const head = mpHead();
+    root.add(a.body);
+    if (head) { const c = root.children; c.splice(c.indexOf(a.body), 1); c.splice(c.indexOf(head), 0, a.body); }
+    linked.unshift(a.body);                                    // right after the list head (newest first)
+    actors.push(a);
+    return a;
+  }
+  function dispose(a) {
+    for (const o of a.prims) o.material.dispose();
+    if (a.weapon) a.weapon.mesh.traverse(o => { if (o.isMesh) o.material.dispose(); });   // attachWeapon's cloned materials
+  }
+  // cmd 0x109 / 0x130 (enemy_ai onDeactivate). GUESS (enemy_ai 'Actor deactivation'): the body goes.
+  function remove(record) {
+    const k = record.rec;
+    pending.delete(k);
+    const i = actors.findIndex(a => a.rec === k);
+    if (i < 0) return false;
+    const [a] = actors.splice(i, 1);
+    // FUN_005a7d88 (MP destructor): plain unlink, prev->next = next. A body linked after the head
+    // leaves its place to its successor, so the next add still goes in front of the newest one left.
+    const j = linked.indexOf(a.body); if (j >= 0) linked.splice(j, 1);
+    root.remove(a.body);
+    dispose(a);
+    return true;
+  }
+  // Bodies activated after the start, in link order (newest first), and the first start body they
+  // all draw before (play.js: Vincent's). A new body goes in front of linked[0], else of base.
+  const linked = [];
+  let base = null;
+  const mpHead = () => { const h = linked[0] || base; return h && h.parent === root ? h : null; };
   return {
-    actors,
+    actors, deadRecs, add, remove,
+    // the drawn actor that draws first (FUN_005a7978 list head side); play.js sets Vincent's body
+    set mpHead(o) { base = o; },
     // one game frame: draw pose = this frame's clip frame, then FUN_005aa2a8's advance.
     // ai (enemy_ai.js world, optional): the clip each AI-driven soldier's body asked for
     // (C+0x570); a new clip starts at frame 0. GUESS: no blend between clips (flags 0x82 / 0x83
@@ -199,11 +293,12 @@ export async function setupEnemies({ root, litPatch, light, extra = [] }) {
         // body matrix: the AI's body C+0x20 facing (enemy_ai turnBody, FUN_0034de50) and C+0x30
         // position, drawn as at setup (play.js bodyYaw: rotation.y = atan2(face.x, face.z) + pi)
         if (s) { a.body.position.set(...s.pos); a.body.rotation.y = Math.atan2(s.face[0], s.face[2]) + Math.PI; }
-        const want = s && lp.clips[s.C.clip] && side.clips[s.C.clip] ? s.C.clip : a.clip;
+        const want = s && a.lp.clips[s.C.clip] && a.side.clips[s.C.clip] ? s.C.clip : a.clip;
         if (want !== a.clip) { a.clip = want; a.frame = 0; }
         a.pose.poseLocal(a.clip, a.frame, null, 0, 1);
+        // GUESS (other types): e027's RATE (MP+0x40c 0.5) for every type
         a.frame = Math.fround(a.frame + Math.fround(Math.fround(RATE * 1.0) * STEP));
-        if (side.clips[a.clip].frames <= a.frame) a.frame = 0;
+        if (a.side.clips[a.clip].frames <= a.frame) a.frame = 0;
       }
     },
   };
