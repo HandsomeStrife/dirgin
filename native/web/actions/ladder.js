@@ -32,11 +32,12 @@ const RAY_UP = 7;
 
 // Test aid: play.html?ladder=N puts him at ladder N's bottom once, on load (z128's start
 // deck doesn't connect to the ladder floor on foot in the current collision).
-// OPTION airgrab: play.html?airgrab=1 (off by default; not in the game, which never mounts from the
-// air, notes/jump-research.md worker 0131): a ✕ press in an air state (8 / 9 / 0x1f-0x21) whose
+// OPTION airgrab: on by default at Dan's request, play.html?airgrab=0 turns it off (not in the game, which
+// never mounts from the air, notes/jump-research.md worker 0131): a ✕ press in an air state (8 / 9 / 0x1f-0x21) whose
 // pose passes the ladder choice rule (selects: feet + 7 up in a trigger box, facing it) grabs
-// the ladder instead of the second jump. ladderAction({ airgrab }) overrides it (tests).
-const AIRGRAB = (() => { try { return new URLSearchParams(location.search).get('airgrab') === '1'; } catch { return false; } })();
+// the ladder instead of the second jump. ladderAction({ airgrab }) overrides it;
+// with no page (node tests) it stays off, so the default tests check the game's path.
+const AIRGRAB = (() => { try { return new URLSearchParams(location.search).get('airgrab') !== '0'; } catch { return false; } })();
 const airState = st => st === 8 || st === 9 || (st >= 0x1f && st <= 0x21);
 
 let warpTo = (() => { try { const v = new URLSearchParams(location.search).get('ladder'); return v === null ? null : +v; } catch { return null; } })();

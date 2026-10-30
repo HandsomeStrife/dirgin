@@ -213,7 +213,7 @@ for (const n of ['l_ladder_jump_a', 'l_ladder_jump_b', 'l_ladder_jump_c']) run(n
     ctrl.step({ x: 0, z: 0, stick: 0, run: false, keys: new Set(), pressed: new Set(), cross: true });
     ok(ctrl.P.state === 2 && !ctrl.jump.head, `player.js: ✕ taken by the ladder without a mount: state ${ctrl.P.state}, jump ${!!ctrl.jump.head}`);
   }
-  // OPTION airgrab (play.html?airgrab=1, not in the game): a ✕ in an air state that passes the
+  // OPTION airgrab (on by default in the page, ?airgrab=0 off; not in the game): a ✕ in an air state that passes the
   // ladder choice rule mounts. _b's inputs (✕ mid-air at the ladder face, f535) through the page's
   // step with the option on: the frames before the ✕ still match the game, the ✕ mounts (no
   // second jump). Then a mid-air ✕ away from every ladder is still the second jump.
