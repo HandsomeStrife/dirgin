@@ -24,8 +24,14 @@ Decoded (D) layout, read here, nothing copied into the repo:
   - hit-zone records per section-19 index (parameter set +0x84; FUN_003153d0 / FUN_0030fc68; see zone_set()).
   - e027 clip frame counts (r_gst, r_gst_lk, r_st_a, r_st_f) from its rifle clip set, through
     export_web_enemy.py's loaders (anim_rot.clip_frames).
+  - per record its stance (FUN_00559748 -> FUN_00564228, see stance_of) and the stance table of
+    the stage's 'bmd' file 06800009.bin (FUN_0030f688 -> FUN_0030fb78 = G+0x84; see stances()):
+    stance flags (C+0x808, FUN_0030fc38) and the motion-id -> clip-name rows (C+0x7fc, FUN_0030fc08).
+  - per zone set the actor size (FUN_00563fc0, see zone_size) and every z128 enemy type's part
+    boxes; clip frame counts per model for the motions enemy_ai.js requests (model_clips).
 
 Usage: export_web_triggers.py STAGE.bin OUTDIR
+(the stance file is read from STAGE's directory: 06800009.bin next to 06800001.bin)
 """
 import json, os, struct, sys
 
@@ -38,6 +44,11 @@ TRIG_STRIDE = 0xc0
 SEC1_STRIDE = 0x74
 SEC24_STRIDE = 0x104
 AI_CLIPS = ('r_gst', 'r_gst_lk', 'r_st_a', 'r_st_f', 'r_stlld0', 'r_stlaf0', 'r_stbf0')
+# motion ids enemy_ai.js requests (FUN_0055b8e0 / FUN_00345818 index C+0x7fc rows): 0 / 2 idle (GUESS
+# which one the brain starts), 1 the flinch's end without the gun out (FUN_00598950), 0x40 aim (r_st_a for stance 0x1f), 0x57 fire (r_st_f), 0x28 / 0x2b /
+# 0x2c the flinch / death rows the k_hits12 trace shows (r_stlld0 / r_stbf0 / r_stlaf0)
+AI_MOTIONS = (0x00, 0x01, 0x02, 0x40, 0x57, 0x28, 0x2b, 0x2c)
+STANCE_FILE = '06800009.bin'      # z128's 'bmd' file (stage 0x0680, k 9)
 
 
 def f32s(d, o, n):
@@ -101,10 +112,76 @@ def records(d):
         lvl = d[o + 0x59] if over >> 0x15 & 1 else d[o0 + ps * s0 + 0x79]
         # hit-zone set: parameter set +0x84 = section-19 index (FUN_003153d0 -> FUN_00310e40; zone_set)
         zi = struct.unpack_from('<i', d, o0 + ps * s0 + 0x84)[0]
-        out.append(dict(rec=k, model=model, script=struct.unpack_from('<h', d, o + 4)[0],
+        wcls = None
+        if weapon >= 0:
+            so24 = sec[24][0] + weapon * sec[24][2]
+            wcls = d[so24 + 0x14] >> 2 & 7
+        out.append(dict(rec=k, model=model, stance=stance_of(model, weapon >= 0, wcls),
+                        script=struct.unpack_from('<h', d, o + 4)[0],
                         mode=struct.unpack_from('<i', d, o + 8)[0],
                         pos=f32s(d, o + 0xc, 3), face=f32s(d, o + 0x1c, 3), weapon=weapon, hp=hp, lvl=lvl, zones=zi))
     return out
+
+
+def stance_of(model, armed, wcls, params=True):
+    """FUN_00564228 (called by FUN_00559748 at activation): the body's stance C+0x664 by model name
+    (FUN_00340ac0(C, n) also sets C+0x808 = stance flags and C+0x7fc = its motion rows). Only the
+    names z128 places are translated; None for the rest (NPCs, p000, ...):
+      e027 / e048 / e036: no case of their own -> LAB_005649f0: weapon W = status +0xac; class
+        W+0x14 >> 2 & 7: 2 -> 0x1e, 0 / 1 / 3 or no weapon -> 0x1f, other classes keep the stance.
+      e030 -> 0x23 (and C+0x568 |= 0x200); e023 -> 0x19, e024 -> 0x1a (actor +0x118 |= 0x80801c);
+      e001 -> 0x10.
+    LAB_005649f4 first: no status (+0x17c) or no parameter set (status +0x9c == 0) -> 0x1f. Unreachable
+    for a stage record (every section-1 record names a parameter set, which the model name comes from);
+    kept as `params` for the translation. Weapon classes 4-7 return with the stance unchanged (None
+    here: enemy_ai.js builds no actor for a record without a stance; no z128 record has one)."""
+    if model in ('e027', 'e048', 'e036'):
+        if not params:
+            return 0x1f
+        if not armed:
+            return 0x1f
+        return {0: 0x1f, 1: 0x1f, 2: 0x1e, 3: 0x1f}.get(wcls)
+    return {'e030': 0x23, 'e023': 0x19, 'e024': 0x1a, 'e001': 0x10}.get(model)
+
+
+def stances(path, used):
+    """The stance table (FUN_0030fb78: 'bmd' magic; +4 = offset of the u32 flags per stance, +8 s16
+    stance count, +0xa s16 motions per stance; the 8-byte clip-name rows start after the flags at
+    +4 + ((count + 1) & ~1) x 4). FUN_0030fc38(n) = flags[n] -> C+0x808 (bit 0: the brain's shooter
+    branch, FUN_00362ef8 state 0); FUN_0030fc08(n) = row base of stance n (C+0x7fc), motion m = row
+    m: the clip name FUN_00345818 plays. Returns {stance: {flags, motions: [name or '']}}."""
+    d = open(path, 'rb').read()
+    if d[:3] != b'bmd':
+        raise ValueError('%s: no bmd header' % path)
+    base = SE.u32(d, 4)
+    n, nm = struct.unpack_from('<hh', d, 8)
+    rows = base + ((n + 1) & ~1) * 4
+    out = {}
+    for st in sorted(used):
+        if not 0 <= st < n:
+            raise ValueError('stance %#x outside the table (%d)' % (st, n))
+        names = [d[rows + (st * nm + m) * 8:rows + (st * nm + m) * 8 + 8].split(b'\0')[0].decode('latin-1')
+                 for m in range(nm)]
+        out[str(st)] = dict(flags=SE.u32(d, base + 4 * st), motions=names)
+    return out
+
+
+def zone_size(d, i):
+    """FUN_00563fc0 (actor setup from the status): with a zone header (status +0xa8, as zone_set)
+    radius actor +0x2c = header +0x20 x 0.5 (header +0x10 bit 0: max(+0x20, +0x28) x 0.5), height
+    +0x30 = header +0x24; header +0x10 bits 2 / 4 -> actor +0x28 |= 0x10000. No header: height 17.0
+    and a radius from a constant vector (not needed: every z128 enemy set has a header).
+    Save state check: e027 / e048 5 / 18, e030 6 / 12, e001 7.5 / 28, e023 90 / 40, e024 90 / 120."""
+    sec = SE.sections(d)
+    ver = (d[3] - 0x30) * 100 + (d[4] - 0x30) * 10 + d[5] - 0x30 if d[:3] == b'bzd' else -1
+    o19, n19, _ = sec[0x13]
+    if i < 0 or ver < 0xe or i >= n19:
+        return None
+    h = sec[0x14][0] + SE.u32(d, o19 + 4 * i)
+    fl = SE.u32(d, h + 0x10)
+    w, ht, dp = struct.unpack_from('<3f', d, h + 0x20)
+    r = max(w, dp) * 0.5 if fl & 1 else w * 0.5
+    return dict(r=round(r, 6), h=round(ht, 6), f28_10000=bool(fl & 6))
 
 
 def weapons(d):
@@ -119,7 +196,8 @@ def weapons(d):
         f = lambda x: round(struct.unpack_from('<f', d, o + x)[0], 6)
         out.append(dict(idx=k, flags=SE.u32(d, o + 4), pellets=struct.unpack_from('b', d, o + 0x16)[0],
                         range=f(0x18), speed=f(0x2c), damage=h(0x40), first=h(0x42), interval=h(0x44),
-                        reload=h(0x46), mag=h(0x48), hit=d[o + 0x4a]))
+                        reload=h(0x46), mag=h(0x48), hit=d[o + 0x4a],
+                        cls=d[o + 0x14] >> 2 & 7))          # W+0x14 bits 2-4: weapon class (FUN_00564228)
     return out
 
 
@@ -196,6 +274,35 @@ def clip_frames():
     return res
 
 
+def model_clips(recs, st):
+    """{model: {clip: frames}} for the AI_MOTIONS rows of every (model, stance) pair the records use,
+    from the model's own motion files (export_web_enemy.clip_file: only disc.py INPUTS). A row whose
+    clip no listed file holds is left out (printed)."""
+    import export_web_enemy as E
+    out = {}
+    for model, stance in sorted({(r['model'], r['stance']) for r in recs if r['stance'] is not None and r['model'] in AI_TYPES}):
+        names = st[str(stance)]['motions']
+        res = out.setdefault(model, {})
+        for m in AI_MOTIONS:
+            c = names[m] if m < len(names) else ''
+            if not c or c in res:
+                continue
+            try:
+                f = E.clip_file(model, c)
+            except SystemExit:
+                print('WARN %s stance %#x motion %#x: no listed motion file holds %s' % (model, stance, m, c))
+                continue
+            cbuf, CP = E.V.find_clip(f, c)
+            res[c] = int(E.AR.clip_frames(cbuf, CP))
+    return out
+
+
+# the types enemy_ai.js builds an actor for (notes/enemy-ai-hook.md "Other types"); part boxes are
+# exported for every z128 enemy type
+AI_TYPES = ('e027', 'e048', 'e030')
+BOX_TYPES = ('e027', 'e048', 'e030', 'e036', 'e023', 'e024', 'e001')
+
+
 def main():
     if len(sys.argv) != 3:
         sys.exit(__doc__)
@@ -208,17 +315,21 @@ def main():
     # bit-0x20000 triggers by difficulty and event flag: notes/enemy-activation.md §1)
     want = {t['script'] for t in trig} | {r['script'] for r in recs} | {0}
     scr = {str(s): script(d, s) for s in sorted(want) if 0 <= s < nscr}
-    boxes = dict(e027=hitboxes('e027'))
+    boxes = {m: hitboxes(m) for m in BOX_TYPES if any(r['model'] == m for r in recs)}
+    st = stances(os.path.join(os.path.dirname(os.path.abspath(stage)), STANCE_FILE),
+                 {r['stance'] for r in recs if r['stance'] is not None})
     os.makedirs(out, exist_ok=True)
     res = dict(format='enemy-ai-2', stage=os.path.basename(stage), triggers=trig, records=recs,
                weapons=weapons(d), scripts=scr, clips=clip_frames(), hitboxes=boxes,
-               zones=zone_sets(d, recs, boxes),
+               zones=zone_sets(d, recs, boxes), stances=st, model_clips=model_clips(recs, st),
+               sizes={str(r['zones']): zone_size(d, r['zones']) for r in recs if r['zones'] >= 0},
                lock_bones={str(r['zones']): lock_bone(d, r['zones']) for r in recs if r['zones'] >= 0})
     path = os.path.join(out, 'ai.json')
     with open(path, 'w') as fh:
         json.dump(res, fh, separators=(',', ':'))
-    print('wrote %s: %d triggers, %d records, %d weapons, %d scripts, zone sets %s, clips %s' % (
-        path, len(trig), len(recs), len(res['weapons']), len(scr), sorted(res['zones']), res['clips']))
+    print('wrote %s: %d triggers, %d records, %d weapons, %d scripts, zone sets %s, clips %s, stances %s, model clips %s' % (
+        path, len(trig), len(recs), len(res['weapons']), len(scr), sorted(res['zones']), res['clips'],
+        sorted(st), {m: len(c) for m, c in res['model_clips'].items()}))
 
 
 if __name__ == '__main__':

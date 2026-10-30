@@ -11,8 +11,8 @@
 //
 // Which placements are drawn stays the game's rule below: alive at the save (records 44 / 45 from
 // play.js) + every record enemy_ai activates later (trigger scripts' cmd 0x108: onActivate -> add();
-// 0x109 / 0x130: onDeactivate -> remove()). e027s run the translated AI; other types stand in their
-// idle clip (GUESS, their AI is not translated). Viewer-only option ?enemies=all (off by default, not the
+// 0x109 / 0x130: onDeactivate -> remove()). e027 / e048 / e030 are driven by their enemy_ai actor (its
+// clip each frame; enemy_ai AI_TYPES); other types stand in their idle clip (GUESS, no AI actor). Viewer-only option ?enemies=all (off by default, not the
 // game): every enemy placement of stage section 1 (ai.json records, e0xx models) stands in its
 // idle clip, alive or not, to check the models.
 //
@@ -238,9 +238,9 @@ export async function setupEnemies({ root, litPatch, light, extra = [] }) {
   for (const pl of list) { const a = await spawn(pl); if (a) { root.add(a.body); actors.push(a); } }
 
   // A record activated after the start (enemy_ai onActivate: cmd 0x108 -> FUN_00559748 builds its
-  // body): drawn at its placement. e027: enemy_ai's actor drives it (tick). Other models:
-  // GUESS: they stand in their idle clip at the placement (their AI is not translated; only e027's
-  // is. notes/fidelity-audit.md 'Non-e027 AI not translated').
+  // body): drawn at its placement. e027 / e048 / e030: enemy_ai's actor drives it (tick). Other models:
+  // GUESS: they stand in their idle clip at the placement (no AI actor: enemy_ai AI_TYPES;
+  // notes/fidelity-audit.md 'e030 brain states 7 / 8 ...').
   // Draw order: FUN_005a7978 links a new MP right after the list head, so it draws before every
   // older actor: the body goes in front of the first drawn actor (Vincent's body at the start).
   async function add(record) {

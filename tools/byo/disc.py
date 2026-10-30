@@ -238,6 +238,11 @@ INPUTS = {
     '07770580.bin': '7be3083169b919c22f4cfe71cf775bcc44526b12fe9d2f46bc2ef291479c95c7',
     '07770581.bin': 'c9f56a9e30cc3e4676e2d856501ac140d198bed3d3262bb23e41a66c1a6f044a',
     '07770582.bin': '78ede02dcc7662df0e9e3fb1f9b0239b58a72cc46fc9b5fac49fd8bc341428f9',
+    # z128 stance table ('bmd', FUN_0030fb78: stance flags C+0x808 + motion -> clip rows) for export_web_triggers.py
+    '06800009.bin': '91dafa456ea158fd95726520cbe1ba0ded60b2980bd96ec91d57b07485021b76',
+    # m000 motion sets (stance 0x1e, m_* clips) of e048 / e027 for export_web_triggers.py / export_web_enemy.py
+    '07650c00.bin': '76c8fde91f0ab6ae694044bd22195ea3cadcccaf8b95e1535834562a7f6ccb44',
+    '076506c0.bin': '509bc7023373208a3c7bff8495b52fb20561bd8432b0b3a8c259004dbcbd5d2e',
     # outside noPath (data/bgd): weapon parts for export_web_aim.py
     '../data/bgd/bgd.bin': 'cab126367d9fb61865d03323938cc422a450f15e4ab72de5999f6d2a6e21a9a3',
     # outside noPath (data/etc): the HUD 'menu2' texture (reticle) for export_web_aim.py

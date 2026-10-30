@@ -412,5 +412,47 @@ for (const [side, damage, dist, flight] of [[0, true, 30, 3], [40, true, 30], [0
   }
 }
 
+// Other types (notes/enemy-ai-hook.md "Other types"). Every placement is the actor class 0x58e1f8; what
+// differs is data. FUN_00564228 picks the stance by model name (e027 / e048 / e036 by weapon class W+0x14:
+// 2 -> 0x1e, else 0x1f; e030 0x23; ...), its flags C+0x808 and clip rows come from the stage's 'bmd'
+// table (06800009.bin; save state: 0x1e / 0x1f 0x872b, 0x23 0x8c44). Synthetic: each awake (mode 2) with
+// Vincent 30 u away.
+if (!data.stances) ok(false, 'ai.json has no stances (rebuild data/enemies: export_web_triggers.py)');
+else {
+  const st = k => data.stances[data.records[k].stance];
+  ok(data.records[28].stance === 0x1f && data.records[24].stance === 0x1e && data.records[7].stance === 0x23 && data.records[44].stance === 0x1f,
+     `stances: e048 #28 0x${data.records[28].stance.toString(16)} (w class 3: 0x1f), e048 #24 0x${data.records[24].stance.toString(16)} (class 2: 0x1e), e030 #7 0x${data.records[7].stance.toString(16)} (0x23), e027 #44 0x1f`);
+  ok(st(44).flags === 0x872b && st(24).flags === 0x872b && st(7).flags === 0x8c44, `stance flags C+0x808: 0x1f 0x${st(44).flags.toString(16)}, 0x1e 0x${st(24).flags.toString(16)} (0x872b, trace), 0x23 0x${st(7).flags.toString(16)} (save 0x8c44)`);
+  ok(st(44).motions[0x40] === 'r_st_a' && st(44).motions[0x57] === 'r_st_f' && st(24).motions[0x57] === 'm_st_f' && st(7).motions[0] === 'st_a',
+     `stance rows: 0x1f 0x40 / 0x57 = ${st(44).motions[0x40]} / ${st(44).motions[0x57]} (trace r_st_a / r_st_f), 0x1e 0x57 ${st(24).motions[0x57]}, 0x23 0 ${st(7).motions[0]}`);
+  for (const [k, model, aimClip, fireClip, shooter] of [[28, 'e048', 'r_st_a', 'r_st_f', true], [24, 'e048', 'm_st_a', 'm_st_f', true], [7, 'e030', null, null, false]]) {
+    const rec = data.records[k];
+    const player = { pos: [rec.pos[0] - 30, rec.pos[1], rec.pos[2]], hp: 780, id: 0x16, f118: 0, s64: 0 };
+    const W = AI.createEnemyAI({ data, player, rand: () => 0.5, quiet: true });
+    const a = W.addActor({ rec: k, mode: 2 });
+    const clips = new Set(), states = new Set();
+    let shots = 0;
+    for (let i = 0; i < 400; i++) {
+      shots += W.tick(1.2, player.pos, player.pos).filter(e => e === `shot ${a.id}`).length;
+      clips.add(a.C.clip); states.add(a.ai.bstate);
+    }
+    if (shooter) {
+      const Wt = data.weapons[rec.weapon];
+      ok(a.ai.W === Wt && states.has(4) && a.ai.cmode === 2 && shots > 0 && clips.has(aimClip) && clips.has(fireClip),
+         `${model} #${k} awake: weapon ${rec.weapon} (interval ${Wt.interval}), brain 3 -> 4, combat layer ${a.ai.cmode} (2), ${shots} shots in 400 frames, clips ${[...clips].join(' ')} (${aimClip} / ${fireClip})`);
+    } else {
+      ok(!a.ai.W && states.has(7) && !states.has(3) && shots === 0 && a.C.clip === 'st_a',
+         `${model} #${k} awake: no weapon, brain state 7 (C+0x808 bit 0 clear; states ${[...states].join(',')}), ${shots} shots, clip ${a.C.clip} (st_a)`);
+    }
+  }
+  // the dispatch at activation (cmd 0x108 -> FUN_00559748): an AI actor for AI_TYPES, none for the rest
+  const got = [];
+  const W = AI.createEnemyAI({ data, player: { pos: [0, 0, 0], hp: 780, id: 0x16, f118: 0, s64: 0 }, quiet: true, onActivate: (r, a) => got.push([r.model, !!a]) });
+  const pick = m => data.records.find(r => r.model === m && r.hp > 0).rec;
+  for (const m of ['e027', 'e048', 'e030', 'e036', 'e023', 'e024', 'e001']) W.setActive(W.objects.get(pick(m) + 22), 1);
+  ok(JSON.stringify(got) === JSON.stringify([['e027', true], ['e048', true], ['e030', true], ['e036', false], ['e023', false], ['e024', false], ['e001', false]]),
+     `activation per type: ${got.map(([m, a]) => m + (a ? ' actor' : ' -')).join(', ')} (actor for e027 / e048 / e030)`);
+}
+
 console.log((fail ? `${fail} FAILED` : 'all ok') + (gaps ? ` (${gaps} known gaps)` : ''));
 process.exit(fail ? 1 : 0);

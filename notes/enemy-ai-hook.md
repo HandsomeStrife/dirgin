@@ -233,3 +233,53 @@ GUESS); engage7 has no C+0x564 field, so #67's f799 'round used, no shot' isn't 
      },
    };
 ```
+
+## Other types (worker 0144, 2026-10-30)
+
+**One class for every type (D).** The save state's object table (`*(DAT_0046e880+0x1164)`) holds 215
+objects of vtable **0x58e1f8** (FUN_00558790): every e027, e048, e030, e036, e023, e024, e001, g001 and
+n0xx placement (object +0x17c = status, +0x9c parameter set -> model name). So there is no per-type AI
+class: the brain modes (FUN_0035f300), the layers, the part test vt+0x17c FUN_0055bda8 -> FUN_005ad118
+and the damage path vt+0x1b4 FUN_0055db50 are shared code. What differs per type is data:
+
+| what | where (decoded) | e027 | e048 | e030 |
+|---|---|---|---|---|
+| stance C+0x664 | FUN_00559748 -> **FUN_00564228** (switch on the model name) -> FUN_00340ac0 | no status / status +0x9c == 0 -> 0x1f; weapon class W+0x14 >> 2 & 7: 2 -> 0x1e, 0 / 1 / 3 / no weapon -> 0x1f, 4-7 stance kept | same rule as e027 (no case of its own) | 0x23 (+ C+0x568 \|= 0x200) |
+| stance flags C+0x808 | FUN_0030fc38(n) = 'bmd' table flags[n] (06800009.bin, FUN_0030f688 -> FUN_0030fb78 -> G+0x84; file = save RAM byte for byte) | 0x872b (bit 0: brain 2 state 0 -> 3, shooter) | 0x872b | 0x8c44 (bit 0 clear -> states 7 / 8) |
+| motion rows C+0x7fc | FUN_0030fc08(n): 229 x 8-byte clip names per stance | 0x1f: r_gst, 0x40 r_st_a, 0x57 r_st_f, ...; 0x1e: m_gst, m_st_a, m_st_f, ... | as e027 | st_a, look, stld0, stbf0, bl_0, jp0..4, rev_0 (no 0x40 / 0x57) |
+| radius +0x2c / height +0x30 | **FUN_00563fc0**: zone header (status +0xa8) +0x20 x 0.5 (bit 0: max with +0x28) / +0x24 | 5 / 18 | 5 / 18 (sets 3 / 4) | 6 / 12 (set 8) |
+| part boxes | model 'mkd' (FUN_0030baa0) | 13 | 13 (bones 6, 2, 3, ...) | 13 (head box at z 6.4: outside the 6 u cylinder) |
+| zones / lock bone | section 19/20 (zone_set, lock_bone) | sets 6 / 7, bone 3 | sets 3 / 4 (head x60), bone 3 | set 8 (head x24), bone 3 |
+| weapon | section 24 (FUN_00318718) | 0 / 2 / 4 / 5 / 7 | 1, 3 (class 3), 8 (class 2: interval 16) | none |
+
+Save-state checks: +0x2c / +0x30 of every inactive actor equal FUN_00563fc0's values (e001 7.5 / 28, e023
+90 / 40 with +0x28 bit 0x10000, e024 90 / 120); status +0x60 (less 0x41) / +0xc0 / +0x27 / +0x64 are 0 on
+every e027 / e048 / e030, so ENEMY_STATUS (was E027_STATUS) holds for all three.
+
+**Ported.** export_web_triggers.py: records `stance` (stance_of = FUN_00564228 for z128's names), weapons
+`cls`, `stances` (flags + rows of the used stances), `sizes`, part boxes of all 7 types, `model_clips`
+(frames of the requested rows per model). enemy_ai.js: AI_TYPES {e027, e048, e030} get an actor at
+activation; clip names from the actor's stance rows; brain 2 state 0 -> 3 / 7 by C+0x808 bit 0; cylinder,
+eye, lock point from the actor's size; clip lengths per model. Inputs: 06800009, 07650c00 / 076506c0 (m000:
+the m_* rows) in disc.py. e048: the whole e027 path (wake, aim, fire with its own W, bullets, hits, flinch,
+death). e030: activated, stands in st_a, brain state 7 (warn), hit / flinch (stld0) / death (stbf0).
+
+**Not done.** e030's brain states 7 / 8 (FUN_0035ff98 attack pick -> FUN_0055baa8(actor, 0x80 + i)) and
+its attack motion classes; e036 / e023 / e024 / e001 have no actor (their stances 0x1e / 0x19 / 0x1a / 0x10
+are exported). **No PCSX2 trace of an e048**: none is active in the save, the tracer logs only actors active
+at load (fixed addresses, fields.find_enemies), and the e048 activations near the spawn don't help: trigger 56
+(168 u away) names e048 records 28 / 29 only in its `c105(0,0) == 0` branch (on the save's settings it activates
+e027 50 / 51, test_enemy_ai), and 28 / 29 stand ~1250 u off, beyond the 500 u range; the others are >= 478 u away. A trace needs the tracer to follow an actor activated
+mid-run (pointer-chained fields) first.
+
+**Flinch end (worker 0145, D).** Motion state 0x1e = factory 0x5a6c28 (FUN_00592918) case 0x1e ->
+FUN_00598880, vt **0x5a5c70**, update vt+0x24 **FUN_00598950** (phase +4, done +8, timer +0xc):
+- 0: FUN_00340bb8; motion by C+0x590 & 0xf (hit side): 2 -> 0x24, 3 -> 0x26, 4 -> 0x27, 5 -> 0x28, 6 -> 0x29, else 0x25; timer 0 -> 1.
+- 1: when the motion is done (FUN_003460d8) or timer > 120 (timer += DAT_004eeb24, BSS): done bit, then
+  motion **0x40** if C+0x590 bit 24, else motion **1** (flags 0x83) -> 2. (Off the ground, C+0x1c0 0x200
+  clear: done bit only.)
+- 2: C+0x1c0 &= ~0x20; returns FUN_00341b20: next state 6 (bit 24) or 3 (C+0x590 bits 16-19 == 1: 0x16 / 0x12).
+C+0x590 bit 24 = 'gun out', written only by FUN_00565d78 (with actor +0x100 bit 44). The plain activation
+doesn't call it; which enemy state sets it is not decoded (GUESS: actor state 3). e030 (no row 0x40, never
+in state 3) goes back to row 1 = st_a. e030's C+0x568 0x200 (FUN_00564228) is read only by FUN_00341a48:
+C+0x1c0 |= 0x20000 when C+0x590 bits 16-19 < 2 (a body flag, not the flinch).

@@ -178,6 +178,94 @@ for (const nearFirst of [false, true]) {
      `closest of two (${nearFirst ? 'near' : 'far'} soldier listed first; one segment crosses both: ${both}): near HP ${near.hp} hits ${near.ai.hits}, far HP ${far.hp} hits ${far.ai.hits}`);
 }
 
+// Other types (notes/enemy-ai-hook.md "Other types"): the same actor class, so the same hit path with
+// the type's own data: part boxes (its 'mkd'), zone set, size (FUN_00563fc0: cylinder radius / height),
+// HP, and its stance's clip rows (FUN_00564228). Shot dead in the head with one straight pellet each,
+// posed in its own stand clip at frame 0. e048 record 28 (w003 class 3: stance 0x1f, r_*), record 24
+// (class 2: stance 0x1e, m_*), e030 record 7 (stance 0x23, size 6 / 12).
+for (const [k, model, stand, size, deathClip] of [[28, 'e048', 'r_st_a', [5, 18], 'r_stbf0'], [24, 'e048', 'm_st_a', [5, 18], 'm_stbf0'],
+                                                  [7, 'e030', 'st_a', [6, 12], 'stbf0']]) {
+  const rec = data.records[k];
+  const sideP = D(`enemies/${model}.json`), binP = D(`enemies/${model}_local.bin`);
+  if (!existsSync(sideP) || !existsSync(binP)) { console.log(`SKIP ${model}: data/enemies/${model}.* missing`); continue; }
+  const lp = json(sideP).local_pose;
+  if (!lp.clips[stand] || !data.stances) { ok(false, `${model} record ${k}: export has no ${stand} / ai.json no stances (rebuild data/enemies)`); continue; }
+  const P = modelPose(lp, f32(binP), stand, 0);
+  const php = { pos: [0, 0, -200], hp: 780, id: 0x16, f118: 0, s64: 0 };
+  const ai = createEnemyAI({ data, player: php, quiet: true, log: () => {} });
+  ai.boneWorld = a => b => boneRows(P.R[b], P.S[b], P.P[b], a.pos, a.face);
+  const a = ai.addActor({ rec: k, mode: 0, pos: [0, 0, 0], face: [0, 0, 1] });
+  ok(a.model === model && a.size.r === size[0] && a.size.h === size[1] && rec.hp > 1,
+     `${model} #${k}: actor size ${a.size.r} / ${a.size.h} (save state ${size.join(' / ')}), HP ${a.hp}, stance 0x${a.C.st664.toString(16)}, idle ${a.C.clip}`);
+  // head = part box 0 (posed, frame 0): soldiers: a pellet straight down from 30 u above onto the box
+  // centre; e030: its head box (z 6.4) sits outside its 6 u cylinder, so a pellet that only crosses the
+  // head fails the cylinder gate (FUN_0055bda8): shot from the front along its body axis instead
+  const hb = data.hitboxes[model][0];
+  const cs = boxCorners(hb, boneRows(P.R[hb.bone], P.S[hb.bone], P.P[hb.bone], a.pos, a.face));
+  const head = [0, 1, 2].map(i => cs.reduce((t, c) => t + c[i], 0) / 8);
+  const hp0 = a.hp;
+  const [p0, p1] = model === 'e030' ? [[head[0], head[1], 60], [head[0], head[1], -60]] : [[head[0], head[1] - 30, head[2]], head];
+  ai.playerShot(p0, p1, { ...straight, damage: 9999 });
+  let died = null, settled = null;
+  for (let i = 0; i < 200 && settled == null; i++) {
+    ai.tick(1.2, [0, 0, -200], [0, 0, -200]);
+    if (died == null && a.astate === 7) died = i;
+    if (a.f118 & 0x100) settled = i;
+  }
+  ok(a.part === 0 && a.hp === 0 && died != null && a.ai.mode === 0 && a.C.clip === deathClip,
+     `${model} #${k}: head shot (part ${a.part}, its own box 0 = bone ${hb.bone}) -> HP ${hp0} -> ${a.hp}, actor state 7 at tick ${died}, AI mode ${a.ai.mode}, death clip ${a.C.clip} (${deathClip})`);
+  // settled bit when the death clip's clock (0.5 x 1.2 = 0.6 / frame) passes the clip's own length (model_clips)
+  const n = data.model_clips[model][deathClip], want = Math.ceil(n / 0.6);
+  ok(settled != null && Math.abs(settled - died - want) <= 1, `${model} #${k}: corpse settled ${settled - died} frames after the death (${deathClip} ${n} frames / 0.6 = ${want})`);
+}
+// e030 is shorter (height 12): a pellet 15 u up crosses the e027 / e048 cylinder (18) but not the e030's
+{
+  const php = { pos: [0, 0, -200], hp: 780, id: 0x16, f118: 0, s64: 0 };
+  const ai = createEnemyAI({ data, player: php, quiet: true, log: () => {} });
+  ai.boneWorld = a => b => boneRows(P0.R[b], P0.S[b], P0.P[b], a.pos, a.face);
+  const dog = ai.addActor({ rec: 7, mode: 0, pos: [0, 0, 0], face: [0, 0, 1] });
+  ai.playerShot([0, -15, -60], [0, -15, 60], straight);
+  for (let i = 0; i < 6; i++) ai.tick(1.2, [0, 0, -200], [0, 0, -200]);
+  ok(dog.ai.hits === 0, `e030 #7: a pellet 15 u up passes above its cylinder (height ${dog.size.h}): AI hits ${dog.ai.hits} (0)`);
+}
+// The flinch's end (class 0x1e update FUN_00598950): motion 0x40 with C+0x590 bit 24 (gun out) set,
+// else motion 1. e030 (stance 0x23, no row 0x40, never in actor state 3: bit clear) goes back to row 1
+// st_a, a real clip, and never asks for an empty row. Control: an e027 with the gun out -> r_st_a.
+{
+  const sideP = D('enemies/e030.json'), binP = D('enemies/e030_local.bin');
+  if (!existsSync(sideP) || !existsSync(binP)) console.log('SKIP e030 flinch end: data/enemies/e030.* missing');
+  else {
+    const P = modelPose(json(sideP).local_pose, f32(binP), 'st_a', 0);
+    const run = (k, gun, pose) => {
+      const php = { pos: [0, 0, -200], hp: 780, id: 0x16, f118: 0, s64: 0 };
+      const ai = createEnemyAI({ data, player: php, quiet: true, log: () => {} });
+      ai.boneWorld = a => b => boneRows(pose.R[b], pose.S[b], pose.P[b], a.pos, a.face);
+      const a = ai.addActor({ rec: k, mode: 0, pos: [0, 0, 0], face: [0, 0, 1] });
+      if (gun === 1) a.C.gun = 1;
+      ai.playerShot([0, -6, -60], [0, -6, 60], straight);
+      const ev = [], clips = [];
+      for (let i = 0; i < 300; i++) { if (gun === 0) a.C.gun = 0; if (gun === 1) a.C.gun = 1; ev.push(...ai.tick(1.2, [0, 0, -200], [0, 0, -200])); clips.push(a.C.clip); }
+      return { a, ev, clips };
+    };
+    const r = run(7, 0, P), id = r.a.id, mine = r.ev.filter(e => e.startsWith(`clip ${id} `));
+    const flinched = r.clips.indexOf('stld0');
+    ok(r.a.hp > 0 && flinched >= 0 && r.a.C.clip === 'st_a' && r.clips.slice(flinched).includes('st_a') && !r.ev.includes(`clip ${id} null`),
+       `e030 #7: non-lethal hit (HP ${r.a.hp}) -> flinch stld0 -> back to row 1 ${r.a.C.clip} (st_a); clip events ${mine.join(', ')}`);
+    // unpinned: the hit wakes #67, actor state 3 sets the bit (GUESS), so the flinch's end asks row 0x40, never row 1
+    const g = run(45, null, P0), ge = g.ev.filter(e => e.startsWith(`clip ${g.a.id} `)), gf = ge.indexOf(`clip ${g.a.id} r_stlld0`);
+    ok(g.a.hp > 0 && gf >= 0 && g.a.C.gun === 1 && ge.indexOf(`clip ${g.a.id} r_gst`, gf) < 0 && g.a.C.clip === 'r_st_a',
+       `e027 #67 woken (gun bit ${g.a.C.gun}): flinch -> row 0x40, no r_gst after it (events ${ge.join(', ')})`);
+    // an empty row (e030 has no 0x40): with the bit forced on, no 'clip <id> null' event and the clip is kept
+    const e = run(7, 1, P);
+    ok(!e.ev.some(x => x.endsWith(' null')) && e.a.C.clip === 'stld0', `e030 #7 bit forced on: row 0x40 empty -> no null clip event, keeps ${e.a.C.clip}`);
+    // the hit wakes #67 (actor state 3 sets the bit); held clear here: the clip after the flinch is row 1
+    const n = run(45, 0, P0), ne = n.ev.filter(e => e.startsWith(`clip ${n.a.id} `)), nf = ne.lastIndexOf(`clip ${n.a.id} r_stlld0`);
+    // (the brain's state-3 request r_st_a lands while the flinch still runs; the flinch's end then asks row 1)
+    const after = nf >= 0 && ne.indexOf(`clip ${n.a.id} r_gst`, nf) > nf;
+    ok(n.a.hp > 0 && after, `e027 #67 gun held clear: flinch end asks row 1 r_gst (events ${ne.join(', ')})`);
+  }
+}
+
 // the shared RNG in the game's frame order (FUN_00323128): AI scheduler FUN_00365008 (the fire timer's
 // jitter draw, FUN_003656a0) -> player tick FUN_005747a0 (Vincent's cone draws, FUN_00577480) ->
 // object lists (bullets: the flinch draw, FUN_00561718). The page queues the shot (queueShot) and

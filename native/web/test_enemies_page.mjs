@@ -4,13 +4,16 @@
 //   2. walking east across trigger 56 (x -1228 on the start deck) makes enemies.js draw two new
 //      bodies, records 50 / 51 (script 91 event 0xd: cmd 0x108 on both; notes/enemy-activation.md §2);
 //   3. the save's dead records (41-43) refuse activation (FUN_00559748), so no body appears;
-//   4. a non-e027 record (71, e030) activated by cmd 0x108 gets a body with no AI, and cmd 0x130
-//      removes it again; switching off the newest body (51) first, 71 is drawn right in front of 50;
+//   4. an e030 record (71) activated by cmd 0x108 gets a body and an AI actor (enemy_ai AI_TYPES), and
+//      cmd 0x130 removes it again; switching off the newest body (51) first, 71 is drawn right in front
+//      of 50;
 //   5. Vincent's bullets (aim.js onShot -> enemy_ai playerShot): the part test's pose (enemies.js
 //      partPose) equals the drawn joints; the gun drawn with R1, the camera turned until the reticle ray
 //      crosses #66's chest: the lock takes him (aim point = his bone 3); the camera turns until the ray
 //      passes beside his body (the lock holds), R1 fires: #66 (HP 1) dies (actor state 7, AI mode 0, death clip held);
-//   6. no console errors or page errors.
+//   6. an e048 (record 24, w class 2: stance 0x1e) gets a body and an AI actor, drawn in its stance's
+//      clip (m_gst) and posed for the part test (enemies.js partPose); after 5, so it doesn't shift #66;
+//   7. no console errors or page errors.
 //   node native/web/test_enemies_page.mjs          (needs data/enemies + playwright; else SKIP, exit 0)
 // Serves native/web with python3 http.server on a free port. three.js comes from the CDN (play.html importmap).
 import { existsSync } from 'node:fs';
@@ -99,7 +102,7 @@ try {
   ok(r.order.before, 'draw order: 51 (newest) right in front of 50, both before Vincent');
   ok(r.order.after, 'draw order: 51 switched off, then 71 is linked right in front of 50 (FUN_005a7d88 / FUN_005a7978)');
   ok(r.dead === 0, 'dead records 41-43: activation refused, no body');
-  ok(r.e030 && r.e030.model === 'e030' && r.e030.clip === 'st_a' && !r.e030.ai, `record 71 (e030): body in its idle clip, no AI (${JSON.stringify(r.e030)})`);
+  ok(r.e030 && r.e030.model === 'e030' && r.e030.clip === 'st_a' && r.e030.ai, `record 71 (e030): body in its idle clip, AI actor (${JSON.stringify(r.e030)})`);
   ok(r.removed, 'record 71: cmd 0x130 removes the body');
   // 5. Vincent's bullets
   const sh = await pg.evaluate(async () => {
@@ -160,6 +163,21 @@ try {
   ok(sh.heldId === 66 && sh.heldErr < 0.05 && sh.offErr > 2.5, `lock held with the ray ${sh.offErr.toFixed(2)} u beside his axis: aim still on bone 3 (${sh.heldErr.toFixed(4)}); dropped after ${sh.dropAt ?? '-'} x 0.01 rad`);
   ok(sh.hp0 === 1 && sh.hp === 0 && sh.astate === 7 && sh.mode === 0, `R1 with the reticle off #66 (auto-aim): HP ${sh.hp0} -> ${sh.hp}, actor state ${sh.astate}, AI mode ${sh.mode}`);
   ok(sh.drawn === sh.clip && /^r_st(laf|bf)0$/.test(sh.clip) && sh.hold, `#66 draws his death clip ${sh.drawn} (held)`);
+  // 6. an e048 (record 24). After step 5: activating it earlier shifts #66's clip phase (frames
+  // spent waiting for its model), which moves bone 3 off the lock check's limit.
+  const e48 = await pg.evaluate(async () => {
+    const P = window.__play, ai = P.enemyAI, obj = k => ai.objects.get(k + 22);
+    ai.setActive(obj(24), 1);
+    const t1 = performance.now();
+    while (!P.enemies.actors.some(a => a.rec === 24) && performance.now() - t1 < 15000) await new Promise(r => setTimeout(r, 100));
+    await new Promise(r => setTimeout(r, 300));       // a few game frames: posed
+    const b24 = P.enemies.actors.find(a => a.rec === 24), s24 = ai.actors.find(a => a.rec === 24);
+    const out = b24 ? { model: b24.model, drawn: b24.clip, clip: s24 && s24.C.clip, ai: !!s24, posed: !!P.enemies.partPose(24) } : null;
+    ai.setActive(obj(24), 0);
+    return out;
+  });
+  ok(e48 && e48.model === 'e048' && e48.ai && e48.drawn === 'm_gst' && e48.clip === 'm_gst' && e48.posed,
+     `record 24 (e048): body drawn in its stance clip, AI actor, posed for the part test (${JSON.stringify(e48)})`);
   ok(errs.length === 0, `no console errors${errs.length ? ': ' + errs.slice(0, 3).join(' | ') : ''}`);
 } finally {
   await browser.close();

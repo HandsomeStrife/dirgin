@@ -1,9 +1,17 @@
-// Enemy AI for z128's e027 soldiers: wake by trigger volume + event script, and the awake
+// Enemy AI for z128's soldiers (e027, e048) and the e030s: wake by trigger volume + event script, and the awake
 // combat AI (brain mode 2, combat layer 2, fire timer, shot, bullet, damage to Vincent), and
 // Vincent's bullets hitting them (pellets, spread, part boxes, damage, flinch / death; §13).
 // A direct translation of the game's functions (addresses cited per function); decode notes
 // notes/enemy-research.md §8 / §9, hook patch for play.js / enemies.js notes/enemy-ai-hook.md.
 // Pure logic: no three.js. Tested against PCSX2 traces by test_enemy_ai.mjs.
+//
+// Types (notes/enemy-ai-hook.md "Other types"): every z128 placement is the same actor class (vtable
+// 0x58e1f8, constructor FUN_00558790; save state: all 215 enemy / NPC objects), so the brain, the
+// layers, the part test vt+0x17c FUN_0055bda8 and the damage path are shared code. What differs per
+// type is data: the stance FUN_00564228 picks by model name at activation (C+0x664; its flags
+// C+0x808 and motion -> clip rows C+0x7fc from the stage's 'bmd' table, ai.json stances), the actor
+// size from the zone header (FUN_00563fc0, ai.json sizes), the part boxes (model 'mkd'), the zones,
+// HP, weapon. AI_TYPES lists the types an activation builds an actor for.
 //
 // Data (gitignored, tools/byo/build_web.sh): data/enemies/ai.json from
 // native/assets/models/export_web_triggers.py (stage file sections 1, 2/3, 8; e027 clip lengths).
@@ -22,8 +30,19 @@ import { cylinderHit, partTest, cone } from './enemy_hit.js';
 // ---------------------------------------------------------------- constants
 // Enemy weapon W (status +0xac) = stage section 24 record (FUN_00318610 / FUN_00311600), index by
 // FUN_00318718: from ai.json (export_web_triggers.py: data.weapons, data.records[k].weapon).
-export const R_ACTOR = 5.0;       // actor +0x2c radius: AI+0x34 - AI+0x38 = 10 = both radii (trace k_enemy_engage8). GUESS: not read from data
-export const EYE_H = 18.0;        // GUESS: actor +0x30 height for FUN_005634e0 (not decoded; 18.0 is its own no-body default)
+// Actor size (decoded, FUN_00563fc0): radius actor +0x2c = zone header +0x20 x 0.5, height +0x30 = header
+// +0x24, from ai.json sizes[record.zones] (e027 / e048 5 / 18, e030 6 / 12; save state values). These two
+// are the fallback for an old ai.json without sizes. R_PLAYER: Vincent's +0x2c in FUN_0035e830's
+// AI+0x38 = AI+0x34 - both radii: 10 - 5 (k_enemy_engage8) = 5.
+export const R_ACTOR = 5.0;
+export const EYE_H = 18.0;
+export const R_PLAYER = 5.0;
+// The types whose actor this module builds at activation (the per-type dispatch; FUN_00559748 builds
+// one for every type). e027 / e048 (stance 0x1f / 0x1e, flags 0x872b: brain 2 shooter branch) run the
+// whole translated AI; e030 (stance 0x23, flags 0x8c44: bit 0 clear) takes brain 2's states 7 / 8
+// (melee attacks, not translated: it stands) but is hit, flinches and dies like the others. Other types
+// (e036, e023, e024, e001) are drawn by enemies.js without an AI actor.
+export const AI_TYPES = new Set(['e027', 'e048', 'e030']);
 export const PLAYER_AIM_H = 12.4; // GUESS: player vt+0x5c aim point = feet - 12.4 up (trace AI+0x40 at f784; vt+0x5c not decoded)
 // Vincent's status fields read by FUN_00318120 (defence), and the game globals it reads. GUESS:
 // values read from the sea-of-flames save state's RAM (P status = P+0x17c); their source on the
@@ -42,9 +61,11 @@ export const GAME = { progress: 20, lvlK: [0.33, 0.4], lvlK0: [0, 50], cut: { aa
 export const MANAGER_SHORT_18 = 1; // GUESS: manager short 18 (cmd 0x30); trace: script 108 event 2 took the mode-2 branch, so != 0
 export const JITTER_ON = GAME.d46b2fc !== 0;   // FUN_00326500 = FUN_002424a0 = DAT_0046b2fc != 0 (notes §9.6)
 const BULLET_R = 5.0;             // GUESS: hit radius around the player's aim point (part test vt+0x17c not decoded; = R_ACTOR)
-// FUN_005a5xxx motion ids -> clip names (notes §9.7, trace: 0x57 = r_st_f, 0x40 = r_st_a). GUESS for
-// actor state 3 -> 0x40: the state table behind FUN_0055b8c0 vt+0x24 is not decoded.
+// Motion ids -> clip names: the actor's stance rows (C+0x7fc, ai.json stances; stance 0x1f: 0x40 = r_st_a,
+// 0x57 = r_st_f as traced, notes §9.7). MOTION = stance 0x1f's two rows, the fallback for an old ai.json.
+// GUESS for actor state 3 -> 0x40: the state table behind FUN_0055b8c0 vt+0x24 is not decoded.
 export const MOTION = { 0x40: 'r_st_a', 0x57: 'r_st_f' };
+const STANCE_1F_FLAGS = 0x872b;   // C+0x808 of stance 0x1f (trace k_enemy_engage8), for an old ai.json
 // The page's save state: FUN_00242c28() = 1 (worker 0125, notes §9.11); event flags = evt_flags XOR
 // evt_key in k_enemy_engage7: only flag 2 = 7 and flag 46 = 1 (notes/enemy-activation.md §1)
 export const SAVE_DIFFICULTY = 1;
@@ -54,18 +75,21 @@ export const SAVE_EVENT_FLAGS = Object.freeze({ 2: 7, 46: 1 });
 // +2 flags (bit 1 no reaction flags, bit 2 no stagger, bit 3 bullet +0x120 |= 0x60000; FUN_0055db50).
 // From the stage file: ai.json zones[record.zones] (export_web_triggers.py zone_set: FUN_003153d0 /
 // FUN_00310e40 / FUN_0030fc68).
-// e027 status fields FUN_00318120 reads (§10.2, RAM of #67): armour +0xc0 none, +0x60 0, +0x27 0,
-// +0x64 0, element 0; level +0x11 comes from ai.json (FUN_00314ea8).
-export const E027_STATUS = { lvl: 0, armour: null, f60: 0, f27: 0, f64: 0, u20top: 0, w68: null, b317630: 0, elem9c: 0 };
+// Enemy status fields FUN_00318120 reads (§10.2, RAM of #67): armour +0xc0 none, +0x60 0, +0x27 0,
+// +0x64 0, element 0; level +0x11 comes from ai.json (FUN_00314ea8). The save state has the same
+// +0x60 (less the activation bits 0x41) / +0xc0 / +0x27 / +0x64 on every e027, e048 and e030 status.
+export const ENEMY_STATUS = { lvl: 0, armour: null, f60: 0, f27: 0, f64: 0, u20top: 0, w68: null, b317630: 0, elem9c: 0 };
 // GUESS: C+0x1c0 of a standing soldier (trace k_enemy_engage12 #67: 0x10301; bit 0x200 = on the
 // ground, read by FUN_00565480). The page has no enemy physics, so it stays.
 const C1C0_STAND = 0x10301;
-// GUESS: the motion classes' clips. Class 0x1e (flinch, FUN_00561718 stance 0) and the death motion
-// (class 0x36 after FUN_0055b8e0(actor, 7)) pick a clip by hit side / part; that choice is not
+// GUESS: the motion classes' motions. Class 0x1e (flinch, FUN_00561718 stance 0) and the death motion
+// (class 0x36 after FUN_0055b8e0(actor, 7)) pick a motion by hit side / part; that choice is not
 // decoded. The traces show r_stlld0 (flinch, part 10), r_stlaf0 (death, part 6) and r_stbf0 (death,
-// part 0 = head): head -> r_stbf0, any other part -> r_stlaf0.
-const FLINCH_CLIP = 'r_stlld0';
-const deathClip = part => part === 0 ? 'r_stbf0' : 'r_stlaf0';
+// part 0 = head) = stance 0x1f rows 0x28 / 0x2c / 0x2b: head -> 0x2b, any other part -> 0x2c. The
+// clip name is the actor's own stance row (decoded): e048 with a w004 m_stlld0 ..., e030 stld0 / stbf0.
+const FLINCH_MOTION = 0x28;
+const deathMotion = part => part === 0 ? 0x2b : 0x2c;
+const FALLBACK_CLIPS = { 0x28: 'r_stlld0', 0x2b: 'r_stbf0', 0x2c: 'r_stlaf0', 0x00: 'r_gst', 0x01: 'r_gst' };   // old ai.json: stance 0x1f rows
 const ID_BASE = 22;               // GUESS: manager +0x3b2 table (cmd 0x3a): object id = record + 22 (trace meta EI0..6: rec 44 -> 66, 66 -> 88)
 
 // ---------------------------------------------------------------- RNG FUN_0040b398 / 0040b500 / 0040b5c0
@@ -284,7 +308,26 @@ export function createEnemyAI(opts) {
     if (!objects.has(id)) objects.set(id, { kind: 'record', id, rec: k, script: rec.script, vars: new Int16Array(8), flags28: 0, ai: null, hp: deadRecs.has(k) ? 0 : rec.hp ?? 100 });
   });
 
-  // addActor: an activated e027 (FUN_00559748 gave it a body and an AI). init may carry the
+  // FUN_00564228 -> FUN_00340ac0(C, n): the record's stance (ai.json records[k].stance, exported by
+  // stance rule), its flags C+0x808 (FUN_0030fc38) and motion rows C+0x7fc (FUN_0030fc08). An old
+  // ai.json (no stances): stance 0x1f's flags and the MOTION / FALLBACK_CLIPS names.
+  function stanceOf(rec) {
+    const st = data.stances && rec.stance != null ? data.stances[rec.stance] : null;
+    if (st) return { st664: rec.stance, f808: st.flags, rows: st.motions };
+    if (data.stances) warnOnce(`enemy_ai: no stance for record ${rec.rec} (${rec.model}); stance 0x1f assumed`);
+    return { st664: 0x1f, f808: STANCE_1F_FLAGS, rows: null };
+  }
+  const clipOf = (a, m) => (a.C.rows ? a.C.rows[m] : (MOTION[m] ?? FALLBACK_CLIPS[m])) || null;
+  // FUN_00563fc0: radius / height from the zone header of the record's set (ai.json sizes)
+  function sizeOf(rec) {
+    const z = data.sizes && rec.zones >= 0 ? data.sizes[rec.zones] : null;
+    return z ? { r: z.r, h: z.h } : { r: R_ACTOR, h: EYE_H };
+  }
+  // the per-type dispatch: does an activation of this record build an AI actor here (AI_TYPES; an old
+  // ai.json without stances: e027 only, as before)
+  const buildsActor = rec => data.stances ? AI_TYPES.has(rec.model) && rec.stance != null : rec.model === 'e027';
+
+  // addActor: an activated soldier (FUN_00559748 gave it a body and an AI). init may carry the
   // state of a traced actor (test) or nothing (page).
   function addActor(init) {
     const rec = data.records[init.rec];
@@ -306,8 +349,11 @@ export function createEnemyAI(opts) {
       part: -1, f144: -0x7fffffff,               // +0x142 last part hit, +0x144 frame of the last flinch clip
       s148: -0x7fffffff, s150: 0, s152: 0, sphase: 0,   // stagger FUN_0055d950: +0x148 time, +0x150 / +0x152 sums, phase (+0x150 bits 40-43)
       // body C (+0x300 mover mode and its slide; C+0x1c0 move flags)
-      C: { f564: init.f564 ?? 0, speed: 0, s214: 0, aim: null, t2b0: null, motion: null, clip: init.clip || 'r_gst',
-           f1c0: C1C0_STAND, mover: 0, slide: null, hold: false },
+      // C+0x664 stance / C+0x808 flags / C+0x7fc rows: FUN_00564228 -> FUN_00340ac0 at activation
+      C: { f564: init.f564 ?? 0, speed: 0, s214: 0, aim: null, t2b0: null, motion: null, clip: null,
+           f1c0: C1C0_STAND, mover: 0, slide: null, hold: false, gun: 0, ...stanceOf(rec) },
+      model: rec.model,
+      size: sizeOf(rec),                         // actor +0x2c / +0x30 (FUN_00563fc0)
       ai: null,
     };
     a.ai = {
@@ -317,6 +363,9 @@ export function createEnemyAI(opts) {
       rounds: init.rounds ?? (W ? W.mag : 0), mode: init.mode ?? 0, amode: 0, cmode: 0, brain: null, timer: null,
       W, hits: 0,
     };
+    // GUESS: the idle the body starts in = motion 0 of its stance (r_gst for stance 0x1f: the save's idle
+    // soldiers; which motion FUN_0055b8e0(a, 2) plays is not decoded)
+    a.C.clip = init.clip || clipOf(a, 0) || 'r_gst';
     a.C.t2b0 = a.pos.map((x, i) => f(x + a.face[i]));                           // FUN_0034b4c8: C+0x2b0 = facing + position (no turn)
     objects.set(a.id, a);
     actors.push(a);
@@ -425,14 +474,14 @@ export function createEnemyAI(opts) {
       let mode = rec.mode ?? 0;
       if (mode === 8) { mode = 0; warnOnce('enemy_ai: activation mode 8 (FUN_0035f2e0) not translated'); }
       let a = null;
-      if (rec.model === 'e027') {
+      if (buildsActor(rec)) {
         // L: FUN_0055b8e0(a, 2, 1, 0) = actor state 2 for a plain placement (+0x28 bits 2 / 5 / 1 and
         // +0x118 bit 16 clear, C+0x664 <= 0x29; those bits are not exported)
         a = addActor({ rec: t.rec, mode, astate: 2 });
       } else {
-        // other models: no body / AI export yet (notes/enemy-activation.md §4.3); marked active only
+        // other models: no AI actor (AI_TYPES); marked active only, enemies.js draws them idle
         t.flags28 |= 1;
-        warnOnce(`enemy_ai: record ${t.rec} (${rec.model}) activated without an AI (only e027 is translated)`);
+        warnOnce(`enemy_ai: record ${t.rec} (${rec.model}) activated without an AI (types with an actor: ${[...AI_TYPES].join(', ')})`);
       }
       events.push(`activate rec ${t.rec}`);
       activated.push(t.rec);
@@ -492,7 +541,7 @@ export function createEnemyAI(opts) {
     return !!t;
   }
   function eye(o) {                                                           // FUN_005634e0(o, 3): (0, h-2, 0) in o's frame, up = -y
-    return [o.pos[0], o.pos[1] - (EYE_H - 2.0), o.pos[2]];
+    return [o.pos[0], o.pos[1] - ((o.size ? o.size.h : EYE_H) - 2.0), o.pos[2]];
   }
   const targetPoint = t => [t.pos[0], t.pos[1] - PLAYER_AIM_H, t.pos[2]];   // player vt+0x5c (GUESS, see PLAYER_AIM_H)
   function aimPoint(a) {                                                      // FUN_00360558 -> FUN_00563438 / FUN_00562ff8
@@ -507,7 +556,7 @@ export function createEnemyAI(opts) {
     if (!t) { ai.d34 = ai.d38 = ai.d3c = 10.0; ai.d40 = 0; return; }
     const v = sub3(aimPoint(ai.owner), ai.owner.pos);
     ai.d34 = Math.fround(len3(v));
-    const rr = R_ACTOR + R_ACTOR;                                             // actor +0x2c + target +0x2c
+    const rr = ai.owner.size.r + R_PLAYER;                                    // actor +0x2c + target +0x2c
     ai.d38 = ai.d34 - rr;
     ai.d40 = v[1];
     ai.d3c = Math.hypot(v[0], v[2]) - rr;
@@ -551,16 +600,23 @@ export function createEnemyAI(opts) {
     if (a.astate === st) return 0;
     a.astate = st;
     if (st === 3) request(a, 0x40);              // GUESS: state 3 -> motion 0x40 (r_st_a), see MOTION
-    if (st === 7) {                              // the death motion (class 0x36); its clip: GUESS deathClip
+    // GUESS: C+0x590 bit 24 ('gun out', written only by FUN_00565d78) set on entering actor state 3 (aim);
+    // the plain activation (FUN_00559748 -> FUN_0055b8e0(a, 2, 1, 0)) doesn't call FUN_00565d78, so it
+    // starts clear; which enemy state writes it is not decoded (state table behind FUN_0055b8c0 vt+0x24).
+    // Read by the flinch's end (class 0x1e, FUN_00598950) and FUN_00341b20. e030 never enters state 3.
+    if (st === 3) a.C.gun = 1;
+    if (st === 7) {                              // the death motion (class 0x36); its motion: GUESS deathMotion
       a.C.motion = { cls: 0x36, t: 0 };
-      a.C.clip = deathClip(a.part); a.C.hold = true;
+      a.C.clip = clipOf(a, deathMotion(a.part)) || a.C.clip; a.C.hold = true;
       events.push(`clip ${a.id} ${a.C.clip}`);
     }
     return 1;
   }
   function request(a, m) {                       // FUN_00345818 (clip change only; blend flags 0x82 / 0x83 not modelled)
-    const name = MOTION[m];
-    if (name && a.C.clip !== name) a.C.clip = name;
+    const name = clipOf(a, m);                   // the stance row C+0x7fc + m x 8
+    // an empty row: no clip to play; the body keeps its clip (what FUN_00345818 does with it is not read)
+    if (!name) { warnOnce(`enemy_ai: ${a.model} stance 0x${a.C.st664.toString(16)} has no motion 0x${m.toString(16)}; clip kept`); return; }
+    if (a.C.clip !== name) a.C.clip = name;
     events.push(`clip ${a.id} ${name}`);
   }
 
@@ -607,7 +663,8 @@ export function createEnemyAI(opts) {
         setActionLayer(ai, 0);
         a.C.s214 = 6;                                                         // FUN_0034e960(C, 6)
         if (!target(ai)) { ai.btime = short(S.now); a.C.s214 = 6; ai.bstate = 2; return; }
-        ai.bstate = 3;                                                        // C+0x808 bit 0 set for e027 (shooter, trace 0x872b)
+        // C+0x808 bit 0 (stance flags): shooter -> 3 (e027 / e048: 0x872b, trace), else 7 (e030: 0x8c44)
+        ai.bstate = (a.C.f808 & 1) ? 3 : 7;
         return;
       case 1: if (busy(a)) return; break;
       case 2: if (bTime(ai) < 0x1f) return; ai.btime = short(S.now); break;
@@ -619,7 +676,7 @@ export function createEnemyAI(opts) {
       // fall through
       case 6: if (!target(ai)) return; break;
       case 7: case 8:
-        warnOnce('enemy_ai: brain states 7/8 (non-shooter) not translated');      // not e027
+        warnOnce(`enemy_ai: brain states 7/8 (non-shooter, ${a.model}) not translated`);   // e030 (stance 0x23)
         return;
       default: return;
     }
@@ -779,13 +836,19 @@ export function createEnemyAI(opts) {
     if (m.cls === 0x1e || m.cls === 0x36) {
       // the clip clock as enemies.js plays it (MP+0x40c 0.5 x step, FUN_005aa2a8). Death (0x36): at the
       // clip's end the motion-done event FUN_00343160 -> FUN_00539570 sets actor +0x118 bit 0x100
-      // (corpse settled, notes §10.5) and the last frame holds. GUESS: the flinch (0x1e) ends with its
-      // clip and requests motion 0x40 (r_st_a); class 0x1e's own update is not read.
-      const n = data.clips && data.clips[a.C.clip];
+      // (corpse settled, notes §10.5) and the last frame holds. The flinch (0x1e): its update
+      // FUN_00598950 phase 1 ends when the motion is done (FUN_003460d8) or its timer +0xc > 120, then
+      // requests motion 0x40 if C+0x590 bit 24 (gun out, FUN_00565d78) is set, else motion 1 (flags
+      // 0x83): e027 / e048 r_st_a, e030 st_a (its stance has no row 0x40). Phase 2 returns the next
+      // state FUN_00341b20 (6 / 3 by the same bit; not modelled: the motion ends here).
+      const mc = data.model_clips && data.model_clips[a.model];               // per model (old ai.json: e027's)
+      const n = mc ? mc[a.C.clip] : data.clips && data.clips[a.C.clip];
       m.t = f(m.t + f(f(0.5) * step));
-      if (n != null && n <= m.t) {
+      // GUESS: the timer's step DAT_004eeb24 is a runtime global (BSS), taken as the frame step
+      if (m.cls === 0x1e) m.timer = f((m.timer ?? 0) + step);
+      if ((n != null && n <= m.t) || (m.cls === 0x1e && m.timer > 120.0)) {
         if (m.cls === 0x36) { if (!m.done) { m.done = 1; a.f118 |= 0x100; events.push(`settled ${a.id}`); } }
-        else { a.C.motion = null; request(a, 0x40); }
+        else { a.C.motion = null; request(a, a.C.gun ? 0x40 : 0x01); }
       }
       return;
     }
@@ -970,11 +1033,10 @@ export function createEnemyAI(opts) {
       // (filter vt+0x1ac or object +0x38 bit 0) is not read.
       if (dead(a)) continue;
       const boxes = data.hitboxes && data.hitboxes[recModel(a)];
-      // MISSING: part boxes are exported for e027 only (export_web_triggers.py); other types can't be hit yet
-      // (notes/fidelity-audit.md 'Player shots vs non-e027 enemies')
-      if (!boxes) { warnOnce(`enemy_ai: no part boxes for ${recModel(a)} (only e027's are exported); not hit`); continue; }
-      const A = a.pos, B = [a.pos[0], f(a.pos[1] - EYE_H), a.pos[2]];        // up row (0,-1,0) x actor+0x30
-      const cyl = cylinderHit(R_ACTOR, b.prev, b.pos, A, B);
+      // part boxes per model (export_web_triggers.py hitboxes: every z128 enemy type's 'mkd'); none in an old ai.json
+      if (!boxes) { warnOnce(`enemy_ai: no part boxes for ${recModel(a)} (old ai.json: rebuild data/enemies); not hit`); continue; }
+      const A = a.pos, B = [a.pos[0], f(a.pos[1] - a.size.h), a.pos[2]];     // up row (0,-1,0) x actor+0x30
+      const cyl = cylinderHit(a.size.r, b.prev, b.pos, A, B);
       if (!cyl) continue;
       const bw = world.boneWorld ? world.boneWorld(a) : null;                 // the MP's posed skeleton
       if (!bw) { warnOnce('enemy_ai: no pose for the part test (boneWorld unset); soldiers not hit'); continue; }
@@ -1005,7 +1067,7 @@ export function createEnemyAI(opts) {
       if (!(a.flags28 & 1)) continue;                                         // FUN_005449f0: +0x28 bit 0
       const rec = data.records[a.rec];
       const lb = data.lock_bones && rec && rec.zones >= 0 ? data.lock_bones[rec.zones] : -1;
-      const top = [a.pos[0], f(a.pos[1] - f(EYE_H - 2.0)), a.pos[2]];
+      const top = [a.pos[0], f(a.pos[1] - f(a.size.h - 2.0)), a.pos[2]];
       let point = top;
       if (lb != null && lb >= 0) {
         const bw = world.boneWorld ? world.boneWorld(a) : null;
@@ -1014,7 +1076,7 @@ export function createEnemyAI(opts) {
       }
       const alive = !dead(a), bits = alive ? PROBE_BITS : PROBE_BITS_DEAD;
       out.push({ id: a.id, alive, lockable: alive && !!(bits & 4), probeBits: bits, point,
-                 feet: a.pos.slice(), radius: R_ACTOR, height: EYE_H, losPoint: top });
+                 feet: a.pos.slice(), radius: a.size.r, height: a.size.h, losPoint: top });
     }
     return out;
   }
@@ -1038,8 +1100,7 @@ export function createEnemyAI(opts) {
   // FUN_0055d2c0: FUN_00318120 (defence) of the bullet's damage, then x zone byte x 0.05 unless bullet
   // +0x120 bit 0x800; cap 9999
   function enemyDamage(a, b) {
-    // e027's status: only e027 actors are hit today (part boxes; see playerBulletHit)
-    let d = defence({ ...E027_STATUS, lvl: a.lvl }, b.damage, b.kind);
+    let d = defence({ ...ENEMY_STATUS, lvl: a.lvl }, b.damage, b.kind);
     if (a.f19c && !(b.f120 & 0x800)) d = Math.trunc(f(f(f(d + 0.5) * a.f19c.scale) * f(0.05)));
     return Math.min(d, 9999);
   }
@@ -1171,8 +1232,8 @@ export function createEnemyAI(opts) {
     const st = (a.stance ?? 0) & 3;
     if (st !== 0) { warnOnce(`enemy_ai: flinch stance ${st} (motion 0x1f / actor state 0x11) not translated`); return 0; }
     a.C.motion = { cls: 0x1e, t: 0 };
-    a.C.clip = FLINCH_CLIP; a.C.hold = false;
-    events.push(`clip ${a.id} ${FLINCH_CLIP}`);
+    a.C.clip = clipOf(a, FLINCH_MOTION) || a.C.clip; a.C.hold = false;
+    events.push(`clip ${a.id} ${a.C.clip}`);
     a.f144 = S.frame;
     return 1;
   }
