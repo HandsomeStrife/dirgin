@@ -6,7 +6,10 @@
 //   3. the save's dead records (41-43) refuse activation (FUN_00559748), so no body appears;
 //   4. a non-e027 record (71, e030) activated by cmd 0x108 gets a body with no AI, and cmd 0x130
 //      removes it again; switching off the newest body (51) first, 71 is drawn right in front of 50;
-//   5. no console errors or page errors.
+//   5. Vincent's bullets (aim.js onShot -> enemy_ai playerShot): the part test's pose (enemies.js
+//      partPose) equals the drawn joints; the gun drawn with R1, the camera turned until the reticle ray
+//      crosses #66's chest, R1 fires: #66 (HP 1) dies (actor state 7, AI mode 0, death clip held);
+//   6. no console errors or page errors.
 //   node native/web/test_enemies_page.mjs          (needs data/enemies + playwright; else SKIP, exit 0)
 // Serves native/web with python3 http.server on a free port. three.js comes from the CDN (play.html importmap).
 import { existsSync } from 'node:fs';
@@ -97,6 +100,49 @@ try {
   ok(r.dead === 0, 'dead records 41-43: activation refused, no body');
   ok(r.e030 && r.e030.model === 'e030' && r.e030.clip === 'st_a' && !r.e030.ai, `record 71 (e030): body in its idle clip, no AI (${JSON.stringify(r.e030)})`);
   ok(r.removed, 'record 71: cmd 0x130 removes the body');
+  // 5. Vincent's bullets
+  const sh = await pg.evaluate(async () => {
+    const P = window.__play, ai = P.enemyAI, wait = n => new Promise(r => setTimeout(r, n));
+    const a = ai.actors.find(s => s.rec === 44), body = P.enemies.actors.find(x => x.rec === 44);
+    // part-test pose vs the drawn skeleton (same frame: both from the last enemies.tick)
+    const rows = P.enemies.partPose(44);
+    let poseErr = 0;
+    for (const b of [2, 6, 13, 28, 33]) {
+      let j = null; body.body.traverse(n => { if (!j && n.name === 'j' + String(b).padStart(2, '0')) j = n; });
+      j.updateWorldMatrix(true, false);
+      const e = j.matrixWorld.elements, r = rows(b)[3];
+      poseErr = Math.max(poseErr, Math.hypot(e[12] - r[0], e[13] - r[1], e[14] - r[2]));
+    }
+    // stand where k_enemy_engage11a's Vincent shot from (31 u west of #66, same deck), so the camera
+    // ray's first world hit is #66's side, not a railing between (test aid: position write, walk
+    // polygon re-found by locate(), the camera reset as on the H / ladder warps)
+    const c = P.ctrl;
+    c.pos = { x: -1070.0, y: -146.1, z: -1105.6 }; c.prev = { ...c.pos }; c.locate(); if (c.onTeleport) c.onTeleport();
+    await wait(400);
+    P.aim.press('r1'); await wait(800);                                     // draw
+    const tgt = [a.pos[0], a.pos[1] - 12, a.pos[2]];
+    const dirTo = (from, to) => { const v = [0, 1, 2].map(k => to[k] - from[k]); const l = Math.hypot(...v); return v.map(x => x / l); };
+    const angles = v => [Math.atan2(v[0], v[2]), Math.asin(v[1])];
+    const err = () => { const c = P.aim.core, e = [c.eye.x, c.eye.y, c.eye.z], h = [c.hit.x, c.hit.y, c.hit.z];
+                        const w = angles(dirTo(e, tgt)), g = angles(dirTo(e, h)); return [w[0] - g[0], w[1] - g[1]]; };
+    // the yaw / pitch signs from one probe step each, then a few corrections
+    const e0 = err(); P.follow.yaw += 0.02; await wait(120); const sy = Math.sign(e0[0] - err()[0]) || 1;
+    const e1 = err(); P.follow.pitch += 0.02; await wait(120); const sp = Math.sign(e1[1] - err()[1]) || 1;
+    for (let i = 0; i < 25; i++) {
+      const [dy, dp] = err();
+      if (Math.abs(dy) < 0.003 && Math.abs(dp) < 0.003) break;
+      P.follow.yaw += sy * dy * 0.02 / 0.02; P.follow.pitch += sp * dp; await wait(120);
+    }
+    const aimErr = Math.max(...err().map(Math.abs));
+    const hp0 = a.hp;
+    P.aim.press('r1'); await wait(1500);                                    // fire
+
+    return { poseErr, aimErr, hp0, hp: a.hp, astate: a.astate, mode: a.ai.mode, clip: a.C.clip, drawn: body.clip, hold: a.C.hold };
+  });
+  ok(sh.poseErr < 1e-3, `part-test pose = the drawn joints (max ${sh.poseErr.toExponential(1)})`);
+  ok(sh.aimErr < 0.01, `reticle ray on #66's chest (angle error ${sh.aimErr.toFixed(4)} rad)`);
+  ok(sh.hp0 === 1 && sh.hp === 0 && sh.astate === 7 && sh.mode === 0, `R1 on #66: HP ${sh.hp0} -> ${sh.hp}, actor state ${sh.astate}, AI mode ${sh.mode}`);
+  ok(sh.drawn === sh.clip && /^r_st(laf|bf)0$/.test(sh.clip) && sh.hold, `#66 draws his death clip ${sh.drawn} (held)`);
   ok(errs.length === 0, `no console errors${errs.length ? ': ' + errs.slice(0, 3).join(' | ') : ''}`);
 } finally {
   await browser.close();

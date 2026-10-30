@@ -1,0 +1,88 @@
+{
+ "name": "k_hits12",
+ "frames": 900,
+ "log_from": 760,
+ "doc": "worker 0139: k_enemy_engage12 cut to 900 frames (call-log limit) for TRACE_CALLLOG=spread on 835:900: the cone draws of Vincent's pellets at f840 (kills #66) and f866 (hits #67 twice). TRACE_FIELDSET=enemy.",
+ "events": [
+  {
+   "from": 10,
+   "to": 230,
+   "lx": 0.6,
+   "ly": -1.0
+  },
+  {
+   "from": 240,
+   "to": 244,
+   "buttons": [
+    "cross"
+   ]
+  },
+  {
+   "from": 280,
+   "to": 284,
+   "buttons": [
+    "cross"
+   ]
+  },
+  {
+   "from": 300,
+   "to": 470,
+   "lx": 0.6,
+   "ly": -1.0
+  },
+  {
+   "from": 490,
+   "to": 494,
+   "buttons": [
+    "cross"
+   ]
+  },
+  {
+   "from": 500,
+   "to": 787,
+   "lx": 0.6,
+   "ly": -1.0
+  },
+  {
+   "from": 795,
+   "to": 799,
+   "buttons": [
+    "r1"
+   ]
+  },
+  {
+   "from": 805,
+   "to": 817,
+   "rx": -1.0
+  },
+  {
+   "from": 819,
+   "to": 829,
+   "ry": 1.0
+  },
+  {
+   "from": 840,
+   "to": 842,
+   "buttons": [
+    "r1"
+   ]
+  },
+  {
+   "from": 845,
+   "to": 851,
+   "rx": -1.0
+  },
+  {
+   "from": 852,
+   "to": 861,
+   "ry": -1.0
+  },
+  {
+   "from": 866,
+   "to": 868,
+   "buttons": [
+    "r1"
+   ]
+  }
+ ]
+}

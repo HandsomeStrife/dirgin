@@ -490,6 +490,41 @@ FUN_00556068), defence FUN_00318120. "Depends on it" says what breaks or moves i
 | Activated body draws before every older actor | enemies.js `add` (inserted before `mpHead`; play.js sets Vincent's body) | DECODED (list rule) | FUN_005a7978 links a new MP right after the list head; FUN_005a8e28 draws in link order | S | Worker 0135. The start bodies 44 / 45 keep the old order (after Vincent; see "Actor draw order"). |
 | Activated body appears when its model has loaded | enemies.js `add` (async: glb, sidecar, weapon glb) | GUESS (page load latency) | the game streams models by section 21 (FUN_003114d0 / FUN_00408ea8) before the trigger fires | S | Worker 0135. e027 is loaded at setup, so its bodies only wait for a weapon glb (a few frames, not measured); another type's first body waits for its download. The AI actor starts on the activation frame either way. |
 
+## Vincent's bullets vs the soldiers (worker 0139, 2026-10-30)
+
+`enemy_ai.js` playerShot / playerBulletHit / hitEnemy / react / flinch / die / moverUpdate, `enemy_hit.js`
+(cylinder, part boxes, cone), hooks: aim.js `onShot`, play.js (2 lines after setupAim), enemies.js `partPose`.
+DECODED and trace-matched (test_enemy_hits.mjs on `k_hits12` = k_enemy_engage12 cut to 900 frames + spread
+call log): pellets W+0x16 with countdown i + 2 (FUN_00577480 / FUN_005408e8), muzzle pull-back
+FUN_00563148, spread FUN_005405b0 / FUN_0025a058 (W+0x1c/0x20/0x24 by distance), the cylinder
+FUN_0055bda8 / FUN_0025c0f8 / FUN_0025c770, the part boxes FUN_005ad118 / FUN_0030baa0 ('mkd' box
+array), dead targets skipped, FUN_0055db50 damage (FUN_0055d2c0 zones), stagger FUN_0055d950, HP
+FUN_0055c7f8 (event 8 / FUN_0055cac8: event 0x17, AI modes 0), FUN_00565480 small-hit branch, flinch
+FUN_00561570 / FUN_00561718 (one RNG draw), death FUN_00560fc8 (state 7), slides FUN_003531e0 /
+FUN_00353340 + movers FUN_00351550 / FUN_003516a0, corpse settled bit at the death clip's end. #66 and
+#67 die on the game's frames with the game's parts, clips and AI-off frame.
+Worker 0140: hit-zone records from the stage file (ai.json `zones`, export_web_triggers.py `zone_set`:
+status +0xa8 = FUN_00310e40(parameter set +0x84), +0x30 by FUN_0030fc68; equal to the save RAM); HP kept
+across deactivation (FUN_00314ea8 only at placement setup); Vincent's shot fires after the AI scheduler
+(FUN_00323128: FUN_00365008, then FUN_0053b500 -> player vt+0x214 FUN_005747a0, then the object lists),
+so the shared RNG is drawn jitter -> cone -> flinch (enemy_ai `queueShot`, tick 1b).
+
+| What | Where | Source | Game function | Size | Notes / what depends on it |
+|---|---|---|---|---|---|
+| Flinch / death clip choice: flinch r_stlld0; death head -> r_stbf0, else r_stlaf0 | `FLINCH_CLIP`, `deathClip` | GUESS | motion class 0x1e / 0x36 clip pick (by hit side C+0x590 / part) | S | Matches the three traced clips; other parts may use other r_st*ld/lf clips. |
+| Flinch end: clip done -> motion 0x40 (r_st_a) | `bodyUpdate` cls 0x1e | GUESS | class 0x1e update not read | S | When a surviving soldier resumes aiming; C+0x214 stays 4 (no turn) until the brain sets 6. |
+| C+0x1c0 = 0x10301 (on the ground) always | `C1C0_STAND` | GUESS (trace #67) | FUN_003543b8 sets bit 0x200 | S | Airborne soldiers would take FUN_00561270 / FUN_005618d0 (not translated). |
+| Big / knock-down reactions (flags 4 / 8, 8th / 15th hit in a chain) | `react` | GUESS: alive none, dead the small-hit death | FUN_005618d0, FUN_00562898, FUN_00561270, FUN_00561138 | M | Only soldiers with HP > ~190 reach them. warnOnce when hit. |
+| FUN_0034b638(0.15, C, -dir) in the flinch left out | `flinch` | GUESS | FUN_0034b638 not read | S | Probably a small turn toward the shooter. |
+| Slides: no root-motion term, no collision, horizontal | `moverUpdate` | GUESS | FUN_003516a0's matrix term; FUN_0034c388 collision | S | #67's slide is exact (12.9 u); #66's corpse meets a wall in the game at ~f849 and ends 3.3 u short of ours. |
+| Soldiers not see-through (closest hit ends the bullet); no room probe | `playerBulletHit` | GUESS / L | actor +0x28 bit 8 piercing; probe 0 (FUN_00556870) | M | A bullet passes walls to reach a soldier behind; two soldiers in line: only the first is hit. |
+| Muzzle / marker 1 = j56 / j05 of the drawn (interpolated) pose | aim.js `muzzle`, `chest` | L | FUN_00341ec8 / FUN_00342000 on the logic pose | S | Pellet directions 0.7-1.0 deg off the game's in the test (which uses h_st_a frame 0). |
+| Pellet count not cut by the rounds left; no lock-on lead | `playerShot` | GUESS | FUN_00319ee0, P+8 (FUN_00329740) | S | The page counts no ammo and has no lock-on: aim = the camera ray's first world hit. |
+| FUN_003251f8 false (no extra spread factor) | `playerShot` | GUESS | FUN_003251f8 | S | The logged cone (4.66926 deg) has no factor. |
+| Item drop on death left out | `enemyDeath` | GUESS | FUN_00316d70 / FUN_00541688 | S | No items on the page. |
+| Limb damage 24, the game's 25 | `enemyDamage` | open | FUN_00318120 / bullet +0x134 (notes §10.2) | S | #67 shows HP 76 for one frame (game 75); the head pellet kills either way. |
+| Player shots vs non-e027 enemies (e048, e030, e036, e023, e024, e001): part boxes, status / defence | export_web_triggers.py (part boxes for e027 only), enemy_ai.js `playerBulletHit`, `enemyDamage` (E027_STATUS) | MISSING | FUN_0055bda8 / FUN_005ad118 per model; status from the parameter set | M | Review of workers 0139 / 0140; these types also have no AI yet, so they stand and can't be killed. |
+
 ## Options (not in the game)
 
 Extras on top of the faithful port: each behind an explicit option, off by default. With the option off the page is the game's behaviour.

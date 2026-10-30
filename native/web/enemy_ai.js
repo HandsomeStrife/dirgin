@@ -1,5 +1,6 @@
 // Enemy AI for z128's e027 soldiers: wake by trigger volume + event script, and the awake
-// combat AI (brain mode 2, combat layer 2, fire timer, shot, bullet, damage to Vincent).
+// combat AI (brain mode 2, combat layer 2, fire timer, shot, bullet, damage to Vincent), and
+// Vincent's bullets hitting them (pellets, spread, part boxes, damage, flinch / death; §13).
 // A direct translation of the game's functions (addresses cited per function); decode notes
 // notes/enemy-research.md §8 / §9, hook patch for play.js / enemies.js notes/enemy-ai-hook.md.
 // Pure logic: no three.js. Tested against PCSX2 traces by test_enemy_ai.mjs.
@@ -16,6 +17,8 @@
 //      trace: #67 re-queued with interval 15 on the wake frame, so after the AI step)
 //   5. player moved -> trigger volumes FUN_005517a8(old, new) (they queue the wake messages)
 
+import { cylinderHit, partTest, cone } from './enemy_hit.js';
+
 // ---------------------------------------------------------------- constants
 // Enemy weapon W (status +0xac) = stage section 24 record (FUN_00318610 / FUN_00311600), index by
 // FUN_00318718: from ai.json (export_web_triggers.py: data.weapons, data.records[k].weapon).
@@ -27,12 +30,15 @@ export const PLAYER_AIM_H = 12.4; // GUESS: player vt+0x5c aim point = feet - 12
 // disc / in the save file is not decoded. lvl +0x11 4, +0xc0 armour record 0, +0x60 0x8233,
 // +0x27 0, +0x64 0, his weapon W+0x68 0 (export_web_aim.py compose() of the save's parts),
 // FUN_00317630 0, param set +0x9c 0. With them a 45 shot does 44 (trace f789 / f1011).
-export const PLAYER_STATUS = { lvl: 4, armour: null, f60: 0x8233, f27: 0, f64: 0, u20top: 0, w68: 0, b317630: 0, elem9c: 0 };
+export const PLAYER_STATUS = { lvl: 4, armour: null, f60: 0x8233, f27: 0, f64: 0, u20top: 0, w68: 0, b317630: 0, elem9c: 0,
+                                b10: 2, f118: 0 };   // status +0x10 (FUN_005405b0's level term; 4.8 / 1.028 = the k_hits12 cone angle), actor +0x118
 // GUESS (save RAM): G = *DAT_0046dd68: G+0x60 story progress 20, G+0x14 table +0x270 level factors,
 // +0xaa / +0xae / +0xb2 difficulty cuts; DAT_004b8ac8 option bits 0, DAT_0046b328 1, DAT_0046b2fc 2.
 // ELF data: DAT_0046e220 {0, 50} (level factors before progress 7), DAT_004a02b0 element factors.
 export const GAME = { progress: 20, lvlK: [0.33, 0.4], lvlK0: [0, 50], cut: { aa: 0, ae: 20, b2: 100 },
-                      bits4b8ac8: 0, d46b328: 1, d46b2fc: 2, elem: [1, 0, 0.25, 0.5, 2], armour: null };
+                      bits4b8ac8: 0, d46b328: 1, d46b2fc: 2, elem: [1, 0, 0.25, 0.5, 2], armour: null,
+                      // T = G+0x14: +0xd0 / +0xd4 spread distance classes, +0x268 the spread level factors (FUN_0031cf08)
+                      spreadD: [120, 380], spreadK: [0.15, 2.5] };
 export const MANAGER_SHORT_18 = 1; // GUESS: manager short 18 (cmd 0x30); trace: script 108 event 2 took the mode-2 branch, so != 0
 export const JITTER_ON = GAME.d46b2fc !== 0;   // FUN_00326500 = FUN_002424a0 = DAT_0046b2fc != 0 (notes §9.6)
 const BULLET_R = 5.0;             // GUESS: hit radius around the player's aim point (part test vt+0x17c not decoded; = R_ACTOR)
@@ -43,6 +49,23 @@ export const MOTION = { 0x40: 'r_st_a', 0x57: 'r_st_f' };
 // evt_key in k_enemy_engage7: only flag 2 = 7 and flag 46 = 1 (notes/enemy-activation.md §1)
 export const SAVE_DIFFICULTY = 1;
 export const SAVE_EVENT_FLAGS = Object.freeze({ 2: 7, 46: 1 });
+// Vincent's bullets vs the soldiers (notes/enemy-research.md §13). Hit-zone records (status +0xa8
+// -> +0x30 -> 16 B per part, FUN_0055bda8): byte 0 = damage scale (x 0.05, FUN_0055d2c0) and ushort
+// +2 flags (bit 1 no reaction flags, bit 2 no stagger, bit 3 bullet +0x120 |= 0x60000; FUN_0055db50).
+// From the stage file: ai.json zones[record.zones] (export_web_triggers.py zone_set: FUN_003153d0 /
+// FUN_00310e40 / FUN_0030fc68).
+// e027 status fields FUN_00318120 reads (§10.2, RAM of #67): armour +0xc0 none, +0x60 0, +0x27 0,
+// +0x64 0, element 0; level +0x11 comes from ai.json (FUN_00314ea8).
+export const E027_STATUS = { lvl: 0, armour: null, f60: 0, f27: 0, f64: 0, u20top: 0, w68: null, b317630: 0, elem9c: 0 };
+// GUESS: C+0x1c0 of a standing soldier (trace k_enemy_engage12 #67: 0x10301; bit 0x200 = on the
+// ground, read by FUN_00565480). The page has no enemy physics, so it stays.
+const C1C0_STAND = 0x10301;
+// GUESS: the motion classes' clips. Class 0x1e (flinch, FUN_00561718 stance 0) and the death motion
+// (class 0x36 after FUN_0055b8e0(actor, 7)) pick a clip by hit side / part; that choice is not
+// decoded. The traces show r_stlld0 (flinch, part 10), r_stlaf0 (death, part 6) and r_stbf0 (death,
+// part 0 = head): head -> r_stbf0, any other part -> r_stlaf0.
+const FLINCH_CLIP = 'r_stlld0';
+const deathClip = part => part === 0 ? 'r_stbf0' : 'r_stlaf0';
 const ID_BASE = 22;               // GUESS: manager +0x3b2 table (cmd 0x3a): object id = record + 22 (trace meta EI0..6: rec 44 -> 66, 66 -> 88)
 
 // ---------------------------------------------------------------- RNG FUN_0040b398 / 0040b500 / 0040b5c0
@@ -224,7 +247,7 @@ export function createEnemyAI(opts) {
 
   // AI scheduler (*DAT_0046f4e4): +0 clock, +8 step accumulator, +0x10 rays / +0x11 shots /
   // +0x12 runs / +0x13 total this tick, +0x20 AI queue (sorted by due), +0x2c fire timers.
-  const S = { now: opts.now ?? 0, acc: opts.acc ?? 0, rays: 0, shots: 0, runs: 0, total: 0, q: [], timers: [] };
+  const S = { frame: 0, now: opts.now ?? 0, acc: opts.acc ?? 0, rays: 0, shots: 0, runs: 0, total: 0, q: [], timers: [] };
   const objects = new Map();    // object id -> actor or trigger object
   const actors = [];
   const bullets = [];
@@ -253,9 +276,12 @@ export function createEnemyAI(opts) {
   const onActivate = opts.onActivate || (() => {});
   const onDeactivate = opts.onDeactivate || (() => {});
   const activated = [];         // records activated this frame (tick clears it)
+  // Status HP (+0x20) = max HP from the placement setup (FUN_00315050 / FUN_003151c8 -> FUN_00314ea8:
+  // ai.json hp; GUESS 100 for an old ai.json). It lives on the status, so it survives deactivation
+  // and reactivation (FUN_00559748 does not reset it).
   data.records.forEach((rec, k) => {
     const id = k + ID_BASE;
-    if (!objects.has(id)) objects.set(id, { kind: 'record', id, rec: k, script: rec.script, vars: new Int16Array(8), flags28: 0, ai: null, hp: deadRecs.has(k) ? 0 : 1 });
+    if (!objects.has(id)) objects.set(id, { kind: 'record', id, rec: k, script: rec.script, vars: new Int16Array(8), flags28: 0, ai: null, hp: deadRecs.has(k) ? 0 : rec.hp ?? 100 });
   });
 
   // addActor: an activated e027 (FUN_00559748 gave it a body and an AI). init may carry the
@@ -273,9 +299,15 @@ export function createEnemyAI(opts) {
       vars: prev && prev.kind === 'record' ? prev.vars : new Int16Array(8),
       flags28: 1,                                // +0x28 bit 0 = active (FUN_00559748 tests it)
       f118: init.f118 ?? 0, target: init.target ?? null, aim120: null,
-      astate: init.astate ?? 0, hp: init.hp ?? 100, s64: 0, f19c: null,
-      // body C
-      C: { f564: init.f564 ?? 0, speed: 0, s214: 0, aim: null, t2b0: null, motion: null, clip: init.clip || 'r_gst' },
+      // status +0x20 HP: the record object's (set at placement setup, kept across deactivation)
+      astate: init.astate ?? 0, hp: init.hp ?? (prev && prev.kind === 'record' ? prev.hp : rec.hp ?? 100), s64: 0, f19c: null,
+      lvl: rec.lvl ?? 0,                         // status +0x11 (FUN_00314ea8)
+      stance: 0, f110: 0,                        // +0x100 bits 40-41 stance / +0x110 reaction nibbles (0 for z128's soldiers, §10.3)
+      part: -1, f144: -0x7fffffff,               // +0x142 last part hit, +0x144 frame of the last flinch clip
+      s148: -0x7fffffff, s150: 0, s152: 0, sphase: 0,   // stagger FUN_0055d950: +0x148 time, +0x150 / +0x152 sums, phase (+0x150 bits 40-43)
+      // body C (+0x300 mover mode and its slide; C+0x1c0 move flags)
+      C: { f564: init.f564 ?? 0, speed: 0, s214: 0, aim: null, t2b0: null, motion: null, clip: init.clip || 'r_gst',
+           f1c0: C1C0_STAND, mover: 0, slide: null, hold: false },
       ai: null,
     };
     a.ai = {
@@ -412,7 +444,8 @@ export function createEnemyAI(opts) {
     // destructor (vtable 0x4a2358 +0xc = FUN_0035e6f8), whose first call is FUN_00360820 = stopFire
     // (the fire timer leaves the list DAT_0046f4e4 +0x2c); then +0x184 = 0, +0x140 = 0xff.
     // Reactivation builds a new AI (FUN_00365c50 in the on path), so nothing of the old one stays.
-    // GUESS: the rest (body / weapon release, FUN_00588330, flags28 and HP kept) is not translated;
+    // HP stays on the status (FUN_00559748 does not write +0x20; the record object keeps it).
+    // GUESS: the rest (body / weapon release, FUN_00588330, flags28 kept) is not translated;
     // notes/fidelity-audit.md 'Actor deactivation'.
     t.flags28 &= ~1;
     if (t.kind === 'actor') {
@@ -518,6 +551,11 @@ export function createEnemyAI(opts) {
     if (a.astate === st) return 0;
     a.astate = st;
     if (st === 3) request(a, 0x40);              // GUESS: state 3 -> motion 0x40 (r_st_a), see MOTION
+    if (st === 7) {                              // the death motion (class 0x36); its clip: GUESS deathClip
+      a.C.motion = { cls: 0x36, t: 0 };
+      a.C.clip = deathClip(a.part); a.C.hold = true;
+      events.push(`clip ${a.id} ${a.C.clip}`);
+    }
     return 1;
   }
   function request(a, m) {                       // FUN_00345818 (clip change only; blend flags 0x82 / 0x83 not modelled)
@@ -735,8 +773,22 @@ export function createEnemyAI(opts) {
 
   // body update: motion state class 0xe, FUN_00596460 (called with the frame step)
   function bodyUpdate(a, step) {
+    moverUpdate(a, step);                                                     // FUN_0034f8c0 (C+0x300 slides)
     const m = a.C.motion;
     if (!m) return;
+    if (m.cls === 0x1e || m.cls === 0x36) {
+      // the clip clock as enemies.js plays it (MP+0x40c 0.5 x step, FUN_005aa2a8). Death (0x36): at the
+      // clip's end the motion-done event FUN_00343160 -> FUN_00539570 sets actor +0x118 bit 0x100
+      // (corpse settled, notes §10.5) and the last frame holds. GUESS: the flinch (0x1e) ends with its
+      // clip and requests motion 0x40 (r_st_a); class 0x1e's own update is not read.
+      const n = data.clips && data.clips[a.C.clip];
+      m.t = f(m.t + f(f(0.5) * step));
+      if (n != null && n <= m.t) {
+        if (m.cls === 0x36) { if (!m.done) { m.done = 1; a.f118 |= 0x100; events.push(`settled ${a.id}`); } }
+        else { a.C.motion = null; request(a, 0x40); }
+      }
+      return;
+    }
     if (m.cls === 6) {
       // GUESS: motion state 6 (what class 0xe returns into) is not decoded: on its first update it
       // requests r_st_a and stays; its +0x74 = 0xe so the next shot starts class 0xe again.
@@ -815,6 +867,7 @@ export function createEnemyAI(opts) {
     // BULLET_R of his aim point (his part test vt+0x17c, the other actors' filter vt+0x1ac and the
     // room probe are not decoded; #66 shows no hit or near miss from #67's f875 bullet, so the
     // filter skips soldiers: L). Off unless opts.damage.
+    if (b.from === P) return playerBulletHit(b) || done;                      // Vincent's bullet: the soldiers
     if (DAMAGE && b.target === P && segPointDist(b.prev, b.pos, playerAim()) <= BULLET_R) {
       damagePlayer(b);
       return 1;
@@ -835,6 +888,293 @@ export function createEnemyAI(opts) {
     log(`enemy_ai: Vincent HP ${before} -> ${P.hp} (shot by #${b.from.id})`);
     // Not translated: the hit reaction vt+0x324 FUN_00576ac8, and at HP 0 the death vt+0x334
     // FUN_00576b48: HP stays at 0 and nothing else happens (the page does not handle it).
+  }
+
+  // ------------------------------------------------ Vincent's bullets (notes/enemy-research.md §13)
+  // FUN_00577480 -> FUN_005408e8(mgr, 0, muzzle, aim, W, status, i, 0) for i < W+0x16 pellets ->
+  // FUN_00552dd8(b, i): every pellet flies from the muzzle toward the aim, pellet i with i + 2 frames
+  // of countdown (+0x142), so the pellets follow each other one frame apart on one line.
+  // W = data/aim/weapon.json (export_web_aim.py: speed10 = W+0x2c, range10 = W+0x18, hit = W+0x4a).
+  // GUESS: the pellet count is not cut by the rounds left (FUN_00319ee0; the page counts no ammo).
+  // L: no lead correction (P+8 lock-on target: the page has no lock-on, FUN_00329740).
+  // chest = marker 1 (FUN_00342000; Vincent: bone 5, offset 0): FUN_00563148 first pulls the muzzle
+  // back along the shot by 0.8 x |muzzle - chest| (unless actor +0x118 bit 0x1000). Then per pellet
+  // FUN_005405b0 (W+4 without 0x100000 / 0x200000): s = W+0x1c / +0x20 / +0x24 by |aim - muzzle|
+  // < T+0xd0 (120) / < T+0xd4 (380) / beyond, / FUN_0031cf08(1.0, status +0x10), FUN_00318518 (no
+  // armour record: unchanged), x 0.5 for FUN_00317b68 (not for Vincent here); FUN_0025a058 tilts the
+  // direction (two draws from the shared RNG); aim' = muzzle + dir x W+0x18 x 10 -> FUN_00552dd8.
+  // GUESS: FUN_003251f8 (with FUN_00326500 and status +0x60 bit 1: the x {1, 0.33, 0.75, 0.1} factor)
+  // taken as false: not read; the k_hits12 log shows s = 4.8 / 1.028 with no factor.
+  const pendingShots = [];
+  // the page's hook (play.js / aim.js onShot): the player steps before tick, so his shot waits for
+  // tick's slot after the scheduler (see tick 1b)
+  function queueShot(muzzle, aim, W, chest = null) { pendingShots.push([muzzle, aim, W, chest]); }
+  function playerShot(muzzle, aim, W, chest = null) {
+    const PS = opts.playerStatus || PLAYER_STATUS;
+    let m0 = muzzle.slice();
+    if (chest && !(PS.f118 & 0x1000)) {
+      const u = unit3(sub3(aim, m0)), k = f(len3(sub3(m0, chest)) * f(-0.8));
+      m0 = m0.map((x, i) => f(x + f(u[i] * k)));
+    }
+    if (!W.spread) warnOnce('enemy_ai: weapon.json has no spread (W+0x1c..0x24): rebuild data/aim; pellets fly straight');
+    const range = f(f(W.range10 * 10.0) + 15.0);                              // +0x15c (FUN_00321e20 false, as above)
+    for (let i = 0; i < W.pellets; i++) {
+      const start = m0.slice();
+      let aimP = aim.slice();
+      if (W.spread && !(W.flags & 0x300000)) {                                // FUN_005405b0
+        const v0 = sub3(aim, start), d0 = len3(v0);
+        let s = d0 < GAME.spreadD[0] ? W.spread[0] : d0 < GAME.spreadD[1] ? W.spread[1] : W.spread[2];
+        const kk = GAME.progress < 7 ? GAME.lvlK0 : GAME.spreadK;             // FUN_0031cf08 (G+0x60 >= 7)
+        s = f(s * f(1.0 / f(f(f(f(kk[0] * PS.b10) + kk[1]) * f(0.01)) + 1.0)));
+        if ((PS.f64 & 0x20) && PS.u20top === 2) s = f(s * 0.5);              // FUN_00317b68
+        const d2 = cone(s, unit3(v0), rng);
+        aimP = start.map((x, k) => f(x + f(d2[k] * f(W.range10 * 10.0))));
+      }
+      const v = sub3(aimP, start), d = len3(v);
+      const dir = d > 0 ? v.map(x => f(x / d)) : [0, 0, 0];
+      const end = (W.flags & 0x400000) ? aimP.slice() : start.map((x, k) => f(x + f(dir[k] * range)));
+      bullets.push({
+        from: P, start, dir, end, endDist: f(len3(sub3(start, end))), range,
+        speed: f(W.speed10 * f(0.16666667)),                                  // +0x12c = W+0x2c / 6
+        age: 0, pos: start.slice(), prev: start.slice(), f120: 0, f148: 0,
+        delay: i + 2,                                                         // +0x142 = pellet index + 2
+        damage: W.damage, hit: W.hit ?? 0,                                    // +0x134 (short)W+0x40, +0x153 W+0x4a
+        kind: (W.flags & 0x80000) && JITTER_ON ? 2 : 0,                      // FUN_00554738
+        shooter: P.id ?? 0x16,                                                // +0x128 owner id
+      });
+    }
+    if (W.hit == null) warnOnce('enemy_ai: weapon.json has no hit value (W+0x4a): rebuild data/aim; stagger uses 0');
+    events.push(`player shot ${W.pellets}`);
+  }
+
+  // FUN_005442d8 for Vincent's bullet: the active soldiers along prev -> pos, each through its vt+0x17c
+  // = FUN_0055bda8(actor, 0, ...): the cylinder (FUN_0054b2b0: feet .. feet + up x actor+0x30, radius
+  // actor+0x2c; e027 has no actor +0x28 bit 0x20, so not the extended form), then the part test
+  // FUN_005ad118 on the same segment. No part (or a masked part, C+0x77c) -> FUN_0055df90 -> FUN_00360870
+  // (ai, 0, 0): counted, no hit. A part -> actor +0x142 = part, +0x19c = zone record, a hit.
+  // The closest hit (distance from prev to the cylinder point) gets vt+0x1b4 -> FUN_0055db50 and the
+  // bullet ends (FUN_00556870 returns its result). GUESS: soldiers are not see-through (actor +0x28
+  // bit 8 / bullet +0x120 bit 0x40 would list every hit instead; bit 8 is not exported); W flags 0x100
+  // has no 0x40. L: the object filter vt+0x1ac lets Vincent's bullets reach every soldier; the room
+  // probe after the objects (probe 0) is not done (bullets pass walls, as the soldiers' do).
+  function playerBulletHit(b) {
+    let best = null;
+    for (const a of actors) {                                                 // active only (+0x28 bit 0: setActive keeps the list)
+      // L: a dead soldier is not tested: AI +0x70 (counted on every hit and near miss) stops at the
+      // death for both soldiers while the later pellets pass him (k_enemy_engage11a / 12). The gate
+      // (filter vt+0x1ac or object +0x38 bit 0) is not read.
+      if (dead(a)) continue;
+      const boxes = data.hitboxes && data.hitboxes[recModel(a)];
+      // MISSING: part boxes are exported for e027 only (export_web_triggers.py); other types can't be hit yet
+      // (notes/fidelity-audit.md 'Player shots vs non-e027 enemies')
+      if (!boxes) { warnOnce(`enemy_ai: no part boxes for ${recModel(a)} (only e027's are exported); not hit`); continue; }
+      const A = a.pos, B = [a.pos[0], f(a.pos[1] - EYE_H), a.pos[2]];        // up row (0,-1,0) x actor+0x30
+      const cyl = cylinderHit(R_ACTOR, b.prev, b.pos, A, B);
+      if (!cyl) continue;
+      const bw = world.boneWorld ? world.boneWorld(a) : null;                 // the MP's posed skeleton
+      if (!bw) { warnOnce('enemy_ai: no pose for the part test (boneWorld unset); soldiers not hit'); continue; }
+      const part = partTest(boxes, bw, b.prev, b.pos);
+      if (part < 0) { aiHit(a, 0, 0); events.push(`near miss ${a.id}`); continue; }   // FUN_0055df90 (no part mask on the page: C+0x77c 0, trace pmask)
+      const dist = len3(sub3(b.prev, cyl.point));
+      if (!best || dist < best.dist) best = { a, part, point: cyl.point, dist };
+    }
+    if (!best) return 0;
+    best.a.part = best.part;                                                  // +0x142
+    best.a.f19c = zoneRec(best.a, best.part);                                 // +0x19c = zone record (null: status +0xa8 = 0)
+    hitEnemy(best.a, b, best.point);
+    return 1;
+  }
+  const recModel = a => data.records[a.rec] ? data.records[a.rec].model : 'e027';
+  // FUN_0055bda8: actor +0x19c = *(status +0xa8 + 0x30) + part x 16, or 0 without a zone set
+  function zoneRec(a, part) {
+    const rec = data.records[a.rec];
+    if (!data.zones || !rec || rec.zones == null) { warnOnce('enemy_ai: ai.json has no hit zones (old export: rebuild data/enemies); damage unscaled'); return null; }
+    const zs = rec.zones >= 0 ? data.zones[rec.zones] : null;
+    return zs ? zs[part] ?? null : null;
+  }
+
+  // FUN_00360870(ai, shooter, dmg): AI +0x70 hits + 1, +0x4c = now; with a shooter FUN_003608d8
+  // (AI +0x90 = the shooter; T: 0x160016 after Vincent's hit, k_enemy_engage11a)
+  function aiHit(a, shooter, dmg) {
+    const ai = a.ai;
+    if (!ai) return;
+    ai.hits = short(ai.hits + 1); ai.f4c = S.now;
+    if (shooter) ai.f90 = shooter;
+  }
+
+  // FUN_0055d2c0: FUN_00318120 (defence) of the bullet's damage, then x zone byte x 0.05 unless bullet
+  // +0x120 bit 0x800; cap 9999
+  function enemyDamage(a, b) {
+    // e027's status: only e027 actors are hit today (part boxes; see playerBulletHit)
+    let d = defence({ ...E027_STATUS, lvl: a.lvl }, b.damage, b.kind);
+    if (a.f19c && !(b.f120 & 0x800)) d = Math.trunc(f(f(f(d + 0.5) * a.f19c.scale) * f(0.05)));
+    return Math.min(d, 9999);
+  }
+
+  // FUN_0055d950(actor, hit value): the stagger flags 0x42 / 0x44 / 0x48. Thresholds 1 / 30 / 60
+  // (FUN_00310c40 = G+0x64 < 27 in this save; else status +0x9c -> +0x94..+0x98).
+  // The window is FUN_0054cbe8 = DAT_0046e938 +0x20 - actor +0x148 < 60 (the counter the flinch
+  // throttle reads; L: it counts frames, S.frame here).
+  function stagger(a, hv) {
+    if (S.frame - a.s148 < 60) { a.s150 += hv; a.s152 += hv; }
+    else { a.s150 = hv; a.s152 = hv; a.sphase = 0; }
+    a.s148 = S.frame;
+    let fl = 0;
+    if (a.s152 >= 1) { fl = 0x42; a.s152 = 0; if (a.sphase === 0) a.sphase = 1; }
+    if (a.sphase === 1 && a.s150 >= 30) { fl = 0x44; a.sphase = 2; }
+    else if (a.sphase === 2 && a.s150 >= 60) { fl = 0x48; a.s150 = 0; a.s152 = 0; a.sphase = 0; }
+    return fl;
+  }
+
+  // FUN_0055db50(victim, bullet, hit point): Vincent's bullet on a soldier
+  function hitEnemy(a, b, hitpos) {
+    const shooter = b.shooter;
+    const gate = a.s64 & 3;                                                   // FUN_0055f0e0(a, 1) / (a, 0): no damage
+    let dmg = 0;
+    if (!gate) {
+      const wasDead = dead(a);
+      dmg = enemyDamage(a, b);
+      if (a.f118 & 0x60) dmg = 0;
+      let dir = [0, 0, 0];
+      if (!dead(a)) dir = unit3([b.dir[0], 0, b.dir[2]]);                     // FUN_0055d390: the bullet's +0x80, y = 0
+      // vt+0x2f4 event 0x12 (r0 = owner id, r2 = owner +0x20); scripts 108 / 109 have none
+      runEvent(a, 0x12, [shooter, 0, shooter, 0]);
+      const zf = a.f19c ? a.f19c.flags : 0;
+      let fl = 0;
+      if (!a.f19c || !(zf & 4)) fl = stagger(a, b.hit);
+      if (zf & 8) b.f120 |= 0x60000;
+      if (wasDead) {
+        if (!(a.f118 & 0x10000)) react(a, b.f148, dir, hitpos, 0);
+      } else {
+        enemyHP(a, dmg);                                                      // vt+0x1ec FUN_0055c7f8
+        // the shooter's vt+0x314 / +0x31c (Vincent's kill / damage callbacks): not translated
+        let flags = b.f148 | fl;
+        if (zf & 2) flags = 0;
+        if (!(a.f118 & 0x10000)) react(a, flags, dir, hitpos, 1);
+      }
+    }
+    aiHit(a, shooter, dmg);                                                   // FUN_00360870
+    // FUN_003361b8 (hit effect by the zone's nibble) and FUN_00567f10 (actor +0x28 bit 0x20 clear):
+    // not on the page
+    events.push(`hit ${a.id} part ${a.part} dmg ${dmg} hp ${a.hp}`);
+  }
+
+  // FUN_0055c7f8: HP -= dmg (cap 9999; +0x118 bit 31 leaves 1); alive -> vt+0x324 FUN_0055c978(dmg, 0):
+  // script event 8 (r0 = dmg; cues 0x44 / 0x4c are sound); killed -> FUN_0055c978(dmg, 1) (vt+0x344
+  // is empty for e027) and vt+0x334 FUN_0055cac8
+  function enemyHP(a, dmg) {
+    const was = dead(a);
+    if (dmg > 9999) dmg = 9999;
+    if ((a.f118 | 0) < 0 && a.hp <= dmg) dmg = a.hp - 1;
+    const before = a.hp;
+    a.hp = Math.max(0, a.hp - dmg);                                           // FUN_003168c8 (clamp at 0: L)
+    log(`enemy_ai: #${a.id} HP ${before} -> ${a.hp}`);
+    if (was) return;
+    if (!dead(a)) runEvent(a, 8, [dmg, 0, 0, 0]);
+    else enemyDeath(a);
+  }
+
+  // FUN_0055cac8: cue (sound), script event 0x17, FUN_005435a8 (manager: not decoded), the AI's
+  // modes 0 (FUN_0035f728 = FUN_0035f268 / FUN_0035f540 / FUN_0035f9a0 with 0: the fire timer stops)
+  // and the item drop. GUESS: the item drop (FUN_00316d70 / FUN_00541688) is left out (no items on the page).
+  function enemyDeath(a) {
+    runEvent(a, 0x17);
+    if (a.ai) { setMode(a.ai, 0); setActionLayer(a.ai, 0); setCombatLayer(a.ai, 0); }
+    events.push(`dead ${a.id}`);
+  }
+
+  // FUN_00565480(actor, flags, hitdir, hitpos, wasAlive), the branches z128's soldiers take (notes §10.3)
+  function react(a, flags, dir, hitpos, wasAlive) {
+    const C = a.C;
+    // 1. C+0x1c8 / FUN_00356740 and the flag 8 -> 4 swap for actor +0x28 bit 0x20 or C+0x45c bit 17:
+    // GUESS: not translated (z128's soldiers have neither bit; FUN_00356740 not read)
+    if (!wasAlive) {
+      if (C.motion && C.motion.cls === 0x36) warnOnce('enemy_ai: hit on a corpse in its death motion (FUN_005612a0) not translated');
+      return;
+    }
+    if (a.f110 & 0xff00) warnOnce('enemy_ai: actor +0x110 reaction nibbles (FUN_00562670 / FUN_00562778) not translated');
+    const isDead = dead(a);
+    const grounded = C.f1c0 & 0x200;
+    if (a.astate === 0xf) return;
+    if ((flags & 8 && !(a.f118 & 4)) || (flags & 4 && !(a.f118 & 0x10))) {
+      // GUESS: the knock-down / big reactions (FUN_005618d0, FUN_00562898, FUN_00561270, FUN_00561138)
+      // are not translated: alive -> no reaction; dead -> the small-hit death below
+      warnOnce('enemy_ai: big / knock-down hit reaction (flags 4 / 8) not translated');
+      if (isDead) die(a, dir);
+      return;
+    }
+    if (flags & 2) {
+      if (a.f118 & 8) return;
+      if (!grounded) { warnOnce('enemy_ai: airborne hit reaction (FUN_00561270 / FUN_005618d0) not translated'); if (isDead) die(a, dir); return; }
+      if (isDead) { die(a, dir); return; }
+      if ((a.f118 & 0x100000) && !(flags & 0x40)) return;
+      const away = unit3(sub3(a.pos, hitpos));
+      flinch(a, unit3([0, 1, 2].map(k => f(dir[k] + f(0.15 * away[k])))));
+      return;
+    }
+    if (isDead) die(a, dir);                                                  // 8. no flag 2/4/8
+  }
+
+  // FUN_00561570: the flinch. FUN_0034b638(0.15, C, -dir) is left out (GUESS: not read; it runs
+  // before the push-back), push-back FUN_003531e0(4, 4, C, dir) + mover 9 (FUN_0034edf0) for an
+  // actor without +0x28 bit 0x20 (e027), C+0x214 = 4 (FUN_0034e960: no turn), then FUN_00561718.
+  function flinch(a, dir) {
+    const C = a.C;
+    const locked = (a.f118 & 0x1800) !== 0;
+    const mv = C.mover === 1 || C.mover === 0xe;
+    if (!mv && !locked) {
+      slide(C, 9, 4.0, 4.0, dir);
+      C.s214 = 4;
+    }
+    const started = flinchClip(a);
+    if (mv && started) C.f1c0 |= 0x20;
+  }
+  // FUN_00561718: no new clip within 12 frames of the last (6 on a coin flip: one FUN_0040b5c0 draw,
+  // int(r x 2) != 0); stance (actor +0x100 bits 40-41) 0 -> motion state 0x1e (FUN_00341780)
+  function flinchClip(a) {
+    const el = S.frame - a.f144;                                              // FUN_0054cbe8: DAT_0046e938 +0x20 (L: frames)
+    const r = rng();
+    if (Math.trunc(r * 2) === 0 ? el < 12 : el < 6) { a.f144 = S.frame - 6; return 0; }
+    const st = (a.stance ?? 0) & 3;
+    if (st !== 0) { warnOnce(`enemy_ai: flinch stance ${st} (motion 0x1f / actor state 0x11) not translated`); return 0; }
+    a.C.motion = { cls: 0x1e, t: 0 };
+    a.C.clip = FLINCH_CLIP; a.C.hold = false;
+    events.push(`clip ${a.id} ${FLINCH_CLIP}`);
+    a.f144 = S.frame;
+    return 1;
+  }
+  // FUN_00560fc8: stop (FUN_003533e0), the death slide FUN_00353340(12, 16, C, dir) + mover 0xb for an
+  // actor without +0x28 bit 0x20 (C+0x7e4 +0x50 / +0x54 override: none on the page), status bit 6
+  // (FUN_0055f0e0(a, 6) -> FUN_0056b620): not set for z128's soldiers; actor state 7 unless +0x118
+  // has 0x8000 / 0x10000
+  function die(a, dir) {
+    const C = a.C;
+    C.mover = 0; C.slide = null;                                              // FUN_003533e0
+    slide(C, 0xb, 12.0, 16.0, dir);
+    if (a.s64 & 0x40) warnOnce('enemy_ai: status bit 6 death (FUN_0056b620) not translated');
+    if (!(a.f118 & 0x18000)) setActorState(a, 7);
+  }
+  // FUN_003531e0 / FUN_00353340 + FUN_0034edf0(C, mode): direction (unit), speed 2d / T per tick,
+  // deceleration speed / T per tick
+  function slide(C, mode, d, T, dir) {
+    const v = f(f(d + d) / T);
+    C.slide = { dir: unit3(dir), v, dv: f(v / T) };
+    C.mover = mode;
+  }
+  // FUN_0034f8c0 (body mover): mode 9 = FUN_00351550, mode 0xb = FUN_003516a0. Both hand the speed to
+  // FUN_0034af98 (C+0xc0 dir, C+0xcc speed), which the body move FUN_0034c388 applies as dir x speed x
+  // step; then speed -= deceleration x step. Mode 9 ends below 0 (FUN_00352a60 -> mover 0); mode 0xb
+  // stops at 0 and stays. GUESS: mode 0xb's second term (a root-motion velocity from the death clip,
+  // FUN_003516a0's matrix part) is left out; no enemy collision or ground (the slide is horizontal).
+  function moverUpdate(a, step) {
+    const C = a.C, s = C.slide;
+    if (!s || (C.mover !== 9 && C.mover !== 0xb)) return;
+    if (C.mover === 0xb && !(s.v >= 0.01)) { s.v = Math.max(0, f(s.v - f(s.dv * step))); return; }   // FUN_0034b110: no move
+    const k = f(s.v * step);
+    a.pos = [f(a.pos[0] + f(s.dir[0] * k)), a.pos[1], f(a.pos[2] + f(s.dir[2] * k))];
+    s.v = f(s.v - f(s.dv * step));
+    if (C.mover === 9) { if (s.v < 0) { s.v = 0; C.mover = 0; C.slide = null; } }
+    else if (s.v < 0) s.v = 0;
   }
 
   // ------------------------------------------------ AI run FUN_00365110 and scheduler FUN_00365008
@@ -894,9 +1234,15 @@ export function createEnemyAI(opts) {
   // ------------------------------------------------ one game frame
   function tick(step, playerOld, playerNew) {
     events.length = 0;
+    S.frame++;                                                                // DAT_0046e938 +0x20 (frames)
     activated.length = 0;
     // 1. AI
     scheduler(step);
+    // 1b. Vincent's shot (queueShot). FUN_00323128 runs the AI scheduler FUN_00365008 first, then the
+    // object update FUN_0053b500, which ticks the player (vt+0x214 of vtable 0x58f128 = FUN_005747a0
+    // -> FUN_005786e8 -> FUN_00579570 -> FUN_00577480: the cone draws) before its object lists
+    // (FUN_005810e8: bullets, so the flinch draw). The shared RNG is drawn in that order.
+    for (const sh of pendingShots.splice(0)) playerShot(...sh);
     // 2. bullets (oldest first)
     for (const b of bullets.slice()) if (bulletUpdate(b, step)) bullets.splice(bullets.indexOf(b), 1);
     // 3. bodies: turn (FUN_0034ea18 -> FUN_0034de50), then the motion state (may spawn bullets).
@@ -924,5 +1270,10 @@ export function createEnemyAI(opts) {
     return events.slice();
   }
 
-  return { S, actors, triggers, bullets, objects, addActor, tick, runEvent, recById, events, activated, setActive };
+  // boneWorld: (actor) => (bone) => world rows of that bone (the MP's last posed skeleton), set by the
+  // page (enemies.js partPose) or a test; the part test needs it. playerShot(muzzle, aim, W): Vincent
+  // fired, now; queueShot: the same at this frame's player slot inside the next tick (the page).
+  const world = { S, actors, triggers, bullets, objects, addActor, tick, runEvent, recById, events, activated, setActive,
+                  playerShot, queueShot, boneWorld: opts.boneWorld || null };
+  return world;
 }

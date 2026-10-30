@@ -677,6 +677,9 @@ async function main() {
                                      isFrozen: () => { try { return frozen; } catch (_) { return false; } } }) : null;
   actionHelp.push('Space jump (✕; the ladder takes it first)');
   if (weapon) actionHelp.push(weapon.help);
+  // Vincent's bullets vs the soldiers (aim.js onShot -> enemy_ai playerShot, FUN_00577480), fired in
+  // enemyAI.tick after the AI scheduler (the game's frame order, FUN_00323128)
+  if (weapon && enemyAI) weapon.onShot = (...shot) => enemyAI.queueShot(...shot);
 
   // detached debug camera (?cam=), same format as main.js
   let detached = null;

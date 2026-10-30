@@ -803,3 +803,44 @@ engage7 0.93 -> 0.06 deg, i.e. the residual is the vt+0x5c GUESS (PLAYER_AIM_H).
 `turnBody` / `setAim`; test_enemy_ai 'facing' (closed loop) and fixed-input turnBody checks;
 mutants: no turn, no per-frame look, rate 0.3, no flatten, setTarget without bit 30 all fail;
 'Vincent's post-move point' only moves the engage7 #66 gap.
+
+## 13. Vincent's bullets vs the soldiers (worker 0139, 2026-10-30; trace `k_hits12`)
+
+`k_hits12` = k_enemy_engage12 cut to 900 frames (identical records) with `TRACE_CALLLOG=spread` on 835:900.
+Translated in enemy_ai.js / enemy_hit.js; test_enemy_hits.mjs. D = code, T = trace.
+- **Shot** FUN_00577480: muzzle FUN_00341ec8 = marker 15 (j56, offset 0); FUN_00563148 pulls it back
+  by 0.8 × |muzzle − marker 1| along the shot (marker 1 = bone 5, offset 0; FUN_00342000). Per pellet
+  i < W+0x16 (3): FUN_005408e8(mgr, 0, muzzle, aim, W, status, **i**, 0) → FUN_005405b0 spread → FUN_00552dd8
+  with countdown **i + 2**: the pellets fly one frame apart. D. Pellets are updated in their spawn
+  frame (R1 840 → #66 hit in record 843; R1 866 → 870 / 871). T
+- **Spread** FUN_005405b0: s = W+0x1c / +0x20 / +0x24 (Vincent's composed W: **4.8 / 3.0 / 13.5**) for
+  |aim − muzzle| < 120 / < 380 / beyond, ÷ (0.15 × status+0x10 + 2.5) × 0.01 + 1 (Vincent +0x10 = 2 →
+  1.028), then FUN_0025a058 (§11.2). Logged 4.66926° at 31 u and 111 u (locked aim); engage8's 2.918°
+  = 3.0 / 1.028 (its aim point lay > 120 u away). Draw order r1, r2 per pellet. T
+- **Part boxes** FUN_005ad118 → FUN_0030baa0: the 'mkd' chunk ('mk2') has two arrays: +4 count / +8
+  markers (16 B: xyz, bone) and **+6 count / +0xc boxes (32 B: offset xyz, bone, scale xyz)**. A box is
+  the unit cube (±1, DAT_0046dc10; faces DAT_0046dc90) × diag(scale) + offset, × the posed bone
+  (FUN_005b29c0) × MP+0x10. Segment vs each face plane, point-in-quad FUN_00259580, smallest t wins.
+  e027: 13 boxes = the 13 zone records (0 head bone 6, 1 / 2 chest / pelvis, 3-6 arms, 7-12 legs). D.
+- **Cylinder** FUN_0055bda8 mode 0: e027 has no actor +0x28 bit 0x20 (0x208403), so plain FUN_0054b2b0
+  (feet .. 18 up, r 5); FUN_0025c0f8 (segment crosses the closed cylinder) else FUN_0025c770 (segment
+  start inside). D. Dead soldiers are not tested (AI +0x70 stops at the death, T; filter FUN_0055d100 §11.3).
+- **Reaction** (corrects §10.4): the push-back FUN_003531e0(4, 4) and the death slide FUN_00353340(12, 16)
+  run when actor +0x28 bit 0x20 is **clear** (e027). They set C+0x310/0x350 dir, speed 2d/T, decel speed/T;
+  mover 9 (FUN_00351550) / 0xb (FUN_003516a0) hands speed to FUN_0034af98 (C+0xc0 / +0xcc), moved by
+  FUN_0034c388, then speed −= decel × step. T: #67 push-back 2.400 u in the hit frame, death slide 1.800,
+  1.665, … 0.045 (12.9 u). FUN_00561718's 12 / 6-frame throttle draws one FUN_0040b5c0. D
+- **Settled** (+0x118 |= 0x100) when the death clip's clock (0.6 / frame) passes its frame count:
+  r_stlaf0 32 → +53 (f896), r_stbf0 70 → +117 (f988). T
+- **Zones** (worker 0140): status +0xa8 = FUN_00310e40(parameter set +0x84) = section-20 base +
+  section-19 [i] (FUN_003153d0); its +0x30 = entry + u32 +8 + u32 +4 × 4 + u32 +0 (FUN_0030fc68, all
+  section-19 entries at stage load, FUN_0030f968). z128 e027 parameter sets use index 6 or 7 (#66 / #67:
+  7); both give the RAM zones exactly. Exported as ai.json `zones`. D
+- **Frame order** (worker 0140): FUN_00323128 = FUN_0033ab78 (DAT_0046e590), FUN_00365008 (AI scheduler + fire
+  timers: jitter draws), FUN_0053b500 (player vt+0x214 of vtable 0x58f128 = FUN_005747a0 → FUN_005786e8
+  → FUN_00579570 → FUN_00577480: cone draws; then the FUN_005810e8 object lists: bullets, flinch draw). D
+- **HP** stays on the status across deactivate / reactivate: FUN_00314ea8 runs only from placement setup
+  (FUN_00315050 / FUN_003151c8 via FUN_003153d0); no callee of FUN_00559748 writes +0x20. D
+- Open: the clip choice of classes 0x1e / 0x36 (traced r_stlld0 = part 10, r_stlaf0 = part 6, r_stbf0
+  = head); limb 24 vs 25 (§10.2).
+

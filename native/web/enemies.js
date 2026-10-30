@@ -48,6 +48,7 @@ import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
 import { SpeedAnimator, STEP } from './player.js';
+import { boneRows } from './enemy_hit.js';
 
 const DIR = 'data/enemies/';
 const CLIP = 'r_gst';            // GUESS: the idle the brain requests at activation (FUN_0055b8e0 from the brain; not decoded). Save state: idle soldiers play r_gst / r_gst_lk
@@ -279,8 +280,17 @@ export async function setupEnemies({ root, litPatch, light, extra = [] }) {
   const linked = [];
   let base = null;
   const mpHead = () => { const h = linked[0] || base; return h && h.parent === root ? h : null; };
+  // bone b's world rows (enemy_hit boneRows) of a drawn soldier's last pose (SpeedAnimator's composed
+  // model-space R / S / P), or null when the record has no body or was not posed yet
+  function partPose(rec) {
+    const a = actors.find(x => x.rec === rec);
+    if (!a || !a.posed || !a.pose.lp) return null;
+    const { R, S, P } = a.pose.lp, h = a.posed.heading, face = [Math.sin(h), 0, Math.cos(h)], pos = a.posed.pos;
+    return b => boneRows([R[b].x, R[b].y, R[b].z, R[b].w], [S[3 * b], S[3 * b + 1], S[3 * b + 2]],
+                         [P[3 * b], P[3 * b + 1], P[3 * b + 2]], pos, face);
+  }
   return {
-    actors, deadRecs, add, remove,
+    actors, deadRecs, add, remove, partPose,
     // the drawn actor that draws first (FUN_005a7978 list head side); play.js sets Vincent's body
     set mpHead(o) { base = o; },
     // one game frame: draw pose = this frame's clip frame, then FUN_005aa2a8's advance.
@@ -288,6 +298,9 @@ export async function setupEnemies({ root, litPatch, light, extra = [] }) {
     // (C+0x570); a new clip starts at frame 0. GUESS: no blend between clips (flags 0x82 / 0x83
     // of FUN_00345818 not translated), every clip loops at its frame count.
     tick(ai) {
+      // the part test (enemy_ai playerBulletHit -> FUN_005ad118) reads each soldier's MP skeleton:
+      // the pose drawn last (FUN_005a87a0 from MP+0x180), placed as the body is drawn
+      if (ai && !ai.boneWorld) ai.boneWorld = s => partPose(s.rec);
       for (const a of actors) {
         const s = ai && ai.actors.find(x => x.rec === a.rec);
         // body matrix: the AI's body C+0x20 facing (enemy_ai turnBody, FUN_0034de50) and C+0x30
@@ -296,9 +309,11 @@ export async function setupEnemies({ root, litPatch, light, extra = [] }) {
         const want = s && a.lp.clips[s.C.clip] && a.side.clips[s.C.clip] ? s.C.clip : a.clip;
         if (want !== a.clip) { a.clip = want; a.frame = 0; }
         a.pose.poseLocal(a.clip, a.frame, null, 0, 1);
+        a.posed = { pos: a.body.position.toArray(), heading: a.body.rotation.y - Math.PI };
         // GUESS (other types): e027's RATE (MP+0x40c 0.5) for every type
         a.frame = Math.fround(a.frame + Math.fround(Math.fround(RATE * 1.0) * STEP));
-        if (a.side.clips[a.clip].frames <= a.frame) a.frame = 0;
+        // the death motion's clip holds its last frame (enemy_ai C.hold; notes §10.5: r_stlaf0 held)
+        if (a.side.clips[a.clip].frames <= a.frame) a.frame = s && s.C.hold ? a.side.clips[a.clip].frames - 1 : 0;
       }
     },
   };

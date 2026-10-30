@@ -289,6 +289,18 @@ export async function setupAim({ ctrl, anim, motions, col, follow, output, vin, 
                         col.segment ? (a, b) => col.segment(a, b) : null);
   }
 
+  // FUN_00577480's bullets start at the muzzle FUN_00341ec8 = marker 15 (bone 56, offset 0:
+  // cerberus_web.json) and fly toward P+0x2b0, which FUN_005784d8(P, 1) has just set to this frame's
+  // CAM+0xa0; FUN_00563148 pulls the muzzle back using marker 1 (FUN_00342000: bone 5, offset 0;
+  // 07703201 marker.mkd). L: the joints' world matrices are the last drawn pose (the render's
+  // interpolated one), not the logic frame's bone matrices.
+  const joint = name => { let j = null; vin.mixRoot.traverse(n => { if (!j && n.name === name) j = n; }); return j; };
+  const j56 = joint('j56'), j05 = joint('j05');
+  const v3 = new THREE.Vector3();
+  const worldPos = j => { j.updateWorldMatrix(true, false); v3.setFromMatrixPosition(j.matrixWorld); return [v3.x, v3.y, v3.z]; };
+  const muzzle = () => j56 ? worldPos(j56) : null;
+  const chest = () => j05 ? worldPos(j05) : null;
+
   let lastRay = null;
   const hook = {
     // the aim ray (after the camera), then the buttons (FUN_003320c0; not during actions)
@@ -308,7 +320,12 @@ export async function setupAim({ ctrl, anim, motions, col, follow, output, vin, 
       core.stateMachine(lastRay ? lastRay.hit : null);
       if (core.cam.pitch !== before) follow.pitch = core.cam.pitch;   // shot: pitch carry-over (message 0x3e9)
       core.reticleFrame(1000 / 50);                  // GUESS: DAT_004f58ec counts ms (phase 1 = 100 -> 5 frames, traced)
-      return core.events.some(e => e.type === 'shot');
+      const shot = core.events.some(e => e.type === 'shot');
+      if (shot && api.onShot && lastRay) {          // the bullets (enemy_ai playerShot, hooked by play.js)
+        const m = muzzle(), h = lastRay.hit;
+        if (m) api.onShot(m, [h.x, h.y, h.z], W, chest());
+      }
+      return shot;
     },
     // the clip requests of the state classes (after the move)
     post(input, inAction) {
@@ -318,8 +335,9 @@ export async function setupAim({ ctrl, anim, motions, col, follow, output, vin, 
   ctrl.weapon = core; ctrl.weaponHook = hook;
   if (output) output.hud = o => layer.draw(o.renderer, o, core);
 
-  return {
+  const api = {
     core, help: HELP,
+    onShot: null,                                   // (muzzle, aim, W, chest) per shot: set by play.js (enemy_ai playerShot)
     // H (respawn): the weapon, the latched buttons and the clip classes (the camera resets itself)
     reset() { core.reset(); clearEdges(); ctl.reset(); },
     // test aid (Playwright): press a game button for one frame ('r1', 'r3', 'circle'); 'r1' also holds
@@ -333,4 +351,5 @@ export async function setupAim({ ctrl, anim, motions, col, follow, output, vin, 
                     phase: core.r.phase.slice(1, 4), aim: core.P.aim, quad: ctl.state().quad,
                     table: anim.table && anim.table.map ? anim.table.map(e => e.key) : null }),
   };
+  return api;
 }

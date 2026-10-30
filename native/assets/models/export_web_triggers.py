@@ -19,6 +19,9 @@ Decoded (D) layout, read here, nothing copied into the repo:
     export_web_aim.py): +4 flags, +0x16 s8 pellets, +0x18 f range, +0x2c f speed, +0x40 s16
     damage, +0x42 first delay, +0x44 interval, +0x46 reload, +0x48 magazine, +0x4a u8 hit value.
     z128 records 44 / 45 (#66 / #67) -> weapon 2 = the values in the save's RAM (notes §9.1).
+  - section 1 / 0 max HP and level per record (FUN_00314ea8, see records()).
+  - e027's part boxes (marker.mkd box array, FUN_0030baa0; see hitboxes()).
+  - hit-zone records per section-19 index (parameter set +0x84; FUN_003153d0 / FUN_0030fc68; see zone_set()).
   - e027 clip frame counts (r_gst, r_gst_lk, r_st_a, r_st_f) from its rifle clip set, through
     export_web_enemy.py's loaders (anim_rot.clip_frames).
 
@@ -34,7 +37,7 @@ import stage_events as SE          # noqa: E402  (section / script readers, deco
 TRIG_STRIDE = 0xc0
 SEC1_STRIDE = 0x74
 SEC24_STRIDE = 0x104
-AI_CLIPS = ('r_gst', 'r_gst_lk', 'r_st_a', 'r_st_f')
+AI_CLIPS = ('r_gst', 'r_gst_lk', 'r_st_a', 'r_st_f', 'r_stlld0', 'r_stlaf0', 'r_stbf0')
 
 
 def f32s(d, o, n):
@@ -91,9 +94,16 @@ def records(d):
             weapon = struct.unpack_from('<i', d, o0 + ps * s0 + 0x88)[0]
         # +8 = AI mode the activation creates the AI with (FUN_00559748 -> FUN_00365c50: status
         # +0xa0 (this record) +8; mode 8 -> 0 then FUN_0035f2e0)
+        # max HP status +0x04 and level +0x11 (FUN_00314ea8): override bit 0x14 -> record +0x50 (u32),
+        # else parameter set +0x30 (u16); bit 0x15 -> record +0x59 (u8), else parameter set +0x79.
+        # (Status +0x60 bit 1 takes both from FUN_00320d20 instead: a status flag, not in the stage file.)
+        hp = SE.u32(d, o + 0x50) if over >> 0x14 & 1 else struct.unpack_from('<H', d, o0 + ps * s0 + 0x30)[0]
+        lvl = d[o + 0x59] if over >> 0x15 & 1 else d[o0 + ps * s0 + 0x79]
+        # hit-zone set: parameter set +0x84 = section-19 index (FUN_003153d0 -> FUN_00310e40; zone_set)
+        zi = struct.unpack_from('<i', d, o0 + ps * s0 + 0x84)[0]
         out.append(dict(rec=k, model=model, script=struct.unpack_from('<h', d, o + 4)[0],
                         mode=struct.unpack_from('<i', d, o + 8)[0],
-                        pos=f32s(d, o + 0xc, 3), face=f32s(d, o + 0x1c, 3), weapon=weapon))
+                        pos=f32s(d, o + 0xc, 3), face=f32s(d, o + 0x1c, 3), weapon=weapon, hp=hp, lvl=lvl, zones=zi))
     return out
 
 
@@ -110,6 +120,56 @@ def weapons(d):
         out.append(dict(idx=k, flags=SE.u32(d, o + 4), pellets=struct.unpack_from('b', d, o + 0x16)[0],
                         range=f(0x18), speed=f(0x2c), damage=h(0x40), first=h(0x42), interval=h(0x44),
                         reload=h(0x46), mag=h(0x48), hit=d[o + 0x4a]))
+    return out
+
+
+def hitboxes(model='e027'):
+    """The model's part boxes for the bullet part test FUN_005ad118 -> FUN_0030baa0: the 'mkd'
+    chunk (header 'mk2', +6 u16 box count, +0xc box array; FUN_0030b9e0 relocates +8 / +0xc), 32 B
+    per box: +0 offset xyz (f32), +0xc bone (s32), +0x10 scale xyz (f32). Box k = part k."""
+    import export_web_enemy as E, export_cerberus as EC
+    buf = open(E.paths(model)['cont'], 'rb').read()
+    for o in EC.entries(buf):
+        if buf[o + 8:o + 11] == b'mkd':
+            p = o + 0x10
+            if buf[p:p + 4] != b'mk2\0':
+                raise ValueError('%s marker.mkd: no mk2 header' % model)
+            n = struct.unpack_from('<H', buf, p + 6)[0]
+            b0 = p + struct.unpack_from('<I', buf, p + 0xc)[0]
+            out = []
+            for i in range(n):
+                r = struct.unpack_from('<3fi3f', buf, b0 + 32 * i)
+                out.append(dict(offset=[round(x, 6) for x in r[:3]], bone=r[3], scale=[round(x, 6) for x in r[4:7]]))
+            return out
+    raise ValueError('%s: no marker.mkd' % model)
+
+
+def zone_set(d, i, n):
+    """Hit-zone records of section-19 entry i (status +0xa8 -> +0x30, 16 B per part; FUN_0055bda8 /
+    FUN_0055d2c0 / FUN_0055db50), from this stage file:
+      status +0xa8 = FUN_00310e40(parameter set +0x84) = section-20 base + section-19 [i] (u32),
+        set by FUN_003153d0; 0 when +0x84 < 0 or the file version FUN_00310c40 (FUN_00312248:
+        'bzd' + 3 digits at +0) is < 0xe.
+      +0x30 = the entry + its u32 +8 + u32 +4 x 4 + u32 +0 (FUN_0030fc68, run on every section-19
+        entry at stage load by FUN_0030f968).
+    n = the part count (the model's part boxes: part k reads record k). Returns [{scale: byte 0,
+    flags: ushort +2}], or None when status +0xa8 would be 0."""
+    sec = SE.sections(d)
+    ver = (d[3] - 0x30) * 100 + (d[4] - 0x30) * 10 + d[5] - 0x30 if d[:3] == b'bzd' else -1
+    o19, n19, _ = sec[0x13]
+    if i < 0 or ver < 0xe or i >= n19:
+        return None
+    r = sec[0x14][0] + SE.u32(d, o19 + 4 * i)
+    z = r + SE.u32(d, r + 8) + SE.u32(d, r + 4) * 4 + SE.u32(d, r)
+    return [dict(scale=d[z + 16 * k], flags=struct.unpack_from('<H', d, z + 16 * k + 2)[0]) for k in range(n)]
+
+
+def zone_sets(d, recs, boxes):
+    """{section-19 index: zone_set} for every index a record of a model with part boxes uses."""
+    out = {}
+    for r in recs:
+        if r['model'] in boxes and r['zones'] >= 0 and str(r['zones']) not in out:
+            out[str(r['zones'])] = zone_set(d, r['zones'], len(boxes[r['model']]))
     return out
 
 
@@ -135,14 +195,16 @@ def main():
     # bit-0x20000 triggers by difficulty and event flag: notes/enemy-activation.md §1)
     want = {t['script'] for t in trig} | {r['script'] for r in recs} | {0}
     scr = {str(s): script(d, s) for s in sorted(want) if 0 <= s < nscr}
+    boxes = dict(e027=hitboxes('e027'))
     os.makedirs(out, exist_ok=True)
     res = dict(format='enemy-ai-2', stage=os.path.basename(stage), triggers=trig, records=recs,
-               weapons=weapons(d), scripts=scr, clips=clip_frames())
+               weapons=weapons(d), scripts=scr, clips=clip_frames(), hitboxes=boxes,
+               zones=zone_sets(d, recs, boxes))
     path = os.path.join(out, 'ai.json')
     with open(path, 'w') as fh:
         json.dump(res, fh, separators=(',', ':'))
-    print('wrote %s: %d triggers, %d records, %d weapons, %d scripts, clips %s' % (
-        path, len(trig), len(recs), len(res['weapons']), len(scr), res['clips']))
+    print('wrote %s: %d triggers, %d records, %d weapons, %d scripts, zone sets %s, clips %s' % (
+        path, len(trig), len(recs), len(res['weapons']), len(scr), sorted(res['zones']), res['clips']))
 
 
 if __name__ == '__main__':

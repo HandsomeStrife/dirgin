@@ -187,6 +187,8 @@ def weapon_json(w, parts_desc):
         'interval': H(w, 0x44),         # state 2/4 timer (FUN_00579570)
         'reload': H(w, 0x46),           # state 9 timer (FUN_00579570 state 7)
         'magazine': H(w, 0x48),
+        'spread': [F(w, 0x1c), F(w, 0x20), F(w, 0x24)],   # cone degrees by aim distance < 120 / < 380 / beyond (FUN_005405b0)
+        'hit': w[0x4a],                 # bullet +0x153 hit value, the low byte (FUN_00552dd8; stagger FUN_0055d950)
     }
 
 
