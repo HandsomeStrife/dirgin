@@ -200,6 +200,7 @@ export class PlayerController {
       poly: null,                                 // body+0x110: walk-mesh polygon (kept across frames)
       gy: 0,                                      // body+0x10 y: the walker's ground point under him
       t: 0, y0: 0, dy: 0, v0: 0, rise: 0,         // body+0xd4, +0xd8, +0xdc, +0xe0, +0xe8 (FUN_00357168)
+      vel: { x: 0, y: 0, z: 0 },                  // body+0x40 (units per tick; FUN_003590c8)
     };
     this.vel = { x: 0, z: 0 };                    // C+0xc0 x C+0xcc, units per 60 Hz tick
     this.speed = 0;                               // C+0x1d8 / 60 (units per tick)
@@ -254,14 +255,14 @@ export class PlayerController {
     // actions: 60 Hz ticks from an accumulator (1 or 2 per frame)
     // GUESS: the 60 Hz action accumulator (port convenience, not the game's: the game runs
     // its states once per frame with `step`; see notes/fidelity-audit.md "Web frame loop and cape cloth").
-    let loco = !this.active, owned = false;
+    let loco = !this.active, owned = false, ate = false;
     this.actAcc += STEP;
     while (this.actAcc >= 1) {
       this.actAcc -= 1;
       ctx.tick = this.ticks;
       if (!this.active) {
         for (const a of this.actions) {
-          if (!a.canEnter(ctx)) continue;
+          if (!a.canEnter(ctx)) { if (a.ate) ate = true; continue; }   // ✕ taken, no mount (FUN_00333150 bVar2)
           this.active = a;
           if (this.jump) this.jump.ladderMount(this);
           if (this.weaponHook && this.weaponHook.actionEnter) this.weaponHook.actionEnter(a);
@@ -296,7 +297,7 @@ export class PlayerController {
     // gate FUN_00577230 and FUN_00575768 (jump_core.js takeOff), before the stick writes.
     // input.cross: the pad's ✕ edge (trace replays); the page's ✕ is Space (ladder.js KEY).
     const cross = input.cross ?? !!(input.pressed && input.pressed.has(CROSS_KEY));
-    this.jump.takeOff(this, cross, { ladder: owned || !!this.active });
+    this.jump.takeOff(this, cross, { ladder: owned || ate || !!this.active });
     this.stickInput(input);                       // FUN_00333150: runs in every state
     stickMode(this, this.stickW);                 // FUN_00333150: P+0x29c (the back jump's turn-round bit)
     this.intent(owned);                           // FUN_00578748: the ramp runs in every state
@@ -351,7 +352,8 @@ export class PlayerController {
       }
     }
     if (res.vy !== undefined) this.vy = res.vy;
-    if (!res.keepVel) { this.vel.x = 0; this.vel.z = 0; }
+    // (same ladder GUESS: the ladder states' body+0x40 isn't decoded; zeroed with the page's vel)
+    if (!res.keepVel) { this.vel.x = 0; this.vel.z = 0; this.body.vel = { x: 0, y: 0, z: 0 }; }
     this.hitWall = false; this.stuck = false;
   }
 
@@ -446,8 +448,10 @@ export class PlayerController {
     const P = this.P, C = this.C;
     const m = Math.min(1.0, mods < 0.01 ? 0 : mods);
     let cap = f32(f32(GAME.maxSpeed * f32(0.016666668)) * m);   // fVar19 (x DAT_0046ef24 = 0.3 firing; not here)
-    // FUN_0034a968: v = body+0x40 (horizontal velocity, units per tick)
-    let vx = C.dir.x * C.spd, vz = C.dir.z * C.spd;
+    // FUN_0034a968: v = body+0x40 (horizontal velocity, units per tick). It is last frame's
+    // C+0xc0 x C+0xcc except where FUN_003590c8 left it alone (body states 1 / 3, a frozen frame)
+    // or the state-3 crossing zeroed it.
+    let vx = this.body.vel.x, vz = this.body.vel.z;
     let L = Math.hypot(vx, vz);
     if (cap < L) { vx = vx / L * cap; vz = vz / L * cap; }
     // auStack_100.xyz = normalised P+0x2c0 (zero once the stick is released: stickInput air
@@ -526,10 +530,13 @@ export class PlayerController {
 
   // FUN_003590c8 (physics-body step) for z128's body flags 0x236: bit 5 set, bits 19-21
   // clear (velocity body+0x40 = body+0x30 at once, no accel or turn limit), bit 12 clear,
-  // bits 7 / 14 clear (position = the walker's result). States 0 (ground) and 2 (air).
+  // bits 7 / 14 clear (position = the walker's result). States 0 (ground), 2 (air) and
+  // 3 (the slide down a 0x10 polygon after landing on it).
   integrate(v) {
     const B = this.body, col = this.col;
     const p = this.pos;
+    // body flag bit 5 set, bits 19-21 clear: body+0x40 = body+0x30 at once, but not in states 1 / 3
+    if (B.state !== 1 && B.state !== 3) B.vel = { x: v.x, y: v.y, z: v.z };
     if (B.poly === null) {                        // no walk polygon: FUN_00357d48 skips the walk
       if (B.state === 2) this.fallY();
       return;
@@ -545,11 +552,43 @@ export class PlayerController {
       if (r[5]) this.startFall(0);                // drop edge / 0x02 crossing: FUN_00357148
       return;
     }
+    if (B.state === 3) {
+      // first switch case 1 / 3 (0x3595fc): FUN_00357b70 = t += DAT_004eeb28, body+0xdc =
+      // v0 t + g t^2 / 2 (no +0.01)
+      const g = GAME.gravity;
+      B.t = f32(B.t + DT);
+      B.dy = f32(f32(B.v0 * B.t) + f32(f32(f32(g * B.t) * 0.5) * B.t));
+      // move = (body+0x40 projected on the plane's horizontal line (-n.z, 0, n.x) by
+      // FUN_0025a778(0, ..)  +  (0, h, 0) taken along (n.x, 0, n.z) onto the plane through 0 by
+      // FUN_002606b8) x 1.01; h = (v0 + g t) DAT_004eeb28 + g (DAT_004eeb28 / 2) DAT_004eeb28.
+      // body+0x40 is NOT scaled by the step here (vmove, then FUN_0025a778).
+      const n = col.polys[B.poly].plane;          // body+0x120
+      const ul = Math.hypot(n[2], n[0]);
+      const ux = -n[2] / ul, uz = n[0] / ul;
+      const bv = B.vel;                           // body+0x40, kept from the landing frame
+      const s = bv.x * ux + bv.y * 0 + bv.z * uz;
+      const h = f32(f32(f32(B.v0 + f32(g * B.t)) * DT) + f32(f32(g * f32(DT * 0.5)) * DT));
+      const k = (n[1] * h) / (n[0] * n[0] + n[2] * n[2]);
+      const mx = f32((ux * s - n[0] * k) * 1.01), my = f32(h * 1.01), mz = f32((uz * s - n[2] * k) * 1.01);
+      const r = col.navMove(B.poly, p.x, B.gy, p.z, mx, mz, false, { state3: { dy: my } });
+      this.hitWall = r[4];
+      B.poly = r[3];
+      if (r[6]) {                                 // the crossing (0x358afc): FUN_00357860(body, 0),
+        B.state = 0;                              // body+0x40 = 0 (so next frame's air control
+        B.vel = { x: 0, y: 0, z: 0 };             // FUN_00578748 starts from 0: trace f558, 0.09)
+      }
+      // second switch case 3 (or 0 after the crossing): pos = body+0x10
+      this.pos = { x: chop(r[0]), y: chop(r[1]), z: chop(r[2]) };
+      B.gy = r[1];
+      return;
+    }
     // state 2: move = (body+0x40 + body+0x60) x step (body+0x60 = 0, FUN_00357168 clears it)
     this.gravityStep();                           // FUN_003579a8
     const y = f32(B.y0 + B.dy);                   // body.y = body+0xd8 + body+0xdc
-    // FUN_00357d48 walks the ground point body+0x10 (collision.js air mode: horizontal slide)
-    const r = col.navMove(B.poly, p.x, B.gy, p.z, v.x * STEP, v.z * STEP, true);
+    // FUN_00357d48 walks the ground point body+0x10 (airborne: collision.js body.air, the
+    // ground point's rise capped by the vertical speed (v0 + g t) x DAT_004eeb28)
+    const vdt = f32(f32(B.v0 + f32(GAME.gravity * B.t)) * DT);
+    const r = col.navMove(B.poly, p.x, B.gy, p.z, v.x * STEP, v.z * STEP, true, { air: { bodyY: y, vdt } });
     this.hitWall = r[4];
     B.poly = r[3];
     const groundY = B.gy = r[1];                  // body+0x10.y
@@ -561,9 +600,9 @@ export class PlayerController {
     else land = true;
     if (y > groundY && land) {
       this.pos.y = groundY;
-      // GUESS: landing on a 0x10 (drop) polygon goes to body state 3 in the game
-      // (FUN_00357860(body, 3)); state 3 isn't translated, he lands as state 0.
-      B.state = 0;                                // FUN_00357860(body, 0)
+      // polygon flags (0x359b64..): 0x10 -> FUN_00357860(body, 3); else 0 (0x04 / 0x100 have
+      // their own paths in the game; absent in z128)
+      B.state = (col.polys[B.poly].flags & 0x10) ? 3 : 0;
       this.vy = 0;
     }
   }

@@ -214,6 +214,8 @@ JUMP_FIELDS = [f for f in FIELDS if f[0] in (
     ("c_7d0", "C", 0x7D0, "u32", "D", "FUN_003419c0: *(C+2000) = motion-state object, its +0x70 = class id"),
     ("p_118", "P", 0x118, "u32", "D", "FUN_00577230 / FUN_005771c8: P+0x118 bits 0x200 / 0x40000"),
     ("p_2a8", "P", 0x2A8, "u32", "D", "FUN_00574808 bits; FUN_00575698 tests 8 and 0x10 in the air"),
+    # M = *DAT_0046e880 = 0x128380 in the save state (worker 0131)
+    ("m_gimmick", None, 0x128380 + 0x10AC, "u32", "D", "FUN_0053be88: M+0x10ac u16 = current gimmick id (0xffff none), chosen per frame by FUN_0053b500 -> FUN_0053bf30 -> FUN_00589978; the ✕ ladder check FUN_00544200 uses only it"),
 ]
 
 # Opt-in set for enemy AI research (TRACE_FIELDSET=enemy, worker 0116): no cape; a little of

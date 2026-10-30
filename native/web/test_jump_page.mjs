@@ -52,16 +52,25 @@ function stubAnim(h0) {
   return anim;
 }
 
-function run(name, { state = true, clips = true, dir = OUT } = {}) {
+// from: start the replay at this record's frame (a standstill inside the trace; the page starts
+// at rest, and the trace logs no P+0x299 stick ramp to seed a run)
+function run(name, { state = true, clips = true, dir = OUT, from = null } = {}) {
   const file = path.join(dir, name + '.jsonl');
   if (!existsSync(file)) { console.log(`skip ${name}: no trace (${file})`); return; }
   ran++;
-  const [, ...R] = load(file);
+  let [, ...R] = load(file);
+  if (from !== null) R = R.filter(d => d.frame >= from);
   const r0 = R[0], p0 = r0.matrix[3], f0 = r0.matrix[2];
   const ctrl = new PlayerController(col, { pos: { x: p0[0], y: p0[1], z: p0[2] }, heading: Math.atan2(f0[0], f0[2]) });
   ctrl.C.face = { x: f0[0], y: f0[1], z: f0[2] };
   ctrl.P.state = stateOf(r0);
   const anim = stubAnim(headOf(r0));
+  if (from !== null && headOf(r0).blend_len > 0) {
+    // started inside a blend: seed the blend-out layer and the head's countdown (+0x24) from the record
+    const h = headOf(r0), o = outOf(r0);
+    anim.out = { key: KEY[o.clip] ?? o.clip, frame: o.frame, prevFrame: o.frame, loop: (o.lflags & 1) !== 0 };
+    anim.blend = { len: h.blend_frames, rem: h.blend_len, w: (h.blend_frames - h.blend_len) / h.blend_frames };
+  }
   ctrl.attach({ anim });
   let prevButtons = 0, inJump = false;
   const S = { pos: 0, posF: null, posAll: 0, st: 0, stF: null, gnd: 0, gndF: null, clip: 0, clipF: null, fr: 0, frF: null, w: 0, wF: null, wn: 0, fc: 0, fcF: null, b: 0, bF: null, bn: 0, o: 0, oF: null, on: 0, n: 0 };
@@ -123,6 +132,89 @@ function run(name, { state = true, clips = true, dir = OUT } = {}) {
 }
 
 for (const n of ['e_jumps', 'i_air_release', 'j_stand', 'j_run', 'j_steer', 'j_double', 'j_back']) run(n);
+// Dan's ladder jump (worker 0129's trace; script tools/trace/scripts/l_ladder_jump.json): a running
+// jump into the ladder's 0x10 drop polygon from outside the trigger ray. The game doesn't mount:
+// the air walk (collision.js body.air) stops him at x -1109.13 on the ramp, he slides back down,
+// lands in body state 3 (FUN_00357860(body, 3)), the state-3 walk crosses onto the floor
+// polygon (state 0, body+0x40 = 0: f558's air control starts from 0) and the run-up resumes.
+// From f480: he stood still at f479 (the logged route starts mid-run at f440).
+run('l_ladder_jump', { from: 480 });
+// Worker 0131 (Dan: "jumping onto the ladder should start the climb"): the game never mounts from a
+// jump. The mount is reached only from the ✕ press edge in FUN_00333150 through the gate
+// FUN_005771c8, which needs P+0x118 bit 0x200; the jump start clears it (0x20209 -> 0x20009) and
+// the landing state's enter (FUN_005382e0 / FUN_00538218 / FUN_005383a8) sets it again.
+// _a: running ✕ from x -1113.75 (inside the 7-unit ray) jumps; lands at the ladder foot, no climb.
+// _b: ✕ again mid-air at the ladder face (f535) = the second jump, state 0x1f c_wjp0, no climb.
+// _c: ✕ on the drop-polygon slide frame (f556) = the second jump too (still state 8), no climb.
+// _d: standing ✕ at the ladder foot (f500) mounts: state 0xb (reference; the climb is ladder.js's).
+// _e: _a's run-up with ✕ one frame later (f521) mounts mid-run: the trigger chosen from f520's pose.
+for (const n of ['l_ladder_jump_a', 'l_ladder_jump_b', 'l_ladder_jump_c']) run(n, { from: 480 });
+// The replay above has no ladder action, so run ladder.js's own canEnter on the frame before the
+// ✕ press edge (no press: the map update's gimmick choice) and on the ✕ frame, with the game's pose,
+// state and speed from those records (= what frame f's logic sees), against the game's state on
+// the next record (0xb = mounted) and its jump (state 8 / 0x1f = the ✕ was not taken).
+{
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async u => String(u).startsWith('file:')
+    ? { ok: true, json: async () => JSON.parse(readFileSync(fileURLToPath(u), 'utf8')) } : realFetch(u);
+  const { ladderAction } = await import(pathToFileURL(path.join(here, 'actions/ladder.js')).href);
+  ladderAction();                                     // starts the data load (z128_ladders.json)
+  for (let i = 0; i < 5; i++) await new Promise(r => setImmediate(r));
+  for (const [name, f] of [['l_ladder_jump', 515], ['l_ladder_jump_a', 520], ['l_ladder_jump_b', 535],
+                           ['l_ladder_jump_c', 556], ['l_ladder_jump_d', 500], ['l_ladder_jump_e', 521]]) {
+    const file = path.join(OUT, name + '.jsonl');
+    if (!existsSync(file)) { console.log(`skip ${name} ladder check: no trace`); continue; }
+    ran++;
+    const R = load(file), lad = ladderAction();
+    const at = (r, press) => {
+      const p = r.matrix[3], fw = r.matrix[2];
+      return { ctrl: { pos: { x: p[0], y: p[1], z: p[2] }, heading: Math.atan2(fw[0], fw[2]), onGround: groundOf(r) === 1,
+                       P: { state: stateOf(r) }, speed: r.ground_speed / 60, scale: 1 },
+               input: { pressed: new Set(press ? ['Space'] : []), keys: new Set() }, anim: { has: () => true }, motions: {} };
+    };
+    const get = k => R.find(r => r.frame === k);
+    // M+0x10ac per frame (traces with the m_gimmick field): the choice from record r - 1's pose
+    // must be what the game shows in record r, on every frame before the ✕
+    if (R[1].m_gimmick !== undefined) {
+      const sel = ladderAction(); let off = 0, first = null, n = 0;
+      for (let i = 2; i < R.length && R[i].frame <= f; i++) {
+        sel.canEnter(at(R[i - 1], false)); n++;
+        if (!!sel.gimmick !== ((R[i].m_gimmick & 0xffff) !== 0xffff)) { off++; first ??= R[i].frame; }
+      }
+      ok(off === 0, `${name}: ladder gimmick choice (M+0x10ac) off ${off} of ${n}${first !== null ? ', first ' + first : ''}`);
+    }
+    lad.canEnter(at(get(f - 1), false));
+    const page = lad.canEnter(at(get(f), true)), g = stateOf(get(f + 1));
+    const game = g === 0xb, gameJump = g === 8 || g === 0x1f;
+    ok(page === game && (page || lad.ate !== gameJump) && (!page || lad.gimmick === null),
+       `${name} ✕ f${f} (state ${stateOf(get(f))}): page ${page ? 'mounts' : lad.ate ? 'takes ✕, no mount' : 'leaves ✕ to the jump'}, game state ${g.toString(16)}`);
+  }
+  { // hand-built (FUN_00333150, not reached by a trace): the trigger chosen last frame takes ✕ even
+    // when the origin has left its box this frame (FUN_005507a0 = 0): no mount and no jump (bVar2)
+    const lad = ladderAction(), F = [0.859, 0, -0.512], h = Math.atan2(F[0], F[2]);
+    const at = (x, press) => ({ ctrl: { pos: { x, y: -90.63, z: -1108.82 }, heading: h, onGround: true, P: { state: 2 }, speed: 1 },
+                                input: { pressed: new Set(press ? ['Space'] : []) }, anim: { has: () => true }, motions: {} });
+    lad.canEnter(at(-1114.4, false));                 // local z -3.99: inside (half size 4.173)
+    const chosen = lad.gimmick, page = lad.canEnter(at(-1114.7, true));   // local z -4.29: outside
+    ok(chosen === 'bottom' && !page && lad.ate, `ladder ✕ with the origin just out of the chosen box: chosen ${chosen}, mounts ${page}, takes ✕ ${lad.ate}`);
+    // the ✕ gate is P+0x118 bit 0x200 (clear in state 8 also on the take-off frames, where the ground
+    // bit is still set), and the choice outside states 2..5 (FUN_0053b500): cleared while moving
+    // (C+0x1d8 > 0), else kept
+    const st = (x, state, speed, press, gnd = true) => { const c = at(x, press); c.ctrl.P.state = state; c.ctrl.speed = speed; c.ctrl.onGround = gnd; return c; };
+    const g2 = ladderAction(); g2.canEnter(st(-1109.71, 2, 0, false));
+    const takeoff = g2.canEnter(st(-1109.71, 8, 0, true)), kept = g2.gimmick;
+    g2.canEnter(st(-1109.71, 9, 0.5, false, false));
+    ok(!takeoff && !g2.ate && kept === 'bottom' && g2.gimmick === null,
+       `ladder ✕ in state 8 on the ground: mounts ${takeoff}, takes ✕ ${g2.ate}; air choice kept still ${kept}, cleared moving ${g2.gimmick}`);
+    // player.js: an action that takes ✕ without entering stops the jump (takeOff's ladder flag)
+    const ctrl = new PlayerController(col, { pos: { x: -1109.71, y: -90.63, z: -1108.82 }, heading: h });
+    ctrl.attach({ anim: stubAnim({ clip: 'h_st', frame: 0 }) });
+    ctrl.addAction({ name: 'eat', canEnter() { this.ate = true; return false; }, enter: () => null, update: () => ({}), exit() {} });
+    ctrl.step({ x: 0, z: 0, stick: 0, run: false, keys: new Set(), pressed: new Set(), cross: true });
+    ok(ctrl.P.state === 2 && !ctrl.jump.head, `player.js: ✕ taken by the ladder without a mount: state ${ctrl.P.state}, jump ${!!ctrl.jump.head}`);
+  }
+  globalThis.fetch = realFetch;
+}
 // aim_g_air without a weapon: flight and ground bit only (the game's on-foot state is 3 there)
 run('aim_g_air', { state: false, clips: false, dir: path.join(OUT, 'aim') });
 
@@ -456,6 +548,23 @@ for (const drawn of [false, true]) {
   for (const st of [0x1a, 0x80, 0xbf, 0x13, 0x14, 0x1d, 0xc0]) { c.P.state = st; ok(!canJump(c, 3, { pressed: true }), `gate: state 0x${st.toString(16)} closed`); }
   c.P.state = 2;
   ok(!canJump(c, 3, { pressed: true, inputLock: 2 }) && !canJump(c, 3, { pressed: true, weaponBlock: true }), 'gate: input lock / weapon block close it');
+}
+// body state 3 mid-ramp (hand-built: the trace lands at the ramp's foot and crosses at once, so it
+// can't tell these apart): on the ladder's drop polygon 25, 13 above its foot, with body+0x40 = 0
+// and the stick's velocity along +z. FUN_003590c8 case 3 doesn't copy body+0x30 into +0x40 and
+// walks (stale +0x40 across the slope + the slide) projected along the plane normal (FUN_00260e28),
+// so he moves straight down the ramp: z unchanged, y down by the slide's length, on the plane.
+{
+  const x0 = -1109.4, z0 = -1108.6, f = col.findPoly(x0, z0, -115, -92);
+  const c = new PlayerController(col, { pos: { x: x0, y: f[1], z: z0 }, heading: 0 });
+  const B = c.body;
+  Object.assign(B, { poly: f[0], gy: f[1], state: 3, vel: { x: 0, y: 0, z: 0 }, t: 0.5, rise: 0.3338, v0: -78.5 });
+  c.C.dir = { x: 0, y: 0, z: 1 }; c.C.spd = 1;
+  const y0 = c.pos.y;
+  c.moveTick();
+  const pl = col.polys[f[0]].plane, onPlane = Math.abs(pl[0] * c.pos.x + pl[1] * c.pos.y + pl[2] * c.pos.z + pl[3]);
+  ok(f[0] === 25 && Math.abs(c.pos.z - z0) < 1e-3 && c.pos.y - y0 > 0.5 && onPlane < 1e-3 && B.state === 3 && !c.onGround,
+     `state 3 mid-ramp: slides down the plane only (dz ${(c.pos.z - z0).toExponential(1)}, dy ${(c.pos.y - y0).toFixed(3)}, off plane ${onPlane.toExponential(1)}, state ${B.state})`);
 }
 ok(ran > 0, `traces replayed: ${ran}`);
 // the page's frame counts for the pack clips (SpeedAnimator.ensure via addClips + the pack's

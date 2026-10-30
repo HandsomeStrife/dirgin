@@ -254,3 +254,92 @@ Not ported: FUN_00596830's h_jp_f branch (slot 0xc1 empty in z128); the P+0x100 
 branch of FUN_00560b58 (motion 0x11; bits 0 in the save state); the fall class for walk-off falls
 (the page has no motion object in state 9 until a shot); the back jump's armed set (FUN_005a1510
 phases 6/7, aimedReq flags 0x83, worker 0105) is untraced.
+
+## Jump into the ladder (worker 0129, 2026-10-30; Dan's report 20261030T100035Z-e77b)
+
+Report: "jumping onto the ladder does not start the climb animation"; Vincent stood idle at
+(-1108.18, -113.68, -1104.96), 23 units up the ladder face, on walk polygon 25 (flags 0x10,
+normal (0.998, 0.067, 0.003): the ladder's steep one-way drop polygon).
+
+**The game (trace `l_ladder_jump`, script tools/trace/scripts/l_ladder_jump.json, TRACE_FIELDSET=jump):**
+a running jump at the ladder from x -1118 (✕ f515, outside the trigger ray) does NOT mount
+and does NOT stand on the ladder. The body enters the drop polygon in the air (f529, body+0x110
+= 0x1141ca0), stops at x -1109.13 (apex -103.72, f537), slides back down it while falling, lands
+in body state 3 on the drop polygon at f556 (flags 0x237 -> 0x236), is in body state 0 on the
+floor polygon (0x1141ba0, y -90.63) at f557, player state 8 -> 2 at f558, h_jp4 -> h_rn.
+So the climb clip must not start; the page's bug is that he lands on and runs up the drop polygon.
+
+**Cause on the page (reproduced: page replay of the trace):** two untranslated walker paths.
+1. Air walk, DECODED (FUN_00357d48 ~0x358300, branch on body flags +0xac bit 0, set while
+   airborne): the move is projected onto the polygon along the up axis (FUN_002606b8) and NOT
+   rescaled to its length; then, for body states 2/3/6/7 (FUN_003577c8), if ground.y + move.y <
+   body.y (the ground point would end above the body), move.y = max(move.y, (v0 + g t) x
+   DAT_004eeb28) (body +0xe0, +0xd0, +0xd4; t after this frame's increment, body.y = this
+   frame's). collision.js `navMove(..., air=true)` rescales like the ground walk, so on the
+   0.067-ny ramp he keeps 0.08 u/frame east and the ramp rises under his feet (lands f540 at
+   -104.3, then the ground walk runs up it). Scratch prototype (collision.js: `if (air-cap) { if
+   (y + my < bodyY && !(vdt <= my)) my = vdt } else rescale`; player.js integrate passes
+   bodyY = y, vdt = f32(f32(v0 + g*t) * DT)) matches the trace f529-f555 to the run-up drift
+   (9e-3, then 2e-5), including the back-and-forth at f547-549.
+2. Landing on a 0x10 polygon -> body state 3 (player.js integrate GUESS, lands as 0): NOT decoded.
+   State 3 (FUN_00357d48 l.458+, FUN_0035d0a0 / FUN_00357860) puts him on the floor polygon the
+   next frame, ground bit clear for that frame. With (1) alone the page lands on polygon 25 at
+   f556 and its ground walk runs him up the ramp (2.4 off at f558, growing).
+
+Not fixed: (1) needs collision.js (outside this worker's files); (2) is a second decode.
+A test (test_jump_page `run('l_ladder_jump')`) fails today on position 3.9e+1 / state / ground;
+its clip checks also need a start that isn't mid-run against the ladder (h_wk vs h_rn at f443).
+
+## Ladder jump fixed (worker 0130, 2026-10-30)
+
+Both causes above are translated; `run('l_ladder_jump', { from: 480 })` in test_jump_page passes
+(state / ground / clip / frame / blend exact every frame, position max 1.83e-3; HEAD: 3.9e+1).
+1. Air walk: collision.js `navMove(.., true, { air: { bodyY, vdt } })` = 0129's prototype (no
+   rescale, cap at (v0 + g t) x dt); player.js integrate passes body.y and vdt.
+2. Body state 3 (FUN_003590c8, checked in the ELF): landing on a 0x10 polygon -> state 3. Case 1/3
+   (0x3595fc): FUN_00357b70 (t += dt, dy = v0 t + g t^2/2, no +0.01); body+0x40 is NOT refreshed
+   from +0x30 in states 1/3; move = (+0x40 on the plane's horizontal line (-n.z, 0, n.x), unscaled by
+   the step) + (0, h, 0) taken along (n.x, 0, n.z) onto the plane through 0, h = (v0 + g t) dt +
+   g dt^2/2, all x 1.01 (0x3f8147ae). FUN_00357d48 in state 1/3 (FUN_00357828): FUN_00260e28 plane
+   projection + rescale; crossing (0x35887c..0x358b14) onto a polygon without 0x14, t >= rise:
+   FUN_00357860(body, 0) (a1 = 0 at 0x358b00), +0x40 = vf0, ground point = the crossing point on the
+   new polygon, walk done. In the trace he lands exactly on the shared edge, so f557 = same position
+   on the floor polygon, state 0.
+3. Found on the way: f558's want speed is 0.09 = 1.2 x 0.075 = one air-control push from 0.
+   FUN_00578748 starts from body+0x40 (FUN_0034a968), which the crossing zeroed; the page read
+   C.dir x C.spd. player.js now keeps body+0x40 (`body.vel`) and airIntent reads it. That also took
+   the run-up air drift from 9.6e-3 to 1.8e-3; the other jump traces' outputs are unchanged.
+Mutants (test_jump_page): no air cap, air rescale, no state-0 crossing, land as 0, +0x40 not
+zeroed, airIntent from C, +0x40 copied in state 3, no slide move, slide up: all red. Survivors:
+plane vs up-axis projection in state 3 (equivalent: the move is already in the plane) and no
+body+0xdc update in state 3 (nothing reads it before the next fall resets it).
+
+
+## Jumping at the ladder: the game never mounts from a jump (worker 0131, 2026-10-30)
+
+Dan, on 0130's fix: "jumping onto the ladder should start the climb". Decoded and traced: it doesn't.
+- The only way onto a ladder is the ✕ press edge in FUN_00333150 (no other callers of FUN_00576c88 /
+  FUN_00576de8 / FUN_005771c8; no pointers to them in the ELF). Its gate FUN_005771c8 needs P+0x118 bit
+  0x200, which is clear in the jump states: traced, it follows state 2 <-> 8 frame for frame, also on the
+  ground take-off and landing frames. Touching a trigger box without ✕ does nothing.
+- The ✕ acts on M+0x10ac (M = *DAT_0046e880), the gimmick chosen by the map update FUN_0053b500 ->
+  FUN_0053bf30 -> FUN_00589978 (ray from FUN_005635e0 = feet + (0, -7, 0), forward x 10) ->
+  FUN_005494a0 -> vtable +0x154 FUN_005513c8. Ladder bottom (type 1): origin inside the box
+  (FUN_005507a0: record +0x40 inverse matrix, +0x80 / +0x90), state 2..5, forward . record +0x20
+  (row 2 = box local +z) > 0. Type 2 (top): the same with |angle about +0x10| < pi/2 and an undecoded
+  FUN_003177a8 term. Outside states 2..5 (FUN_0055abd8) the choice is cleared while C+0x1d8 > 0, else kept.
+  The map update runs after the player's ✕ check, so ✕ uses last frame's choice. FUN_00544200 returns
+  that object; the mount also needs the origin in its box now; otherwise the ✕ is taken with no mount.
+- Traces (scripts tools/trace/scripts/l_ladder_jump_{a..e}.json, TRACE_FIELDSET=jump, new field
+  m_gimmick = M+0x10ac):
+  a) running ✕ at f520, x -1113.75: jumps (state 8), lands at the ladder foot, no climb. The choice
+     was empty: f519's origin was at box local z -4.26 (half size 4.173).
+  b) ✕ again mid-air at the ladder face (f535): second jump (state 0x1f, c_wjp0), no climb.
+  c) ✕ on the drop-polygon slide frame (f556, still state 8): second jump, no climb.
+  d) standing ✕ at the foot (f500): state 0xb, c_ld_u.
+  e) a's run-up with ✕ at f521: mounts mid-run (state 0xb). The choice came from f520's pose.
+- Page: ladder.js now runs that choice and ✕ rule (`choose`, `selects`, `canEnter`, `ate`), replacing
+  the sampled 7-unit ray from 2 up (GUESS), which mounted in case a. player.js passes `ate` to takeOff.
+  test_jump_page: replays a/b/c (exact like l_ladder_jump), ✕ outcome on all six, M+0x10ac per frame
+  (221 frames, 0 off), hand-built checks for the take-without-mount, the state-8 ground frames and the
+  air keep/clear rule. Mutants 10/11 killed (survivor: origin 2 vs 7 up, equivalent on z128).

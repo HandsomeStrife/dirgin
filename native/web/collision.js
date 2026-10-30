@@ -348,20 +348,43 @@ export class Collision {
   }
 
   // FUN_00357d48 over the walk mesh from polygon pi at (x,y,z) by (dx, 0, dz)
-  // (cid_query.py nav_move). Returns [x, y, z, poly, hitWall, fall].
-  navMove(pi, x, y, z, dx, dz, air = false) {
+  // (cid_query.py nav_move). Returns [x, y, z, poly, hitWall, fall, state0].
+  // body (the player's physics body; absent = cid_query.py's helper walk):
+  //   body.air {bodyY, vdt}: airborne (body+0xac bit 0), see the pass below.
+  //   body.state3 {dy}: body state 3 (the slide down a 0x10 polygon), move (dx, dy, dz);
+  //   state0 = the walk put the body in state 0 (FUN_00357860(body, 0)).
+  navMove(pi, x, y, z, dx, dz, air = false, body = null) {
     let P = this.polys[pi];
-    let mx = dx, my = 0.0, mz = dz;
+    const s3 = body !== null && body.state3 !== undefined;
+    const ab = body !== null && body.air !== undefined ? body.air : null;
+    if (ab !== null) air = true;
+    let mx = dx, my = s3 ? body.state3.dy : 0.0, mz = dz;
     let prev = null, hit = false;
     for (let it = 0; it < NAV_PASSES; it++) {
       if (!this._inside(P, x, y, z)) [x, y, z] = this._clamp(P, x, y, z);   // FUN_0035d788
       const L = Math.sqrt(mx * mx + my * my + mz * mz);
       if (L < 0.001) break;
       const pl = P.plane;
-      // FUN_002606b8 (along the up axis) then rescale to the length L
-      if (Math.abs(pl[1]) > 1e-9) my = my - (pl[0] * mx + pl[1] * my + pl[2] * mz) / pl[1];
-      const l2 = Math.sqrt(mx * mx + my * my + mz * mz);
-      if (l2 > 0.0) { mx = mx / l2 * L; my = my / l2 * L; mz = mz / l2 * L; }
+      if (s3) {
+        // body flag bit 0 clear, FUN_00357828 (state 1 / 3) true: FUN_00260e28(0, ..., plane):
+        // drop the move's component along the plane normal, then rescale to the length L
+        const d = pl[0] * mx + pl[1] * my + pl[2] * mz;
+        mx = mx - pl[0] * d; my = my - pl[1] * d; mz = mz - pl[2] * d;
+        const l2 = Math.sqrt(mx * mx + my * my + mz * mz);
+        if (l2 > 0.0) { mx = mx / l2 * L; my = my / l2 * L; mz = mz / l2 * L; }
+      } else if (ab !== null) {
+        // FUN_00357d48 ~0x358300, body flag bit 0 set (airborne): FUN_002606b8 along the up
+        // axis (body+0x50), NOT rescaled. FUN_003577c8 (states 2/3/6/7) true for every air
+        // body: if the ground point would end above the body (ground.y + move.y < body.y),
+        // move.y = max(move.y, (body+0xe0 + body+0xd0 x body+0xd4) x DAT_004eeb28) = ab.vdt.
+        if (Math.abs(pl[1]) > 1e-9) my = my - (pl[0] * mx + pl[1] * my + pl[2] * mz) / pl[1];
+        if (y + my < ab.bodyY && !(ab.vdt <= my)) my = ab.vdt;
+      } else {
+        // FUN_002606b8 (along the up axis) then rescale to the length L
+        if (Math.abs(pl[1]) > 1e-9) my = my - (pl[0] * mx + pl[1] * my + pl[2] * mz) / pl[1];
+        const l2 = Math.sqrt(mx * mx + my * my + mz * mz);
+        if (l2 > 0.0) { mx = mx / l2 * L; my = my / l2 * L; mz = mz / l2 * L; }
+      }
       const cx = x + mx, cy = y + my, cz = z + mz;
       if (this._inside(P, cx, cy, cz)) { [x, y, z] = this._project(P, cx, cy, cz); break; }
       const [e, ex, ey, ez] = this._exit(P, x, y, z, cx, cy, cz);
@@ -372,11 +395,20 @@ export class Collision {
       if (e < 0) break;
       let nb = P.nbr[e];
       if (nb !== null && (nb === prev || !this.polys[nb].ok)) nb = null;
-      let fall = false;
+      let fall = false, land = false;
       if (nb !== null) {
         const N = this.polys[nb];
         if ((N.flags & F_NPC) && this.block80) nb = null;
         else if (N.flags & F_WALLS) nb = null;
+        else if (s3) {
+          // 0x35887c..0x358b14, states 3 / 1 (FUN_00357798 false: the state-0 drop / 0x100 / 0x04
+          // branches don't run). A neighbour without 0x14 (t >= rise: the landing that enters
+          // state 3 needs it) -> FUN_00357860(body, 0), body+0x40 = 0, and the walk ends at the
+          // crossing point on the neighbour (done = 1). A 0x10 neighbour is entered as usual.
+          // (The t < rise fall restart there is unreachable from the landing; 0x04 / 0x100 are
+          // walls above, absent in z128.)
+          if ((N.flags & 0x14) === 0) land = true;
+        }
         else if (!air && (N.flags & F_DROP)) {
           const k = N.nbr.indexOf(pi);
           if (k >= 0 && N.edges[k][1] < 0.0) fall = true;        // FUN_00357148: drop off
@@ -388,6 +420,7 @@ export class Collision {
         mx = cx - ex; my = cy - ey; mz = cz - ez;
         prev = pi; pi = nb; P = this.polys[nb];
         if (fall) return [x, y, z, pi, hit, true];
+        if (land) return [x, y, z, pi, hit, false, true];
         if (mx * mx + my * my + mz * mz === 0.0) break;
         continue;
       }
@@ -423,7 +456,7 @@ export class Collision {
       hit = true;
       if (mx * mx + my * my + mz * mz === 0.0) break;
     }
-    return [x, y, z, pi, hit, false];
+    return [x, y, z, pi, hit, false, false];
   }
 
   // ------------------------------------------------------------------ ground

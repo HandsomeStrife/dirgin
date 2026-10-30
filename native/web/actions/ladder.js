@@ -25,10 +25,10 @@ const MOUNT_RISE = 6.1;   // first rung above the bottom trigger floor: c_ld_u's
 const STEP_TICKS = 14;    // (16 - 2) ticks per step; the 16-frame clip plays at 15/14
 const TOP_PROBE = 20.25;  // top exit: no face this far above the feet (FUN_00346fc0)
 const BOTTOM_EXIT = 6;    // c_ld_del/der drop (glb units); less than a rung + this left: get off
-const RAY = 7;            // trigger ray along the facing (FUN_00544200)
-// GUESS: trigger ray origin 2 above the feet (the game casts from FUN_005635e0 /
-// FUN_00563678 points, not decoded; see notes/fidelity-audit.md "Ladder trigger").
-const RAY_UP = 2;
+// The ✕ check and the per-frame gimmick choice both cast from FUN_005635e0's point = the
+// feet + (0, -7, 0) (7 units up; FUN_00333150 x7 / FUN_0053b500 x10 the facing, row 2 of the
+// matrix, FUN_00563678). For a ladder trigger only the ray's origin and direction matter.
+const RAY_UP = 7;
 
 // Test aid: play.html?ladder=N puts him at ladder N's bottom once, on load (z128's start
 // deck doesn't connect to the ladder floor on foot in the current collision).
@@ -70,12 +70,18 @@ function inBox(b, p) {
          l[1] >= b.min[1] && l[1] <= b.max[1];
 }
 
-// the game's test: a short ray along the facing reaches the box (FUN_00544200)
-function triggers(b, pos, heading) {
-  const dx = Math.sin(heading), dz = Math.cos(heading);
-  for (let s = 0; s <= RAY; s += 1)
-    if (inBox(b, { x: pos.x + dx * s, y: pos.y - RAY_UP, z: pos.z + dz * s })) return true;
-  return false;
+// FUN_005513c8 (gimmick vtable +0x154; FUN_00589978 -> FUN_005494a0) for the ladder types (the
+// player-state term is applied by choose(), which only selects in states 2..5):
+// type 1 (bottom): the ray origin inside the box (FUN_005507a0(g, origin, 1): the record's
+// inverse matrix +0x40, then min +0x80 / max +0x90), player state 2..5, and the ray direction
+// along the record's local +z (row 2, +0x20): dot > 0.
+// type 2 (top): the origin inside the box, state 2..5, and |angle(+0x20, ray) about +0x10 (row 1,
+// up)| < pi/2 (FUN_00260fe8), i.e. the same horizontal dot > 0.
+// GUESS: type 2's FUN_003177a8(FUN_0055a370(P)) != 1 term is not decoded and taken as true.
+const origin = pos => ({ x: pos.x, y: pos.y - RAY_UP, z: pos.z });
+function selects(b, pos, heading) {
+  const z = b.axes[2];
+  return inBox(b, origin(pos)) && Math.sin(heading) * z[0] + Math.cos(heading) * z[2] > 0;
 }
 
 // clip root-motion curve, raw glb values at fractional frame f
@@ -222,14 +228,26 @@ export function ladderAction() {
     return { delta: { x: pos.x - c.x, y: pos.y - c.y, z: pos.z - c.z }, ...extra };
   }
 
-  function entry(ctx) {
-    if (!ladders || !ctx.anim) return null;
-    const p = ctx.ctrl.pos, h = ctx.ctrl.heading;
+  // M+0x10ac, the current gimmick (FUN_0053be88): chosen once per frame by the map update
+  // FUN_0053b500 -> FUN_0053bf30, which runs AFTER the player's ✕ check (FUN_00333150), so a ✕
+  // acts on the trigger chosen from last frame's pose (traced: l_ladder_jump_a ✕ f520 jumps,
+  // l_ladder_jump_e ✕ f521 mounts). States 2..5 (FUN_0055abd8): choose from the pose; other
+  // states: cleared while moving (C+0x1d8 > 0), else kept. The mount clears it (FUN_00576c88).
+  // GUESS: with two boxes hit, the first in data order wins (FUN_00544960's pick is not decoded;
+  // no z128 ladder boxes overlap).
+  // MISSING: only ladder boxes are chosen. In FUN_00333150 any chosen gimmick with +0xd4 set eats ✕
+  // (e.g. type 8, FUN_00576428), so beside a non-ladder gimmick the game may not jump where the page does
+  // (notes/fidelity-audit.md "Non-ladder gimmicks taking ✕").
+  let gimmick = null;
+  function choose(ctx) {
+    const c = ctx.ctrl, st = c.P ? c.P.state : (c.onGround ? 2 : 8);
+    if (!ladders) { gimmick = null; return; }
+    if (st < 2 || st > 5) { if (c.speed > 0) gimmick = null; return; }
+    gimmick = null;
     for (const l of ladders) {
-      if (triggers(l.bottom, p, h)) return { l, from: 'bottom' };
-      if (triggers(l.top, p, h)) return { l, from: 'top' };
+      if (selects(l.bottom, c.pos, c.heading)) { gimmick = { l, from: 'bottom', b: l.bottom }; break; }
+      if (selects(l.top, c.pos, c.heading)) { gimmick = { l, from: 'top', b: l.top }; break; }
     }
-    return null;
   }
 
   let pending = null;
@@ -238,15 +256,35 @@ export function ladderAction() {
     get log() { return log; },
     get phase() { return ph && ph.kind; },
     get ladder() { return L && L.id; },
+    get gimmick() { return gimmick && gimmick.from; },
+    ate: false,         // ✕ taken by a chosen trigger that didn't mount (player.js: no jump)
     canEnter(ctx) {
       if (warpTo !== null && ladders) {
         const l = ladders.find(x => x.id === warpTo); warpTo = null;
         if (l) { pending = { l, from: 'warp' }; return true; }
       }
-      if (!ctx.input.pressed?.has(KEY) || !ctx.ctrl.onGround) return false;
-      if (!ctx.anim?.has('c_ld_u') || !ctx.anim.has('c_ld_d')) return false;
-      pending = entry(ctx);
-      return !!pending;
+      this.ate = false;
+      // FUN_00333150 ✕ (press edge), gate FUN_005771c8: P+0x118 bit 0x200 (also C+0x564 bits).
+      // The chosen trigger takes ✕ (no jump); it mounts when the origin is in its box now
+      // (FUN_005507a0) and the clip is there (FUN_003455e8 0x92 / 0x9b).
+      // GUESS: bit 0x200 as player state 2..5. Traced, it follows state 2 <-> 8 frame for frame
+      // (also on the ground take-off / landing frames); its setters FUN_005382e0 / FUN_00538218 /
+      // FUN_005383a8 are not tied to state classes (see notes/fidelity-audit.md "Ladder trigger").
+      // GUESS: the other gate terms are taken as passing (not ported; notes/fidelity-audit.md
+      // "Ladder ✕ gate terms not ported"): FUN_003242e8 bit 4 (FUN_00333150), FUN_003422f0(C) == 0 and
+      // P+0x118 bit 0x40000 (FUN_005771c8), FUN_00326068(5) on the per-frame choice (FUN_0053b500).
+      let take = false;
+      const st = ctx.ctrl.P ? ctx.ctrl.P.state : (ctx.ctrl.onGround ? 2 : 8);
+      if (ctx.input.pressed?.has(KEY) && st >= 2 && st <= 5 && gimmick) {
+        this.ate = true;
+        if (inBox(gimmick.b, origin(ctx.ctrl.pos)) && ctx.anim?.has('c_ld_u') && ctx.anim.has('c_ld_d')) {
+          pending = { l: gimmick.l, from: gimmick.from };
+          take = true;
+        }
+      }
+      // the map update's choice for the next frame (a frame's ticks share its pose: same result)
+      if (take) gimmick = null; else choose(ctx);
+      return take;
     },
     enter(ctx) {
       L = pending.l; done = false; log = []; hand = 'l';
