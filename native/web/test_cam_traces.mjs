@@ -29,14 +29,14 @@ const V3 = (h, o) => [F(h, o), F(h, o + 4), F(h, o + 8)];
 const d3 = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
 const wrap = a => Math.atan2(Math.sin(a), Math.cos(a));
 const TIE = 1e-3;
-// open loop: worker 0089's bounds (eye 0.0075); per tick: the near_back wall measures 0.048
-// closer than the game while pinned (collision, not the ease; see notes/fidelity-audit.md)
+// open loop: worker 0089's bounds (eye 0.0075); per tick: 1.3e-3 since the view-1 ray start
+// (DAT_0046e4d4, worker 0143; before it the walls measured 0.048 closer than the game)
 // page: closed loop (below); the player's run-up and air drift (test_jump_page: run-up 2.2e-3 + air
 // railing slide 2.7e-3) moves the base, which can flip one step of the look point's quantised angle
 // change (pi / 4096 = 7.67e-4 rad: cam_j_run f44 yaw, cam_j_back f75 pitch x 0.25 x 2), and the back
-// jump's railing pulls the eye in (the collision residual above)
-const LIM = { open: { eye: 0.01, at: 0.002, yaw: 1e-5, pitch: 3e-4 }, tick: { eye: 0.06, at: 0.002, yaw: 1e-5, pitch: 1e-5, out: 0.01 },
-              page: { eye: 0.06, at: 0.005, yaw: 8e-4, pitch: 5e-4, a220: 1e-5, pos: 6e-3 } };
+// jump's railing pulled the eye in 0.048 before the view-1 ray start (now 3.9e-3)
+const LIM = { open: { eye: 0.01, at: 0.002, yaw: 1e-5, pitch: 3e-4 }, tick: { eye: 0.01, at: 0.002, yaw: 1e-5, pitch: 1e-5, out: 0.01 },
+              page: { eye: 0.035, at: 0.005, yaw: 8e-4, pitch: 5e-4, a220: 1e-5, pos: 6e-3 } };
 // worker 0107's jump traces (scripts tools/trace/scripts/cam_j_*.json): open loop with the player
 // state P+0x104 from the trace (the second jump's landing has one quantiser tie in the look point's
 // pitch change, 1.9e-4: within 'open', not 'tick'); the back jump per tick (pinned on the railing:
@@ -54,6 +54,15 @@ const CASES = [
   // gun out, then circle / R3 in the wind-up: holster into state 9 with no state-2 enter (the camera jump
   // flag stays); R3 with the gun out is first person only (state 8 stays)
   ['cam_j_gun_windup_holster', 'page'], ['cam_j_gun_windup_r3', 'page'],
+  // worker 0142: the ladder (l_ladder_cam: standing ✕ mount at the bottom, climb to the top exit with W,
+  // walk off). CAM+0x1c4 eases to CAM+0x1c8 = 4 and pulls the base back along C+0x20; the player's
+  // writes of CAM+0x1c8 (FUN_00328640) come from the trace, as the position does
+  ['l_ladder_cam', 'open'],
+  // and the right stick on the ladder (l_ladder_cam_look: a few rungs, then full right, then left + up).
+  // Turned into the wall the game's eye comes in to ~3.3 from the base on the camera collision. The
+  // rays start DAT_0046e4d4 = 1.5 further back in view 1 (worker 0143): without it ~130 frames were
+  // 0.02-0.24 off and f667 1.3 (a corner ray grazing the wall hit the other face of the slab)
+  ['l_ladder_cam_look', 'open'],
 ];
 
 // 'page': the page's own frame, as play.js / aim.js wire it, fed only the trace's pad: follow.tick
@@ -164,6 +173,8 @@ for (const [name, mode] of CASES) {
   cam.eye = V3(r0.cam_60, 0x30);
   cam.M = [0, 1, 2].map(i => V3(r0.cam_60, 16 * i));
   cam.dist = F(c0, 0x50);
+  cam.back = F(c0, 0x54);                         // CAM+0x1c4
+  let backUsed = false;
   const err = { eye: [0, 0], at: [0, 0], yaw: [0, 0], pitch: [0, 0], out: [0, 0] };
   const put = (k, v, f) => { if (v > err[k][0]) err[k] = [v, f]; };
   let n = 0, ties = 0, nearOut = 0, gainUsed = false;
@@ -178,8 +189,12 @@ for (const [name, mode] of CASES) {
     const w = r.want_dir_speed || [0, 0, 0];
     // the near-eye test's inputs, as place() takes them (last eye, this frame's base + pivot)
     const le = cam.eye.slice();
+    // CAM+0x1c8 as the player left it last frame (the camera runs first): FUN_00328640(CAM, on)
+    cam.setBack(F(r.cam_170, 0x58) !== 0);
+    if (cam.back > 0) backUsed = true;
     // the cam field set has no P+0x104: on foot, standing or moving = state 2 (the slow set 2-5)
     cam.tick({ pos: { x: r.matrix[3][0], y: r.matrix[3][1], z: r.matrix[3][2] }, want: { x: w[0], y: w[1], z: w[2] },
+               facing: { x: r.matrix[2][0], y: r.matrix[2][1], z: r.matrix[2][2] },
                state: r.p_state ? hex(r.p_state)[4] : 2, stick: Math.hypot(lx, ly), pad: [rx, ry] });
     const pv = CAM_TYPE_C.pivot, b = cam.base;
     const near = d3([b[0] + pv[0], b[1] + pv[1], b[2] + pv[2]], le) < 17.5;
@@ -190,6 +205,14 @@ for (const [name, mode] of CASES) {
     if (gap !== null && Math.abs(gap) < TIE && Math.hypot(lx, ly) > 0) {
       ties++;
       if (mode === 'tick') continue;
+    }
+    // ladder: on a settled distance the measured one equals CAM+0x1c0 to ~1e-4, so the in / out
+    // branch (in: measured + the whole recede; out: ease + recede x (d - 25) / 35) is a float tie;
+    // the mount starts from one (l_ladder_cam f502: the game goes in). Counted, and CAM+0x1c0 taken
+    // from the game on that frame
+    if (name.startsWith('l_ladder') && Math.abs(cam.ease.inGap) < TIE && Math.abs(cam.dist - F(g.cam_170, 0x50)) > TIE) {
+      ties++; cam.dist = F(g.cam_170, 0x50); cam.eye = V3(g.cam_60, 0x30);
+      continue;
     }
     if (process.env.CAM_DEBUG) console.log(g.frame, d3(cam.eye, V3(g.cam_60, 0x30)).toExponential(2), (cam.yaw - F(g.cam_170, 8)).toExponential(2), (cam.pitch - F(g.cam_170, 4)).toExponential(2), cam.dist.toFixed(4), F(g.cam_170, 0x50).toFixed(4), cam.ease.out, gap);
     put('eye', d3(cam.eye, V3(g.cam_60, 0x30)), g.frame);
@@ -205,6 +228,7 @@ for (const [name, mode] of CASES) {
   const bad = Object.keys(L).filter(k => err[k][0] > L[k]);
   if (mode === 'tick' && nearOut === 0) bad.push('no near-eye frames');
   if (noWant && gainUsed) bad.push('auto turn-behind acts but the trace has no want_dir_speed');
+  if (name.startsWith('l_ladder') && !backUsed) bad.push('no ladder pull-back frames');
   console.log(name.padEnd(14), mode.padEnd(5), `frames ${n} (ties ${ties}, near-eye ease-out ${nearOut})  ` +
               Object.keys(err).map(k => `${k} ${err[k][0].toExponential(1)} (f${err[k][1]})`).join('  ') + (bad.length ? '  FAIL ' + bad.join(',') : '  ok'));
   if (bad.length) fails++;

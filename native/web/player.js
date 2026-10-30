@@ -59,6 +59,9 @@ import { Jump, stickMode, enterState } from './jump_core.js';
 
 // ---------------------------------------------------------------- timing
 export const TICK = 1 / 50;                       // one PAL game frame (s): play.js's loop step
+const DAT_0046E400 = 4.0;                          // ladder camera pull-back (RAM; FUN_00328640)
+const DAT_0046E4C0 = 0.2;                          // its ease rate per tick (FUN_0032ace0 l.1748)
+const DAT_0046E4D4 = 1.5;                          // camera ray start, back along the forward axis in view 1 (FUN_0032ace0)
 export const STEP = 1.1999999284744263;           // DAT_004eeb24: ticks per frame (f32 of 1 x 1.2)
 export const DT = 0.019999999552965164;           // DAT_004eeb28 = STEP x 0.016666668 (s)
 export const ACTION_TICK = 1 / 60;                // actions/*.js are timed in 60 Hz ticks
@@ -1332,6 +1335,9 @@ export function cameraRays(buf) {
   return { count: T.length, segment };
 }
 
+// FUN_0055a410: player states whose camera turn-behind follows the facing (10-14 = the ladder)
+export function fun55a410(st) { return st === 0x15 || st === 0x17 || (st > 9 && st < 0xf); }
+
 export class FollowCamera {
   // camera: THREE camera (null in headless tests); rays: cameraRays(...) or null (no collision)
   constructor(camera, rays = null, type = CAM_TYPE_C) {
@@ -1340,8 +1346,17 @@ export class FollowCamera {
     this.look = [0, 0];                           // mouse counts gathered for the next frame
     this.mouseDirect = null;                      // OPTION mouselook: { sens } (rad per pixel) or null = the game's path
     this.hit = false;                             // CAM+0x1e8 0x80: the collision hit last frame
+    // CAM+0x1c4 / +0x1c8: base pulled back along the player's facing (the ladder; FUN_00328640).
+    // FUN_003285d0 (reset) leaves both as they are
+    this.back = 0; this.backTarget = 0;
     this.reset({ x: 0, y: 0, z: 0 });
   }
+
+  // FUN_00328640(CAM, on): CAM+0x1c8 = on ? DAT_0046e400 (4.0 in RAM) : 0. The ladder sets it
+  // (mount FUN_00576c88, each ladder-state frame FUN_00576f08 / 576f98 / 577038) and clears it
+  // (bottom exit FUN_00576f98 / 577038, leaving 0xd / 0xe FUN_00573a38 -> FUN_00577110; leaving
+  // 0x15 / 0x17 -> FUN_00575768). See actions/ladder.js
+  setBack(on) { this.backTarget = on ? DAT_0046E400 : 0; }
 
   // put the camera on a player at pos (spawn, H, ladder warp): FUN_003285d0 (angles, snap
   // flag 0x2000, CAM+0x1c0 = 1000, ramp 0), then the eye placed as the next frame's update
@@ -1374,7 +1389,8 @@ export class FollowCamera {
   }
 
   // one game frame. p: { pos: {x,y,z} (C+0x30, last frame's), want: {x,y,z} (C+0xc0),
-  // state: P+0x104, stick: |left stick| (FUN_00325678), pad: [rx, ry] processed right stick or null }
+  // state: P+0x104, stick: |left stick| (FUN_00325678), pad: [rx, ry] processed right stick or null,
+  // facing: {x,y,z} C+0x20 (row 2 of the base matrix; only read while CAM+0x1c4 != 0) }
   // this.weapon (aim.js): aim_core.js WeaponSystem; its cam holds the view mode CAM+0x21c, the
   // type CAM+0x28, the switch ramp CAM+0x17c, flags, recoil and kick. Without it: type 0xc, view 1.
   tick(p) {
@@ -1395,7 +1411,10 @@ export class FollowCamera {
     // cleared. Else d = player - base; only when |d.y| < 15 is d scaled per axis (by
     // min(rate x step, 1) when FUN_003264e0() == 0, else by the raw rate); at 15+ the base
     // lands on the player in one frame
-    const tgt = [p.pos.x, p.pos.y, p.pos.z];
+    // FUN_0032ace0 l.254: the base point = matrix row 3 - row 2 x CAM+0x1c4 (last frame's value;
+    // eased at l.1748 below)
+    const fc = p.facing || { x: 0, y: 0, z: 0 }, bk = this.back;
+    const tgt = [p.pos.x - fc.x * bk, p.pos.y - (fc.y || 0) * bk, p.pos.z - fc.z * bk];
     let old = this.base, base;
     if (this.snap) {
       old = tgt.slice(); base = tgt.slice();      // CAM+0x140 and +0x130 both = the player
@@ -1474,7 +1493,9 @@ export class FollowCamera {
     // past 110 deg it slows to 0 at 140, beyond 140 it turns toward the front instead
     if (sx === 0 && this.gain > 0.1 && this.idle >= 1 && !fun253f50()) {
       const fw = this.M[2], camYaw = Math.atan2(fw[0], fw[2]);
-      const w = p.want || { x: 0, z: 0 }, plYaw = Math.atan2(w.x, w.z);
+      // l.1194: FUN_0055a410(P) (player states 10-14, 0x15, 0x17: the ladder) turns toward the
+      // base matrix's row 2 (C+0x20), else FUN_0034b088 (C+0xc0)
+      const w = (fun55a410(p.state) ? p.facing : p.want) || { x: 0, z: 0 }, plYaw = Math.atan2(w.x, w.z);
       const raw = wrapA(-wrapA(camYaw - plYaw));
       const cl = wrapA(clampf(raw, -140 * DEG, 140 * DEG));
       const deg = cl * 57.295776, g = f29 * PI_ * this.gain * S;
@@ -1505,6 +1526,8 @@ export class FollowCamera {
     // view) the switch ramp CAM+0x17c is set to 1 here, so it ends this frame
     if (wc) { const a = W.switchAngles(); this.pitch += a.pitch; this.yaw += a.yaw; }
     this.pitch = clampf(this.pitch, PITCH_MIN, PITCH_MAX);
+    // l.1748: CAM+0x1c4 += (CAM+0x1c8 - CAM+0x1c4) x DAT_0046e4c0 (0.2) x step
+    this.back = (this.backTarget - this.back) * DAT_0046E4C0 * S + this.back;
     // l.1687-1762: the reticle offset, switch ramp, fade, FOV and recoil (aim_core.js cameraFrame)
     if (W) W.cameraFrame(this.pitch);
     if (wc) FollowCamera.shoulderPre(wc);
@@ -1565,7 +1588,10 @@ export class FollowCamera {
     // to the same fraction, then forward by 3 sin(angle to the wall) (DAT_0046e440 = 3)
     if (this.rays) {
       const offz = vm(off, RX)[2];
-      const f23 = Math.abs(RX[2][2]) < 0.001 ? 1.0 : (offz + T.pivot[2]) / RX[2][2];
+      let f23 = Math.abs(RX[2][2]) < 0.001 ? 1.0 : (offz + T.pivot[2]) / RX[2][2];
+      // FUN_0032ace0 l.1792: view 1 (FUN_0032a0f0() == 1) starts the rays DAT_0046e4d4 (1.5, ELF
+      // and save-state RAM) further back along the forward axis
+      if (ctx.view1 !== false) f23 += DAT_0046E4D4;
       const fw = M[2];
       const S0 = [eye[0] - fw[0] * f23, eye[1] - fw[1] * f23, eye[2] - fw[2] * f23];
       let best = null;
@@ -1617,7 +1643,7 @@ export class FollowCamera {
       if (d17 < 17.5) { near = true; k23 = (17.5 - d17) / 10.0; }
     }
     // for test_cam_traces.mjs: which branch ran, and the walk-away test's margin
-    this.ease = { out: this.dist < dist, slowGap: null };
+    this.ease = { out: this.dist < dist, slowGap: null, inGap: dist - this.dist };
     if (this.dist < dist) {
       const r0 = (ctx.fast || near) ? (EASE_OUT_FAST - 0.03) * k23 + 0.03 : 0.03;
       let r = stepFrac(r0);

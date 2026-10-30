@@ -661,6 +661,7 @@ async function main() {
   const motions = {};
   loadMotions('vincent').then(m => Object.assign(motions, m)).catch(e => console.warn(e.message));
   ctrl.attach({ anim, motions });
+  ctrl.ctx.cam = follow;                           // the ladder's FUN_00328640 (CAM+0x1c8, actions/ladder.js)
   let actionHelp = [];
   if (params.get('actions') !== '0') {
     for (const a of await loadActions()) { ctrl.addAction(a.action); if (a.help) actionHelp.push(a.help); }
@@ -705,7 +706,7 @@ async function main() {
     keys.add(e.code);
     if (!e.repeat) pressed.add(e.code);
     // H: back to the spawn (debug aid, not a game feature)
-    if (e.code === 'KeyH') { ctrl.reset(); if (cape) cape.cloth.started = false; if (weapon) weapon.reset(); follow.reset(ctrl.pos); detached = null; }   // respawn: spawn angles
+    if (e.code === 'KeyH') { ctrl.reset(); if (cape) cape.cloth.started = false; if (weapon) weapon.reset(); follow.reset(ctrl.pos); detached = null; }   // respawn: spawn angles (ctrl.reset cancels the ladder: its exit() clears CAM+0x1c8; the reset FUN_00329f68 -> FUN_003285d0 leaves CAM+0x1c4 / +0x1c8)
     if (e.code === 'KeyR') { e.preventDefault(); report.open(); }
     if (e.code === 'Space' || e.code.startsWith('Arrow')) e.preventDefault();
   });
@@ -813,7 +814,8 @@ async function main() {
       // left him, and this frame's stick-to-world uses its new matrix (player.js camera notes)
       const inp = readInput();
       const moving = Math.hypot(inp.x, inp.z) > 1e-6;
-      follow.tick({ pos: ctrl.pos, want: ctrl.C.dir, state: ctrl.P.state,
+      // on the ladder the camera reads the ladder's P+0x104 (ladder.js camState) and the facing C+0x20
+      follow.tick({ pos: ctrl.pos, want: ctrl.C.dir, state: ctrl.active?.camState ?? ctrl.P.state, facing: ctrl.C.face,
                     stick: moving ? (inp.run ? KEY_RUN : KEY_WALK) : 0, pad: null });
       const b = follow.basis();                    // re-aim the keys with this frame's matrix
       const pOld = [ctrl.pos.x, ctrl.pos.y, ctrl.pos.z];

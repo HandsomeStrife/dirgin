@@ -42,6 +42,21 @@ const airState = st => st === 8 || st === 9 || (st >= 0x1f && st <= 0x21);
 let warpTo = (() => { try { const v = new URLSearchParams(location.search).get('ladder'); return v === null ? null : +v; } catch { return null; } })();
 
 const wrapPi = a => Math.atan2(Math.sin(a), Math.cos(a));
+
+// Camera (worker 0142, trace l_ladder_cam): the game keeps the follow camera (type 0xc) on the ladder.
+// FUN_00328640(CAM, on) pulls its base 4 back along his facing (CAM+0x1c8; FollowCamera.setBack):
+// on at the bottom mount (FUN_00576c88; not the top mount FUN_00576de8) and on every ladder-state
+// (10) frame (the stick handlers FUN_00576f08 / 576f98 / 577038); off when the bottom exit starts
+// (0xe) and when the top exit (0xd) ends (exit hook FUN_00573a38 -> FUN_00577110).
+// ctx.cam = the FollowCamera (play.js); absent in headless runs.
+const setBack = (ctx, on) => { if (ctx.cam) ctx.cam.setBack(on); };
+// P+0x104 for each phase as the camera reads it (FUN_0055a410: 10-14 turn behind toward the facing):
+// traced 0xb mount, 10 on the rungs, 0xd top exit; 0xc / 0xe from the code (FUN_00576de8, FUN_00576f98)
+const PHASE_STATE = { mountBottom: 0xb, mountAir: 0xb, mountTop: 0xc, idle: 10, up: 10, down: 10, exitTop: 0xd, exitBottom: 0xe };
+// GUESS: the jump-off (c_ld_jp, 'jump') and its fall ('fall') have no entry, so the camera reads the
+// page's own P.state (9): turn-behind toward C+0xc0, not the facing C+0x20 (not decoded: which state
+// FUN_00562d30's jump-off runs in; FUN_0055a410 would take the facing in 0x15 / 0x17; see
+// notes/fidelity-audit.md)
 const lerp = (a, b, t) => a + (b - a) * t;
 
 let ladders = null;       // loaded once, shared by every createAction()
@@ -179,6 +194,7 @@ export function ladderAction({ airgrab = AIRGRAB } = {}) {
         const x = L.climb.x + L.n.x * back, z = L.climb.z + L.n.z * back;
         const g = ctx.col.groundY(x, z, L.bottomY - 8);
         move(ctx, 'exitBottom', clip, { x, y: g ?? floor, z }, { hAxis: 2, vAxis: 1, from });
+        setBack(ctx, false);                      // FUN_00576f98: state 0xe, FUN_00328640(CAM, 0)
         return;
       }
       const clip = hand === 'l' ? 'c_ld_dmr' : 'c_ld_dml';
@@ -266,6 +282,8 @@ export function ladderAction({ airgrab = AIRGRAB } = {}) {
     name: 'ladder',
     get log() { return log; },
     get phase() { return ph && ph.kind; },
+    // the player state the camera reads (P+0x104), or undefined (the page's own: warp, jump-off, fall)
+    get camState() { return ph ? PHASE_STATE[ph.kind] : undefined; },
     get ladder() { return L && L.id; },
     get gimmick() { return gimmick && gimmick.from; },
     ate: false,         // ✕ taken by a chosen trigger that didn't mount (player.js: no jump)
@@ -338,12 +356,14 @@ export function ladderAction({ airgrab = AIRGRAB } = {}) {
         // onto rung 0 of the ladder's own grid, whatever floor bump he stood on
         move(ctx, 'mountBottom', 'c_ld_u', climbPos(L.base), { hHalf: true, heading: L.heading });
       } else {
+        // (FUN_00576de8, the top mount, leaves CAM+0x1c8; the first state-10 frame sets it)
         // c_ld_d: turn to face the ladder, back over the edge and drop 18 (glb)
         const drop = curve(ctx, 'c_ld_d', 0)[1] - curve(ctx, 'c_ld_d', frames(ctx, 'c_ld_d') - 1)[1];
         // OPTION airgrab: grabbed in the air, measure the drop from the top floor under him, not his feet
         const feetY = pending.air ? (ctx.col.groundY(p.x, p.z, p.y) ?? L.topY) : p.y;
         move(ctx, 'mountTop', 'c_ld_d', climbPos(rungY(feetY + drop)), { hAxis: 1, vAxis: 1, heading: L.heading });
       }
+      if (ph.kind === 'mountBottom' || ph.kind === 'mountAir') setBack(ctx, true);   // FUN_00576c88
       log.push({ phase: ph.kind, tick: ctx.tick, feet: [p.x, p.y, p.z] });
       return null;                                  // move() already started the clip
     },
@@ -355,6 +375,7 @@ export function ladderAction({ airgrab = AIRGRAB } = {}) {
         log.push({ phase: 'landed', tick: ctx.tick, feet: [ctx.ctrl.pos.x, ctx.ctrl.pos.y, ctx.ctrl.pos.z] });
         return { locomotion: true, done: true };
       }
+      if (ph.kind === 'idle' || ph.kind === 'up' || ph.kind === 'down') setBack(ctx, true);   // state 10
       if (ph.kind === 'idle') {
         next(ctx);
         if (ph.kind === 'idle') return result(ctx, climbPos(ctx.ctrl.pos.y), { onGround: false });
@@ -384,6 +405,13 @@ export function ladderAction({ airgrab = AIRGRAB } = {}) {
       return res;
     },
     exit(ctx) {
+      // CAM+0x1c8 off when the action ends (CAM+0x1c4 then eases to 0 on its own, l.1748):
+      //  - the top exit's end: leaving 0xd, exit hook FUN_00573a38 -> FUN_00577110 (traced)
+      //  - the bottom exit's end: already off since it started (FUN_00576f98, next() above)
+      //  - GUESS: the jump-off landing (states 0x15 / 0x17 clear it on exit, FUN_00573a38 ->
+      //    FUN_00575768(P, 2); that the jump-off runs in them is not traced)
+      //  - a cancel (H: ctrl.reset; page aid, no game counterpart) and the ?ladder warp
+      setBack(ctx, false);
       ph = null; L = null; pending = null;
       ctx.anim?.release();
     },

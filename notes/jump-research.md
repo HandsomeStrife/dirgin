@@ -343,3 +343,42 @@ Dan, on 0130's fix: "jumping onto the ladder should start the climb". Decoded an
   test_jump_page: replays a/b/c (exact like l_ladder_jump), ✕ outcome on all six, M+0x10ac per frame
   (221 frames, 0 off), hand-built checks for the take-without-mount, the state-8 ground frames and the
   air keep/clear rule. Mutants 10/11 killed (survivor: origin 2 vs 7 up, equivalent on z128).
+
+## The camera on the ladder (worker 0142, 2026-10-30; Dan's report 20261030T124414Z-cc39)
+
+Dan: "climbing a ladder doesn't move the camera to a correct orientation, and zooms into the
+terrain" (eye at x −1105.2, past ladder 0's face at x −1106). Traces (TRACE_FIELDSET=cam,
+gitignored, copied to tools/trace/out/cam/): `l_ladder_cam` (standing ✕ mount at 500, W from 560
+to the top exit and off), `l_ladder_cam_look` (mount, two rungs, right stick full right 620–720,
+left + up 730–850).
+
+- The camera stays type 0xc, view 1 throughout. C+0x564 has no 0x18000000 bit, so the base is C+0x30
+  (0.1 from the face while climbing).
+- **Pull-back:** FUN_00328640(CAM, on) sets CAM+0x1c8 = DAT_0046e400 (4.0) or 0. FUN_0032ace0 l.254
+  takes the base target as C+0x30 − C+0x20 × CAM+0x1c4, and l.1748 eases CAM+0x1c4 toward
+  CAM+0x1c8 by 0.2 × step (traced: 0, 0.96, … 4 in ~25 frames). On at the bottom mount
+  (FUN_00576c88) and on every state-10 frame (FUN_00576f08 / 576f98 / 577038). Off when the bottom
+  exit starts (→ 0xe) and when leaving 0xd / 0xe (exit hook FUN_00573a38 → FUN_00577110). The top
+  mount FUN_00576de8 doesn't set it.
+- **Turn-behind:** in player states 10–14, 0x15 and 0x17 (FUN_0055a410) the auto turn-behind aims
+  at C+0x20 (the ladder facing), not C+0xc0 (l.1194).
+- Turned along / into the wall, the game's own camera collision pulls the eye in to ~3.3 from the
+  base, so a close camera there is the game's behaviour. The page's bug was the missing pull-back:
+  its base sat on the face, so the collision probe's square straddled the wall and the eye went
+  through it.
+- Page: ladder.js calls `ctx.cam.setBack` (play.js sets `ctrl.ctx.cam = follow`) and reports the
+  ladder's state to the camera (`camState`). Tests: test_cam_traces (`l_ladder_cam` and
+  `l_ladder_cam_look` eye 7.3e-3) and test_ladder_cam_page.mjs (real page: ease per frame, base =
+  pos − facing × 4, the eye stays on his side of the face while the mouse turns 180°, direct mouse
+  rate kept; each way off clears CAM+0x1c8 at its moment and CAM+0x1c4 eases back to 0).
+
+Review fixes (worker 0143):
+- **Collision ray start:** FUN_0032ace0 l.1792 adds DAT_0046e4d4 (1.5) to the distance back from the
+  eye to the rays' start S when FUN_0032a0f0() == 1 (view 1); the port had left it out. Turned along
+  the ladder's 1-unit slab (x −1106 / −1105) the corner rays graze it, so S's position moved the hit a
+  lot: ~130 frames 0.02–0.24 off and f667 1.3. With it every frame is within 7.3e-3, and the old
+  0.048 wall residual in cam_near_back / near_turn / cam_j_back goes too (now ~1e-3).
+- `exit()` clears CAM+0x1c8 (top-exit end, jump-off landing, cancel / H); the bottom exit still
+  clears it on its first frame. The camera reset (FUN_00329f68 → FUN_003285d0) doesn't touch
+  CAM+0x1c4 / +0x1c8, so H leaves the current value to ease back.
+- Jump-off / fall: no ladder state for the camera, so it reads the page's P.state 9 (GUESS, audit).
