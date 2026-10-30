@@ -15,7 +15,7 @@
 // the background after start (vincent_<pack>.glb).
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
-import { TICK, STEP, PlayerController, SpeedAnimator, FollowCamera, cameraRays, KEY_WALK, KEY_RUN } from './player.js';
+import { TICK, STEP, PlayerController, SpeedAnimator, FollowCamera, cameraRays, KEY_WALK, KEY_RUN, MouseFeed, MOUSE_SENS_DEFAULT } from './player.js';
 import { attachGun } from './gun.js';
 import { loadActions } from './actions/index.js';
 import { initReport } from './report.js';
@@ -34,6 +34,10 @@ if (params.get('hud') === '0') hud.style.display = 'none';
 const SPAWN = { x: -1395.63, z: -1110.51 };
 const ENEMIES = params.get('enemies') !== '0';       // enemies.js: z128's e027 soldiers (the AI's, and stage-load ones alive in the save)
 const ENEMY_AI = params.get('enemyai') !== '0';      // enemy_ai.js: wake trigger + awake soldier AI (?enemyai=0 = off)
+// OPTION mouselook: the camera turns by mouse pixels (not in the game). ON by default at Dan's request
+// (review board 2026-10-30); ?mouselook=game gives the game's USB-mouse path (FUN_00254ac8)
+const MOUSE_DIRECT = params.get('mouselook') !== 'game';
+const MOUSE_SENS = params.has('mousesens') && +params.get('mousesens') > 0 ? +params.get('mousesens') : MOUSE_SENS_DEFAULT;   // degrees per pixel
 const ENEMY_DMG = params.get('enemydmg') === '1';    // enemy bullets hit Vincent (off by default: the hit test is a GUESS)
 const AIM = params.get('aim') !== '0';               // aim.js (aim_core.js): the weapon, its camera views, the reticle
 const PACKS = params.has('packs') ? params.get('packs').split(',').filter(Boolean) : (AIM ? ['ladder', 'jump', 'shoot'] : ['ladder', 'jump']);
@@ -650,6 +654,7 @@ async function main() {
   // class (null with the stub: no pull-in). Starts at the save state's camera values (GUESS
   // for the page's spawn, player.js CAM_SPAWN).
   const follow = new FollowCamera(camera, camRays || null);
+  if (MOUSE_DIRECT) follow.mouseDirect = { sens: MOUSE_SENS * Math.PI / 180 };   // OPTION mouselook
   follow.reset(ctrl.pos);
 
   // ---- actions (player.js header / ACTIONS.md)
@@ -705,19 +710,22 @@ async function main() {
   // Chrome can report one huge movementX/Y right after locking: skip that first
   // event and clamp spikes so the camera doesn't spin.
   let skipMove = false;
+  const mouse = new MouseFeed();                   // mouse counts until the next game frame(s)
+  // a camera reset (H respawn, teleport, ladder warp) also drops mouse counts banked for later game frames
+  { const reset = follow.reset.bind(follow); follow.reset = (...r) => { mouse.dx = mouse.dy = 0; return reset(...r); }; }
   document.addEventListener('pointerlockchange', () => { skipMove = true; });
   const clampMv = v => Math.max(-150, Math.min(150, v));   // GUESS: browser input spike clamp (port convenience, not game logic)
   addEventListener('mousemove', e => {
     if (document.pointerLockElement !== canvas) return;
     if (skipMove) { skipMove = false; return; }
-    if (!frozen && !detached) follow.addMouse(clampMv(e.movementX), clampMv(e.movementY));   // the game's USB-mouse look (player.js MOUSE_SCALE)
+    if (!frozen && !detached) mouse.add(clampMv(e.movementX), clampMv(e.movementY));   // the game's USB-mouse look (player.js MOUSE_SCALE, MouseFeed)
   });
   let drag = null;
   canvas.addEventListener('pointerdown', e => { if (!document.pointerLockElement) drag = [e.clientX, e.clientY]; });
   addEventListener('pointerup', () => { drag = null; });
   addEventListener('pointermove', e => {
     if (!drag || document.pointerLockElement || frozen || detached) return;
-    follow.addMouse(e.clientX - drag[0], e.clientY - drag[1]); drag = [e.clientX, e.clientY];
+    mouse.add(e.clientX - drag[0], e.clientY - drag[1]); drag = [e.clientX, e.clientY];
   });
   addEventListener('resize', () => {
     renderer.setSize(innerWidth, innerHeight);
@@ -791,9 +799,11 @@ async function main() {
     requestAnimationFrame(frame);
     const dt = frozen ? 0 : Math.min(clock.getDelta(), 8 * TICK);   // GUESS: same cap as below (port convenience)
     acc += dt;
-    if (!packsDone) { acc = 0; pressed.clear(); }   // clip packs still loading: draw only, no game frame
+    if (!packsDone) { acc = 0; pressed.clear(); mouse.dx = mouse.dy = 0; }   // clip packs still loading: draw only, no game frame (no mouse banked)
     let n = 0;
+    const due = Math.min(Math.floor(acc / TICK), 8);   // game frames this rendered frame runs (MouseFeed)
     while (acc >= TICK && n < 8) {
+      mouse.feed(follow, due - n);                 // this game frame's share of the mouse counts
       // the camera runs first in the game frame: it follows the player as the last frame
       // left him, and this frame's stick-to-world uses its new matrix (player.js camera notes)
       const inp = readInput();

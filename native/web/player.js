@@ -1211,6 +1211,29 @@ export const CAM_SPAWN = { pitch: -0.0383, yaw: 0.9083, dist: 30.5358 };
 // right stick += mouse counts x DAT_004e1004 (0.1), clamped to +-1, then / step
 // (FUN_003256d8 when DAT_004e17d0). GUESS: one browser movementX/Y pixel = one USB count.
 export const MOUSE_SCALE = 0.1;
+// Page input plumbing (not game logic): the browser delivers mousemove once per rendered
+// frame, the game reads its USB counts every game frame (FUN_00254ac8, DAT_004e1230 /
+// DAT_004e1234). The counts gathered since the last game frame are shared out evenly over
+// the game frames the page runs for this rendered frame, so a frame rate under 50 does not
+// leave game frames with 0 counts: in mouse mode a 0-count frame drops the ramp CAM+0x1ec
+// straight to 0 (FUN_0032ace0, LAB_0032b950 with FUN_00254db0() != 0) and the turn crawled.
+// GUESS: the even split (a real mouse's per-frame counts are not decoded; see the audit).
+export class MouseFeed {
+  constructor() { this.dx = 0; this.dy = 0; }
+  add(dx, dy) { this.dx += dx; this.dy += dy; }
+  // before each game frame; left = game frames still to run for this rendered frame
+  feed(cam, left) {
+    const k = 1 / Math.max(1, left), x = this.dx * k, y = this.dy * k;
+    this.dx -= x; this.dy -= y;
+    if (x !== 0 || y !== 0) cam.addMouse(x, y);
+  }
+}
+// OPTION mouselook: play.html?mouselook=direct (off by default, not in the game). Mouse
+// pixels turn yaw / pitch directly by `sens` rad per pixel (?mousesens= in degrees per pixel,
+// default 0.15), skipping the look stick (clamp, / step, ramp, deadzone) for the mouse only;
+// a frame with mouse movement counts as turning for the idle counter CAM+0x1e2, as the
+// stick does. Pitch limits and everything else stay the game's.
+export const MOUSE_SENS_DEFAULT = 0.15;
 
 const wrapA = a => {                              // the inline wrap in FUN_0032ace0
   if (a > 314.15927 || a < -314.15927) return 0;
@@ -1315,6 +1338,7 @@ export class FollowCamera {
     this.camera = camera; this.rays = rays; this.type = type;
     this.mouseActive = false;                     // DAT_004e17d0
     this.look = [0, 0];                           // mouse counts gathered for the next frame
+    this.mouseDirect = null;                      // OPTION mouselook: { sens } (rad per pixel) or null = the game's path
     this.hit = false;                             // CAM+0x1e8 0x80: the collision hit last frame
     this.reset({ x: 0, y: 0, z: 0 });
   }
@@ -1409,6 +1433,9 @@ export class FollowCamera {
     // FUN_00254ac8: mouse counts set the latch DAT_004e17d0; a pad stick past 0.3 (after
     // x|x|) clears it; the sum is clamped to +-1
     let sx = 0, sy = 0;
+    const MD = this.mouseDirect;                  // OPTION mouselook: the mouse bypasses the stick
+    const dmx = MD ? this.look[0] : 0, dmy = MD ? this.look[1] : 0;
+    if (MD) this.look = [0, 0];
     const fx = this.look[0] * MOUSE_SCALE, fy = this.look[1] * MOUSE_SCALE;
     if (fx !== 0.0 || fy !== 0.0) this.mouseActive = true;
     const px = p.pad ? p.pad[0] * Math.abs(p.pad[0]) : 0, pyy = p.pad ? p.pad[1] * Math.abs(p.pad[1]) : 0;
@@ -1439,7 +1466,7 @@ export class FollowCamera {
     this.flags14 = 0;
     if (!(Math.abs(sx) <= LOOK_DEADZONE && Math.abs(sy) <= LOOK_DEADZONE)) this.flags14 |= 1 << 10;
     // stick-idle counter CAM+0x1e2: -20 while turning, then +1 per frame to 30
-    if (sx === 0) this.idle = this.idle > 29 ? 30 : Math.min(30, this.idle + Math.trunc(S));
+    if (sx === 0 && dmx === 0 && dmy === 0) this.idle = this.idle > 29 ? 30 : Math.min(30, this.idle + Math.trunc(S));
     else this.idle = -20;
     const f30 = this.idle * 0.033333335, f29 = f30 * 0.0025;
     // auto turn-behind: yaw toward the wanted move direction (C+0xc0) by the gain;
@@ -1463,10 +1490,12 @@ export class FollowCamera {
     const ry = T.rate[0] * S * lt, rp = T.rate[1] * S * lt;
     this.yaw = wrapA(this.yaw + sx * ry);
     this.pitch += sy * rp;
+    // OPTION mouselook: direct mouse turn (x right = yaw +, y down = pitch -, as the stick's signs)
+    if (MD && (dmx !== 0 || dmy !== 0)) { this.yaw = wrapA(this.yaw + dmx * MD.sens); this.pitch -= dmy * MD.sens; }
     // follow nudge (CAM+0x1e8 bit 0x8000): turn by the look point's angle change, capped.
     // The bit is set by type 0xc's enter FUN_00330240 (0x330368) and cleared by 0xd's
     // FUN_00330748 (0x330938) and 0xe's FUN_00330d18 (traced: set exactly while the type is 0xc)
-    if (f8000 && this.idle > 0 && smag === 0 && !fun253f50()) {
+    if (f8000 && this.idle > 0 && smag === 0 && !fun253f50()) {   // (OPTION mouselook: idle is -20 after a mouse turn)
       this.yaw += clampf((L * 0.2 + 0.8) * f30 * 1.0 * e2[1], -ry, ry);
       this.pitch += clampf(f30 * 0.25 * e2[0], -rp, rp);
     }
