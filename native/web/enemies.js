@@ -1,6 +1,7 @@
-// z128's stage-load soldiers (e027), standing idle. Separate module, hooked from play.js;
-// ?enemies=0 turns it off. They don't collide, think, take damage or move yet (AI: notes/
-// enemy-research.md §3; brain 0x3614b0 not decoded).
+// z128's e027 soldiers. Separate module, hooked from play.js; ?enemies=0 turns it off. The AI
+// (enemy_ai.js) drives records 44 / 45 (play.js `extra`); no collision or damage taken yet.
+// Start state = the sea-of-flames save: the stage-load soldiers 41 / 42 are dead there and have
+// no body, so they are not drawn (placements.json `dead`, export_web_placements.py SAVE_STATE_DEAD).
 //
 // Data (gitignored, tools/byo/build_web.sh): data/enemies/placements.json
 // (export_web_placements.py, from 06800001.bin sections 0/1), e027.glb / e027.json /
@@ -9,7 +10,8 @@
 // Which placements: FUN_00319190 at stage load loads a status whose placement has flag bit 3
 // and whose tag is an event actor (FUN_00376938); FUN_005453b0 -> FUN_00558f68 activates it.
 // The event-actor tags are a GUESS stand-in in the exporter (EVENT_ACTORS). Of those, the e027s
-// are records 41 / 42 (e_Sol_11 / 12); record 43 is e048 (no model export yet).
+// are records 41 / 42 (e_Sol_11 / 12); record 43 is e048 (no model export yet). All three are dead
+// and bodiless in the save (HP 0, actor +0x28 bit 0 clear, +0xe8 = 0): skipped below.
 //
 // Matrix: FUN_00315050 copies +0xc / +0x1c / +0x2c into the status, FUN_0055a168 builds
 // rows (up x face, up, face, pos). The page's body convention (play.js bodyYaw): heading
@@ -43,7 +45,7 @@ const CLIP = 'r_gst';            // GUESS: the idle the brain requests at activa
 const RATE = 0.5;                // MP+0x40c of every idle e027 in the save state (= FUN_003456c0 rate 1.0, as Vincent's)
 const VARIANT = 0;               // GUESS: LOD byte obj+0x44b (who sets it not decoded; notes/enemy-model.md); 0 = e027.glb
 // GUESS: MP+0x450 (set by script, FUN_00342240). Read from the save state's idle soldiers
-// (records 44-49, 66: 122 for six, 128 for 66), not from 41 / 42 (dead there, opening event).
+// (records 44-49, 66: 122 for six, 128 for 66), not from 41 / 42 (shot dead before the save).
 const SCALE_BYTE = 122;
 // GUESS: model bbox centre (MP+0x90 + MP+0xa0)/2 for FUN_005a72a8's actor point, read from the
 // save state's idle soldiers (object 154, e027 idle; not records 41 / 42); FUN_005a8850 ->
@@ -69,9 +71,12 @@ function light2(light, p, dir, col) {
   else dir.set(0, 0, 0);
 }
 
-export async function setupEnemies({ root, litPatch, light }) {
+export async function setupEnemies({ root, litPatch, light, extra = [] }) {
   const P = await json(DIR + 'placements.json');
-  const list = P.placements.filter(p => p.model === 'e027');
+  // extra: section-1 records the AI drives (enemy_ai.js; ai.json records, up = (0,-1,0) as every z128 placement)
+  // dead in the save state (the page's start): no body, nothing drawn (FUN_00559748 builds none for a dead status)
+  const list = P.placements.filter(p => p.model === 'e027' && !p.dead)
+    .concat(extra.map(r => ({ rec: r.rec, tag: 'rec' + r.rec, model: r.model, pos: r.pos, face: r.face, up: [0, -1, 0] })));   // GUESS: ai.json carries no up vector; (0,-1,0) as for 41/42 (the up check can't fire here)
   if (!list.length) return null;
   const stem = VARIANT === 0 ? 'e027' : `e027_v${VARIANT}`;
   const [gltf, side, lpBuf] = await Promise.all([
@@ -81,7 +86,6 @@ export async function setupEnemies({ root, litPatch, light }) {
   ]);
   const lp = side.local_pose;
   if (!lp || !lp.clips[CLIP]) throw new Error(`e027.json: no local pose for ${CLIP}`);
-  const frames = side.clips[CLIP].frames;                      // 200, looped (FUN_005aa2a8 resets at n)
   const s = SCALE_BYTE / 128;
   const Y = new THREE.Vector3(0, 1, 0);
   const actors = [];
@@ -112,7 +116,7 @@ export async function setupEnemies({ root, litPatch, light }) {
     // FUN_005a9db0 through SpeedAnimator's own code (setLocalPose / poseLocal use only this.lp)
     const pose = Object.create(SpeedAnimator.prototype);
     pose.setLocalPose(lp, lpBuf, scn);
-    const a = { rec: pl.rec, tag: pl.tag, body, prims, pose, frame: 0 };   // GUESS: frame 0 at activation, all in phase
+    const a = { rec: pl.rec, tag: pl.tag, body, prims, pose, frame: 0, clip: CLIP };   // GUESS: frame 0 at activation, all in phase
     if (light && litPatch) {
       const p = new THREE.Vector3(...ACTOR_CENTRE).applyAxisAngle(Y, body.rotation.y).add(body.position);
       const dir = new THREE.Vector3(), col = new THREE.Vector3();
@@ -132,12 +136,18 @@ export async function setupEnemies({ root, litPatch, light }) {
   }
   return {
     actors,
-    // one game frame: draw pose = this frame's clip frame, then FUN_005aa2a8's advance
-    tick() {
+    // one game frame: draw pose = this frame's clip frame, then FUN_005aa2a8's advance.
+    // ai (enemy_ai.js world, optional): the clip each AI-driven soldier's body asked for
+    // (C+0x570); a new clip starts at frame 0. GUESS: no blend between clips (flags 0x82 / 0x83
+    // of FUN_00345818 not translated), every clip loops at its frame count.
+    tick(ai) {
       for (const a of actors) {
-        a.pose.poseLocal(CLIP, a.frame, null, 0, 1);
+        const s = ai && ai.actors.find(x => x.rec === a.rec);
+        const want = s && lp.clips[s.C.clip] && side.clips[s.C.clip] ? s.C.clip : a.clip;
+        if (want !== a.clip) { a.clip = want; a.frame = 0; }
+        a.pose.poseLocal(a.clip, a.frame, null, 0, 1);
         a.frame = Math.fround(a.frame + Math.fround(Math.fround(RATE * 1.0) * STEP));
-        if (frames <= a.frame) a.frame = 0;
+        if (side.clips[a.clip].frames <= a.frame) a.frame = 0;
       }
     },
   };

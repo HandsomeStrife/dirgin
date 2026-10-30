@@ -25,6 +25,17 @@ SEC0_STRIDE, SEC1_STRIDE = 0x20c, 0x74
 # GUESS: event actor tags (DAT_0046f850+0x1800 table, read from the save state; which event
 # file fills it is not decoded; see notes/enemy-placement.md, notes/fidelity-audit.md)
 EVENT_ACTORS = ("p_Vin", "e_Sol_11", "e_Sol_12", "e_Sol_13")
+# Records dead in the save state (the page's start): status +0x20 HP 0, actor +0x28 bit 0 clear
+# (inactive), no body (+0xe8 = 0) or AI (+0x184 = 0), no motion player in the draw list
+# (DAT_005b3788), so the game draws nothing for them. They were shot (actor +0x142 part 6 / 10 / 4,
+# +0x118 bit 0x100 = corpse settled, FUN_00539570): their scripts 105-107 target Vincent on
+# activation (event 3: cmd 0x193 + 0x143), i.e. they are the start deck's guards, not killed by a
+# cutscene. FUN_00559748 returns before building a body for a dead status (FUN_00316cf8), so they
+# stay without one. What removes a settled corpse is not decoded (notes/enemy-placement.md).
+# GUESS: records dead at the save, copied from the save state's RAM like EVENT_ACTORS (not a decode of
+# the stage's start; see notes/fidelity-audit.md 'Start state'). The hero dump, older than the save,
+# still draws record 42's corpse; what removes a settled corpse is not decoded.
+SAVE_STATE_DEAD = (41, 42, 43)
 
 
 def sections(b):
@@ -74,13 +85,14 @@ def main(argv):
         event_actors=dict(tags=list(EVENT_ACTORS), guess='table DAT_0046f850+0x1800 as in the save state; filling event not decoded'),
         matrix='FUN_0055a168: rows (up x face, up, face, pos); heading = atan2(face.x, face.z)',
         load_flag_records=[dict(rec=r['rec'], model=r['model'], tag=r['tag']) for r in load],
-        placements=[dict(r, matrix=matrix(r), glb='e027.glb') for r in drawn],
+        save_state_dead=dict(records=list(SAVE_STATE_DEAD), note='HP 0, inactive, no body in the save state: not drawn'),
+        placements=[dict(r, matrix=matrix(r), glb='e027.glb', dead=r['rec'] in SAVE_STATE_DEAD) for r in drawn],
     )
     os.makedirs(argv[1], exist_ok=True)
     p = os.path.join(argv[1], 'placements.json')
     json.dump(out, open(p, 'w'), indent=1)
     print(f'{len(R)} placements, {len(load)} with load bit 3, drawn (event actor, e027): '
-          + ', '.join(f"{r['rec']} {r['tag']}" for r in drawn))
+          + ', '.join(f"{r['rec']} {r['tag']}{' (dead in the save: not drawn)' if r['rec'] in SAVE_STATE_DEAD else ''}" for r in drawn))
     print(f'wrote {p}')
 
 

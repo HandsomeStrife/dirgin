@@ -647,3 +647,136 @@ Constants: zone scale × 0.05, cap 9999, stagger 60-tick window and 1 / 30 / 60,
 0x48, push-back (4, 4), death knock-back (12, 16), flinch throttle 12 / 6 ticks, aim mix 0.15.
 Still open: the 30 → 31 damage gap (§10.2); class 0x1e and 0x36 clip choice; FUN_005618d0 /
 FUN_00562898 (big / knock-down reactions, not reached: they need 8 / 15 hits in a chain).
+
+## 11. How an enemy bullet hits or misses Vincent (worker 0127, traces `k_bullet1` / `k_bullet2`)
+
+Translation plan to replace the page's `BULLET_R` stand-in. D = decoded from the code, T = matches the
+call log (below), L = likely. Same game objects as §9.8 / §9.11.
+
+### 11.0 The f875 "miss" explained
+**It's the fire-time spread, and the RNG stream it draws from.** Each e027 shot tilts its direction by
+up to ±12.2° (§11.2), using two draws from the shared GameRandom (FUN_0040b5c0). Vincent's own
+shots draw from the same stream (2 per pellet, 3 pellets per shot in this save, spread 2.918°).
+- k_enemy_engage7 had no `p_hp` field, so it never showed a miss. Re-run with the engage7 inputs
+  (`k_bullet1`): #67's f875 bullet draws r1 = 0.4294 → 1.7° tilt → **hits** at f879 (HP 736 → 692,
+  part 0), the same frame as the page's sim. T
+- k_enemy_engage8 (`k_bullet2`): Vincent fired at f831 and f861 (6 pellets, 12 draws), so #67's f875
+  draws are r1 = 0.0966, r2 = 0.7922 → **9.84° tilt**. Measured angle between (aim − muzzle) and the
+  bullet's direction: 9.8°. The bullet passes ~19 u wide of his capsule (radius 5): no capsule
+  hit, no part test, no damage. T
+- #66 standing in the path is skipped by the object filter (§11.3 step 2: same side). T: filter
+  FUN_0055d100 returns 0 for #66 and #67, 1 for Vincent, every frame.
+
+### 11.1 Timeline of one shot (T, k_bullet1 / k_bullet2; frames = record frames)
+| frame | what | function |
+|---|---|---|
+| F (r_st_f) | bullet spawned, spread applied, countdown +0x142 = 2 | FUN_005694f8 → FUN_005409a8 → FUN_005405b0 → FUN_00552dd8 |
+| F+1 | countdown 2 → 1, no move | FUN_005549f0 |
+| F+2 | countdown 1 → 0: **room probe** (one ray, §11.4), no move | FUN_00554970 → FUN_00553808 |
+| F+3… | move 60 u, then hit-test the frame's segment | FUN_00556068, FUN_00556870 → FUN_005442d8 |
+T: #66's f786 shot → hit test and HP 780 → 736 at 789 (31 u away, first segment); #67's f875 shot →
+first segment 878 (0–60 u, misses), second 879 (hits in k_bullet1).
+
+### 11.2 Spawn and spread (once per pellet, W+0x16 = 1 pellet for e027)
+1. **Muzzle**: W+0xb4 = 0 (0..3) → FUN_003464b0(C, out, W+0xb4, W+0xb5 = −1) (FUN_005694f8). D
+2. **Aim** (FUN_003605d8 → FUN_00360558 → FUN_00563438): shooter +0x118 bits 1 and 2 set (#66/#67
+   0x10000203) → FUN_00562ff8: target = object id shooter +0x11c (0x16 = Vincent), aim = target
+   vt+0x5c = **FUN_00563720**: C+0x765 ≠ −1 (Vincent: **3**) → world position of bone C+0x765
+   (FUN_0054a768, matrix row 3); else FUN_005634e0(actor, out, 3). Without bits 1/2: own position +
+   facing × 1000. T: aim point is inside Vincent's capsule, 13 u above his feet. D
+3. **Spread FUN_005405b0** (taken when W+4 has neither 0x100000 nor 0x200000; e027 W+4 = 0x100). D
+   - d = |aim − muzzle|; dir = normalize(aim − muzzle).
+   - s = W+0x1c if d < T+0xd0 (**120**), W+0x20 if d < T+0xd4 (**380**), else W+0x24. e027: **25 / 25 / 25**.
+     (T = *(DAT_0046dd68 + 0x14).)
+   - s /= FUN_0031cf08(1.0, status+0x10) = (k0·lvl + k1)·0.01 + 1, k = T+0x268 (0.15, 2.5) when
+     G+0x60 ≥ 7 (here 20), else DAT_0046e220 (0, 50). e027 lvl 0 → ÷ 1.025.
+   - s = FUN_00318518(s, status): status+0xc0 ≠ 0 → × (100 − short T[0x44c + ((eq+0x10 >> 19) & 0x1e)])
+     × 0.01. e027: +0xc0 = 0, unchanged.
+   - FUN_00317b68(status) (status+0x64 bit 0x20 and +0x20 top nibble 2) → s × 0.5. e027: no.
+   - FUN_00326500() and status+0x60 bit 2 and FUN_003251f8() → s × {1, 0.33, 0.75, 0.1}[FUN_00317cf0]
+     (DAT_0058b550). e027: +0x60 = 0, no.
+   - **e027: s = 24.390244°.** T (FUN_0025a058's float argument, every e027 shot).
+4. **FUN_0025a058(s, dir)**: r1 = rand; e = unit axis: if |dy| ≤ |dx| or |dz| ≤ |dx| then (z if |dz| ≤
+   |dy| else y) else x; p = normalize(dir × e); dir1 = rotate(dir, about p, (r1 − 0.5)·s·π/180);
+   r2 = rand; dir2 = rotate(dir1, about dir, 2π·r2). Rotations are right-handed (Rodrigues) with these
+   signs. T: reproduces all three logged shots to 5e-5 (test vectors below). D (code) / T (signs).
+5. aim' = muzzle + dir2 × W+0x18 × 10. Then FUN_00552dd8: +0x80 = dir2, +0xc0 = +0xe0 = +0x90 =
+   muzzle, +0xd0 = muzzle + dir2 × +0x15c, +0x15c = W+0x18×10 + 15 (DAT_0046ed6c; 20 = DAT_0046ed70
+   when FUN_00321e20(W)), +0x130 = |+0xd0 − muzzle|, +0x12c = W+0x2c × 0.16666667 = **50 u/tick**,
+   +0x124 = 0, +0x128 = owner id (short +0x0a of FUN_0055a370(actor): #66 0x2c, #67 0x2d), +0x134 = W+0x40, countdown 2.
+   Flags for e027 bullets: **0x402001** (0x2000 = room probe at spawn, no 0x800 = thin bullet, no
+   0x8000, no 0x200, no 0x40). D, T
+- Test vectors (muzzle, aim, r1, r2 → dir2): k_bullet2 f875 (−963.7263, −173.8069, −1084.9316),
+  (−1069.9387, −159.2386, −1105.2223), 0.09658, 0.79215 → (−0.9340, 0.0872, −0.3464); k_bullet1 f875
+  (−963.8456, −173.0982, −1085.4814), (−1034.6635, −157.4682, −1103.1165), 0.429386, 0.731939 →
+  (−0.9405, 0.2127, −0.2650); f786 (−1046.2216, −155.2970, −1098.2831), (−1074.4689, −158.2524,
+  −1105.6091), 0.549953, 0.86268 → (−0.9682, −0.0870, −0.2344).
+- **RNG order matters**: the same stream feeds the fire timer jitter (§9.6), initial rounds and
+  Vincent's pellets. The page must share one GameRandom in the game's call order (§9.11: the MT state
+  is checked against the save).
+
+### 11.3 Per frame (FUN_005549f0, after the countdown)
+1. +0x124 += step (1.2). **Move FUN_00556068**: +0xe0 = +0x90; new = +0xc0 + +0x80 × (+0x124 ×
+   +0x12c); dist = |new − +0xc0|. dist > +0x130 → +0x90 = +0xd0, done (bit 0x800000); else dist >
+   +0x15c → done; else +0x90 = new. Also done when +0x124 > 1800 or dist > 3000. D, T (60 u/frame).
+2. **Hit test FUN_00556870 → FUN_005442d8(mgr, A = +0xe0, B = +0x90, bullet)**. A hit clears bit 1 and
+   ends the bullet. No hit: e027 bullets (bit 0x2000) return 0 here, with **no per-frame wall test**
+   (walls were handled by §11.4). D, T
+   FUN_005442d8, in order:
+   - Walk the object grid cells along A→B (FUN_0036d400(it, mgr+0x1170, 4, A, B), FUN_0036df00;
+     cell list FUN_00589940). Each object needs +0x38 bit 0 and +0x28 bit 0.
+   - **Filter vt+0x1ac = FUN_0055d100** (player and e027): false if bullet +0x120 bit 0x4000; obj +0x28
+     bit 0x100000; target dead (FUN_00316cf8) unless the +0x28 bit 0x20 / vt+0x37c < 8-tick case;
+     obj +0x188 bit 39; FUN_00552ad0(bullet). Owner +0x128 ≠ −1: owner == obj +0x100 id → false; if
+     mgr+0x2b0 ≥ 0: FUN_0031d1a8(team(owner), team(obj)) = 0 (same side) → bullet bit 0x200
+     (friendly fire; clear for e027), else → bullet bit 0x8000 clear. T: 0 for #66/#67, 1 for Vincent.
+   - Thin bullet (bit 0x800 clear): mgr+0x1294 = bullet; **part test vt+0x17c = FUN_0055bda8(obj, 0,
+     hit, nrm, A, B)**; mgr+0x1294 = 0. (Bit 0x800 bullets use the sphere path vt+0x19c / +0x184 /
+     +0x3c instead; not e027.)
+   - Hit distance |A − hit|. Objects with +0x29 bit 0 (or bit 0x40 bullets on actors) are pierced
+     (≤ 32 kept); otherwise the nearest is kept. After the walk: pierced ones nearer than the nearest
+     get vt+0x1b4; the nearest: mgr+0x10c0/0x10d0 = hit/nrm (FUN_00541b08), **r = vt+0x1b4(obj,
+     bullet, hit, nrm)**, bullet +0xf0 = hit, +0x100 = nrm, FUN_00552ac8(bullet, actor id). Returns r.
+3. **FUN_0055bda8, mode 0** (Vincent and e027 alike):
+   - Capsule FUN_0055bc90 → FUN_0054b2b0: P0 = actor position, P1 = P0 + (0, −18, 0); radius actor
+     +0x2c = **5** (+0x160 when +0x118 bit 0x1000000). T (both actors). L: the 18 comes from
+     FUN_0054b2b0 (not read).
+   - FUN_0025c0f8(r, hit, nrm, A, B, P0, P1) (segment vs capsule; hit = entry point); if none,
+     FUN_0025c770(r, B, P0, P1) (B inside). Neither → **return 0 (miss)**. T: k_bullet2 f878/879.
+   - Capsule hit, model actor+0x180: player only (+0x28 bit 4, mgr+0x1294 set): vt+0x18c =
+     **FUN_00573720** deflect test → return 1 (see 4). Then **FUN_005ad118(model, A, B)** = part index
+     (per-part volumes). −1, or part bit set in C+0x77c → FUN_0055df90 (near miss, no damage),
+     **return 0**. Else actor +0x142 = part, +0x19c = zone record → return 1. T: f789 part 6, f879
+     part 0.
+4. **Vincent's handler vt+0x1b4 = FUN_005720c8**: vt+0x18c (FUN_00573720) true → deflect (FUN_005694a0
+   (…, 3), cue 0x48800, FUN_0054b158; no damage). Else +0x118 bit 0x20 → no damage; +0x28 bit 0x20 →
+   FUN_00571938; else **FUN_0055db50** = damage §10.2 (45 → 44, T). Then FUN_00567c08 (hit effect)
+   unless bullet +0x140 bit 32. e027's handler is FUN_0055db50 directly.
+   - FUN_00573720 is true when status+0x61 bit 0 is clear, now − actor +0x27c < **8** ticks
+     (DAT_0046ee30), bullet bit 0x800 clear and the bullet's origin is within ±**75°** (1.309 rad,
+     DAT_0046ee34) of his facing. Its setter (+0x27c: FUN_0056de80 / 0056ec08 / 00571ee8 / 00573360)
+     is **not decoded**; it was false in both traces. Leave it out.
+
+### 11.4 Room probe (once, at countdown end; FUN_00554970 → FUN_00553808, bullet bit 0x2000)
+Unless bullet bit 0x20: ray from +0xc0 to +0xd0 + dir × 0.1 against the stage object
+(FUN_0053bb58: object index mgr+0x1c → vt+0x17c = **FUN_0054fc38**, probe index 0 → class mask
+**0x18d** (DAT_0058c990[0]) → FUN_0026a320(A, B, mask)). Hit → +0xd0 = +0xf0 = +0x110 = hit point,
++0x100 = normal, +0x130 = |hit − origin|; the move then stops there. D. T: k_bullet2 f875 bullet
+stops at 362 u (x −1302), short of its 515 u range. The mesh ray is the one the walk probes use
+(notes/actions-research.md §2); FUN_0026a320 itself isn't read here.
+
+### 11.5 Translation order for the page (replaces BULLET_R)
+1. Spawn (11.2): muzzle, aim = Vincent's bone 3, spread with the shared GameRandom (2 draws), +0xd0
+   end, countdown 2.
+2. Countdown end: stage ray mask 0x18d → shorten +0xd0 / +0x130.
+3. Per frame: move (11.3.1), then for each object along the segment: filter FUN_0055d100, capsule
+   (P0, P0 + (0,−18,0), r 5), part ray FUN_005ad118 on the model's part volumes; nearest hit →
+   FUN_005720c8 → FUN_0055db50.
+4. Not decoded, keep as labelled stand-ins: FUN_005ad118's per-part volumes ('mkd'/'skd', §9.10)
+   (a capsule-only hit would hit more often than the game; the near misses in §9.10 show parts
+   matter); FUN_0026a320 (use the page's existing walk-mesh ray if it is a translation); the deflect
+   window setter.
+
+Call log: `TRACE_CALLLOG=bullet` / `spread` (tools/trace/calllog.py; frames via
+`TRACE_CALLLOG_FRAMES=780:900`), scripts `k_bullet1` (= engage7 inputs, to f900) and `k_bullet2`
+(= engage8 inputs). Out: tools/trace/out/k_bullet*.calls.jsonl and out/spread/.

@@ -78,7 +78,16 @@ def run(script_path, out_dir, state, scratch, timeout_s):
     table = fields.field_table(bases)
     frames = build_frames(script)
     log_from = int(script.get("log_from", 0))
+    clog = os.environ.get("TRACE_CALLLOG")     # optional call logger (calllog.py)
+    if clog:
+        import calllog
+        log_end = hook.LOG_END
+        hook.LOG_END = log_end - calllog.CLOG_BYTES
     rec = hook.patch_memory(ee, frames, table, log_from)
+    if clog:
+        hook.LOG_END = log_end
+        lo, hi = (int(x) for x in os.environ.get("TRACE_CALLLOG_FRAMES", "0:100000").split(":"))
+        cstart, _, chooks = calllog.patch(ee, clog, lo, hi, log_end)
     os.makedirs(scratch, exist_ok=True)
     tstate = os.path.join(scratch, "trace_%s.p2s" % name)
     write_p2s(tstate, {"eeMemory.bin": bytes(ee)}, state)
@@ -113,6 +122,9 @@ def run(script_path, out_dir, state, scratch, timeout_s):
     wall = time.time() - t_start
     nlog = len(frames) - log_from
     raw = p.read_block(hook.LOG, ((rec * nlog + 7) // 8) * 8)
+    if clog:
+        wp = p.read32(calllog.CLOG_CTRL + 8)
+        craw = p.read_block(cstart, max(8, wp - cstart)) if wp > cstart else b""
     systemctl("stop", UNIT)
 
     os.makedirs(out_dir, exist_ok=True)
@@ -129,6 +141,12 @@ def run(script_path, out_dir, state, scratch, timeout_s):
             if d["frame"] != i + log_from:
                 raise RuntimeError("log record %d is corrupt (index %d)" % (i, d["frame"]))
             fh.write(json.dumps(d) + "\n")
+    if clog:
+        with open(os.path.join(out_dir, name + ".calls.jsonl"), "w") as fh:
+            fh.write(json.dumps(dict(meta=dict(set=clog, frames=[lo, hi], hooks=[
+                dict(id=h["id"], name=h["name"], sites=h["sites"]) for h in chooks]))) + "\n")
+            for e in calllog.decode(craw, chooks):
+                fh.write(json.dumps(e) + "\n")
     os.unlink(tstate)
     return path
 

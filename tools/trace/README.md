@@ -191,3 +191,12 @@ notes/enemy-research.md §6. Script: scripts/k_enemy_engage*.json. k_enemy_engag
 0119) climbs the ladder and crosses trigger volume 95 (x -1074, y -146): e027 #66/#67 wake at
 frame 784 (AI mode 2, target player) and fire; see §8 and tools/stage_events.py. k_enemy_engage12 (worker 0124) kills #66, sweeps the aim onto
 #67 (new fields `cam_fwd`, `cam_eye`) and records its non-lethal hit and death (§10).
+
+### Call logger (TRACE_CALLLOG, worker 0127)
+
+`TRACE_CALLLOG=<set>` (sets in `calllog.py`: `bullet`, `spread`) wraps chosen game calls, either a
+`jal` site inside a function or a vtable slot, with a stub. The stub calls the real function and logs
+a0, a1, v0, f0, f12 and up to 25 words read through the argument pointers after the call. Entries
+are only taken in `TRACE_CALLLOG_FRAMES=lo:hi` and are written to `<name>.calls.jsonl`. The log uses
+the top 0x30000 bytes of the frame-log area, and scripts must be ≤ 1000 frames. Used for
+notes/enemy-research.md §11 (scripts k_bullet1 / k_bullet2).
