@@ -600,17 +600,34 @@ export function createEnemyAI(opts) {
     if (a.astate === st) return 0;
     a.astate = st;
     if (st === 3) request(a, 0x40);              // GUESS: state 3 -> motion 0x40 (r_st_a), see MOTION
-    // GUESS: C+0x590 bit 24 ('gun out', written only by FUN_00565d78) set on entering actor state 3 (aim);
-    // the plain activation (FUN_00559748 -> FUN_0055b8e0(a, 2, 1, 0)) doesn't call FUN_00565d78, so it
-    // starts clear; which enemy state writes it is not decoded (state table behind FUN_0055b8c0 vt+0x24).
-    // Read by the flinch's end (class 0x1e, FUN_00598950) and FUN_00341b20. e030 never enters state 3.
-    if (st === 3) a.C.gun = 1;
+    gunOnEnter(a, st);
     if (st === 7) {                              // the death motion (class 0x36); its motion: GUESS deathMotion
       a.C.motion = { cls: 0x36, t: 0 };
       a.C.clip = clipOf(a, deathMotion(a.part)) || a.C.clip; a.C.hold = true;
       events.push(`clip ${a.id} ${a.C.clip}`);
     }
     return 1;
+  }
+  // C+0x590 bit 24 ('gun out'; read by the flinch's end, class 0x1e FUN_00598950, and FUN_00341b20):
+  // FUN_0055b8e0 runs the new state's enter, actor vt+0x2fc FUN_0055bbf8 -> state class vt+0xc (classes
+  // from FUN_00537628, table DAT_004eedf0). Of the enters and leaves (vt+0x14) only these enters call
+  // FUN_00565d78 (sets / clears the bit with actor +0x100 bit 44; the page keeps only the bit):
+  //   set:   3 FUN_005380a0, 5 FUN_00538598
+  //   clear: 0 FUN_00537c68, 4 FUN_005383a8 (both only with +0x118 bit 0x10000 clear),
+  //          2 FUN_00537e70, 7 FUN_005386f0 (unconditional)
+  // The other clearing enters (6, 0xa-0xe, 0x12, 0x13, 0x15-0x17, 0x1a, 0x1b, 0x1d) are not read here;
+  // no soldier on the page enters them. Activation (FUN_0055b8e0(a, 2, 1, 0)) runs state 2's enter:
+  // the bit starts clear (C.gun: 0). FUN_0055f9d0's clear is reached only through status bit 7
+  // (FUN_0055f128 / FUN_0055f338 kind 7 -> FUN_0055f448): not on this path.
+  function gunOnEnter(a, st) {
+    switch (st) {
+      case 3: case 5: a.C.gun = 1; return;
+      case 0: case 4: if (!(a.f118 & 0x10000)) a.C.gun = 0; return;
+      case 2: case 7: a.C.gun = 0; return;
+      case 1: case 8: case 9: case 0xf: case 0x10: case 0x11: case 0x14: case 0x18: case 0x19: case 0x1c:
+      case 0x1e: case 0x1f: case 0x20: case 0x21: case 0x80: case 0xc0: return;   // enters without FUN_00565d78
+      default: warnOnce(`enemy_ai: actor state 0x${st.toString(16)} enter's C+0x590 bit 24 write not translated`);
+    }
   }
   function request(a, m) {                       // FUN_00345818 (clip change only; blend flags 0x82 / 0x83 not modelled)
     const name = clipOf(a, m);                   // the stance row C+0x7fc + m x 8

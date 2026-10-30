@@ -10,7 +10,9 @@
 //   5. Vincent's bullets (aim.js onShot -> enemy_ai playerShot): the part test's pose (enemies.js
 //      partPose) equals the drawn joints; the gun drawn with R1, the camera turned until the reticle ray
 //      crosses #66's chest: the lock takes him (aim point = his bone 3); the camera turns until the ray
-//      passes beside his body (the lock holds), R1 fires: #66 (HP 1) dies (actor state 7, AI mode 0, death clip held);
+//      passes beside his body (yaw increasing: the keep test holds the lock, then drops it; yaw
+//      decreasing: R1 fires while it holds): with the auto-lock option off the same shot leaves #66
+//      (HP 1) alive, with the lock he dies (actor state 7, AI mode 0, death clip held);
 //   6. an e048 (record 24, w class 2: stance 0x1e) gets a body and an AI actor, drawn in its stance's
 //      clip (m_gst) and posed for the part test (enemies.js partPose); after 5, so it doesn't shift #66;
 //   7. no console errors or page errors.
@@ -139,29 +141,75 @@ try {
     }
     const aimErr = Math.max(...err().map(Math.abs));
     // lock-on (lock_on.js, FUN_00328968): the ray over #66 locks him; CAM+0xa0 = his bone 3 (C+0x765)
-    const b3 = () => { const r = rows(3)[3]; const h = P.aim.core.hit; return Math.hypot(h.x - r[0], h.y - r[1], h.z - r[2]); };
-    const lockId = P.aim.lock.id, lockErr = b3();
+    // Sampled inside one game frame: the aim point (aim.js pre, start of the frame) against bone 3 of the
+    // pose it was made from, i.e. just before this frame's enemies.tick advances #66's clip. Sampled
+    // between rendered frames instead, the hit is one clip frame behind the pose (error 3e-4..1.4e-3).
+    // A stalled enemies.tick resolves after 5 s with no lock (id null), so the asserts fail instead of hanging.
+    const b3 = () => new Promise(res => {
+      const E = P.enemies, t0 = E.tick;
+      const to = setTimeout(() => { if (E.tick !== t0) E.tick = t0; res({ id: null, err: Infinity, stalled: true }); }, 5000);
+      E.tick = function (...x) {
+        E.tick = t0; clearTimeout(to);
+        const r = E.partPose(44)(3)[3], h = P.aim.core.hit;
+        res({ id: P.aim.lock.id, err: Math.hypot(h.x - r[0], h.y - r[1], h.z - r[2]) });
+        return t0.apply(this, x);
+      };
+    });
+    const { id: lockId, err: lockErr } = await b3();
     // turn off him in 0.01 rad steps: the reticle ray's distance from his body axis at his depth
-    // ('side') grows until the keep test drops the lock (the cone, 19.3 deg, is measured from S, 10 past
-    // Vincent, ~20 u short of him at this range); fire at the last step that still holds
+    // ('side') grows; the keep test (the cone, 19.3 deg, is measured from S, 10 past Vincent, ~20 u short
+    // of him at this range, then the screen box) holds the lock for some steps, then drops it.
     const side = () => { const c = P.aim.core, e = [c.eye.x, c.eye.y, c.eye.z], m = P.follow.M[2], l = Math.hypot(m[0], m[2]);
                          const f = [m[0] / l, m[2] / l], v = [a.pos[0] - e[0], a.pos[2] - e[2]], t = v[0] * f[0] + v[1] * f[1];
                          return Math.hypot(v[0] - f[0] * t, v[1] - f[1] * t); };
-    const y0 = P.follow.yaw, steps = [];
-    for (let i = 1; i <= 25; i++) { P.follow.yaw = y0 + 0.01 * i; await wait(100); steps.push({ i, id: P.aim.lock.id, side: side(), err: b3() }); }
+    // The held check is measured during the sweep, at its last held step: once dropped, the lock is only
+    // re-taken by a body hit (lock_on.js), so stepping back from the far end does not re-lock him; back
+    // on his chest (y0) the ray over his body re-locks him.
+    const y0 = P.follow.yaw, p0 = P.follow.pitch;
+    const sweep = async (n, dir, out) => {
+      for (let i = 1; i <= n; i++) { P.follow.yaw = y0 + dir * 0.01 * i; P.follow.pitch = p0; await wait(100); const s = await b3(); out.push({ i, id: s.id, side: side(), err: s.err }); }
+    };
+    // the keep test's drop, yaw increasing (no shot)
+    const up = [];
+    await sweep(25, +1, up);
+    const upHeld = up.findIndex(x => x.id !== 66), upAfter = upHeld < 0 ? [] : up.slice(upHeld);
+    const upDrop = { held: upHeld, side: upHeld > 0 ? up[upHeld - 1].side : 0, ids: [...new Set(upAfter.map(x => x.id))] };
+    // the shot, yaw decreasing: on the increasing side the muzzle's offset from the eye (over the
+    // shoulder) puts the unlocked line of fire through his part boxes
+    P.follow.yaw = y0; P.follow.pitch = p0; await wait(300);
+    const steps = [];
+    await sweep(25, -1, steps);
     const pick = steps.filter(x => x.id === 66).pop();
-    if (pick) { P.follow.yaw = y0 + 0.01 * pick.i; await wait(200); }
-    const heldId = P.aim.lock.id, heldErr = b3(), offErr = pick ? pick.side : 0;
-    const hp0 = a.hp;
+    const heldId = pick ? pick.id : steps[0].id, heldErr = pick ? pick.err : Infinity, offErr = pick ? pick.side : 0;
+    const fireI = pick ? Math.max(1, pick.i - 1) : 1, hp0 = a.hp;
+    // Counterfactual: the SAME shot (same yaw / pitch, one step short of the last held one) with the
+    // lock off (core.lockOn = false: the auto-lock option off, aim.js aimRay keeps the world ray). He
+    // must survive; then with the lock (back on his chest, the same sweep to fireI) he must die.
+    P.aim.core.lockOn = false;
+    P.follow.yaw = y0 - 0.01 * fireI; P.follow.pitch = p0; await wait(300);
+    // count the shots this press really fires (aim.js onShot), so "survives" can't pass on no shot
+    const onShot0 = P.aim.onShot; let shotsNoLock = 0;
+    P.aim.onShot = (...x) => { shotsNoLock++; return onShot0 && onShot0(...x); };
+    P.aim.press('r1'); await wait(1500);
+    P.aim.onShot = onShot0;
+    const hpNoLock = a.hp, stateNoLock = a.astate;
+    P.aim.core.lockOn = true;
+    P.follow.yaw = y0; P.follow.pitch = p0; await wait(300);
+    const again = [];
+    await sweep(fireI, -1, again);
+    const fire = again[again.length - 1] || { id: null, side: 0 };
     P.aim.press('r1'); await wait(1500);                                    // fire, the reticle off him
 
-    return { poseErr, aimErr, lockId, lockErr, heldId, heldErr, offErr, dropAt: (steps.find(x => x.id !== 66) || {}).i, hp0, hp: a.hp, astate: a.astate, mode: a.ai.mode, clip: a.C.clip, drawn: body.clip, hold: a.C.hold };
+    return { poseErr, aimErr, lockId, lockErr, heldId, heldErr, offErr, dropAt: (steps.find(x => x.id !== 66) || {}).i, fireId: fire.id, fireSide: fire.side, fireI, upDrop, shotsNoLock, hpNoLock, stateNoLock, hp0, hp: a.hp, astate: a.astate, mode: a.ai.mode, clip: a.C.clip, drawn: body.clip, hold: a.C.hold };
   });
   ok(sh.poseErr < 1e-3, `part-test pose = the drawn joints (max ${sh.poseErr.toExponential(1)})`);
   ok(sh.aimErr < 0.01, `reticle ray on #66's chest (angle error ${sh.aimErr.toFixed(4)} rad)`);
   ok(sh.lockId === 66 && sh.lockErr < 1e-3, `lock-on: #${sh.lockId} locked, aim point on his bone 3 (${sh.lockErr.toExponential(1)})`);
-  ok(sh.heldId === 66 && sh.heldErr < 0.05 && sh.offErr > 2.5, `lock held with the ray ${sh.offErr.toFixed(2)} u beside his axis: aim still on bone 3 (${sh.heldErr.toFixed(4)}); dropped after ${sh.dropAt ?? '-'} x 0.01 rad`);
-  ok(sh.hp0 === 1 && sh.hp === 0 && sh.astate === 7 && sh.mode === 0, `R1 with the reticle off #66 (auto-aim): HP ${sh.hp0} -> ${sh.hp}, actor state ${sh.astate}, AI mode ${sh.mode}`);
+  ok(sh.heldId === 66 && sh.heldErr < 1e-3 && sh.offErr > 2.5, `lock held with the ray ${sh.offErr.toFixed(2)} u beside his axis: aim still on bone 3 (${sh.heldErr.toFixed(4)}); ${sh.dropAt ? 'dropped after ' + sh.dropAt + ' x 0.01 rad' : 'held over the 25-step sweep'}`);
+  ok(sh.upDrop.held > 1 && sh.upDrop.ids.length === 1 && sh.upDrop.ids[0] === -1,
+     `keep test, yaw increasing (no shot): held for ${sh.upDrop.held} x 0.01 rad (ray ${sh.upDrop.side.toFixed(2)} u beside him), then dropped to ${JSON.stringify(sh.upDrop.ids)}`);
+  ok(sh.shotsNoLock > 0 && sh.hp0 === 1 && sh.hpNoLock === 1 && sh.stateNoLock !== 7, `the same shot (step ${sh.fireI}, ${sh.shotsNoLock} fired) with the lock off (auto-lock option off): #66 survives (HP ${sh.hpNoLock}, actor state ${sh.stateNoLock})`);
+  ok(sh.fireId === 66 && sh.hp0 === 1 && sh.hp === 0 && sh.astate === 7 && sh.mode === 0, `R1 with the reticle ${sh.fireSide.toFixed(2)} u off #66 (auto-aim, lock #${sh.fireId}): HP ${sh.hp0} -> ${sh.hp}, actor state ${sh.astate}, AI mode ${sh.mode}`);
   ok(sh.drawn === sh.clip && /^r_st(laf|bf)0$/.test(sh.clip) && sh.hold, `#66 draws his death clip ${sh.drawn} (held)`);
   // 6. an e048 (record 24). After step 5: activating it earlier shifts #66's clip phase (frames
   // spent waiting for its model), which moves bone 3 off the lock check's limit.

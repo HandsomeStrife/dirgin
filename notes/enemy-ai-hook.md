@@ -279,7 +279,11 @@ FUN_00598880, vt **0x5a5c70**, update vt+0x24 **FUN_00598950** (phase +4, done +
   motion **0x40** if C+0x590 bit 24, else motion **1** (flags 0x83) -> 2. (Off the ground, C+0x1c0 0x200
   clear: done bit only.)
 - 2: C+0x1c0 &= ~0x20; returns FUN_00341b20: next state 6 (bit 24) or 3 (C+0x590 bits 16-19 == 1: 0x16 / 0x12).
-C+0x590 bit 24 = 'gun out', written only by FUN_00565d78 (with actor +0x100 bit 44). The plain activation
-doesn't call it; which enemy state sets it is not decoded (GUESS: actor state 3). e030 (no row 0x40, never
-in state 3) goes back to row 1 = st_a. e030's C+0x568 0x200 (FUN_00564228) is read only by FUN_00341a48:
+C+0x590 bit 24 = 'gun out', written only by FUN_00565d78 (with actor +0x100 bit 44). **Writer DECODED (worker 0146):**
+FUN_0055b8e0 runs the new state's enter (actor vt+0x2fc FUN_0055bbf8 -> state class vt+0xc, classes FUN_00537628);
+state 3 FUN_005380a0 / 5 FUN_00538598 set it, 2 FUN_00537e70 / 7 FUN_005386f0 clear it (0 / 4 clear with +0x118 bit 0x10000
+clear; also 6, 0xa-0xe, 0x12, 0x13, 0x15-0x17, 0x1a, 0x1b, 0x1d); no leave (vt+0x14) writes it. So activation (state 2) starts
+it clear, the brain's state 3 sets it, death (7) clears it. FUN_0055f9d0's clear needs status bit 7 (FUN_0055f128 /
+FUN_0055f338 kind 7: FUN_0056b4e0 from overlay code 0xbeb5d0.., event script FUN_005661e8, FUN_00570c10): left out.
+e030 (no row 0x40, never in state 3) goes back to row 1 = st_a. e030's C+0x568 0x200 (FUN_00564228) is read only by FUN_00341a48:
 C+0x1c0 |= 0x20000 when C+0x590 bits 16-19 < 2 (a body flag, not the flinch).

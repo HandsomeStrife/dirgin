@@ -218,6 +218,22 @@ for (const [k, model, stand, size, deathClip] of [[28, 'e048', 'r_st_a', [5, 18]
   const n = data.model_clips[model][deathClip], want = Math.ceil(n / 0.6);
   ok(settled != null && Math.abs(settled - died - want) <= 1, `${model} #${k}: corpse settled ${settled - died} frames after the death (${deathClip} ${n} frames / 0.6 = ${want})`);
 }
+// C+0x590 bit 24 follows the actor state's enter (state class vt+0xc): state 3 (FUN_005380a0) sets it,
+// state 7 (FUN_005386f0) clears it. A woken e027 (bit set) shot dead: the death's enter clears it.
+{
+  const php = { pos: [0, 0, -200], hp: 780, id: 0x16, f118: 0, s64: 0 };
+  const ai = createEnemyAI({ data, player: php, quiet: true, log: () => {} });
+  ai.boneWorld = a => b => boneRows(P0.R[b], P0.S[b], P0.P[b], a.pos, a.face);
+  const a = ai.addActor({ rec: 45, mode: 0, pos: [0, 0, 0], face: [0, 0, 1] });
+  const gun0 = a.C.gun;
+  ai.playerShot([0, -6, -60], [0, -6, 60], straight);                     // non-lethal: wakes him
+  let woke = null;
+  for (let i = 0; i < 300 && woke == null; i++) { ai.tick(1.2, [0, 0, -200], [0, 0, -200]); if (a.astate === 3) woke = a.C.gun; }
+  ai.playerShot([0, -6, -60], [0, -6, 60], { ...straight, damage: 9999 });
+  for (let i = 0; i < 30; i++) ai.tick(1.2, [0, 0, -200], [0, 0, -200]);
+  ok(gun0 === 0 && woke === 1 && a.hp === 0 && a.astate === 7 && a.C.gun === 0,
+     `e027 #67: gun bit ${gun0} at activation, ${woke} in actor state 3, ${a.C.gun} after the death (state ${a.astate}, HP ${a.hp})`);
+}
 // e030 is shorter (height 12): a pellet 15 u up crosses the e027 / e048 cylinder (18) but not the e030's
 {
   const php = { pos: [0, 0, -200], hp: 780, id: 0x16, f118: 0, s64: 0 };
@@ -251,7 +267,7 @@ for (const [k, model, stand, size, deathClip] of [[28, 'e048', 'r_st_a', [5, 18]
     const flinched = r.clips.indexOf('stld0');
     ok(r.a.hp > 0 && flinched >= 0 && r.a.C.clip === 'st_a' && r.clips.slice(flinched).includes('st_a') && !r.ev.includes(`clip ${id} null`),
        `e030 #7: non-lethal hit (HP ${r.a.hp}) -> flinch stld0 -> back to row 1 ${r.a.C.clip} (st_a); clip events ${mine.join(', ')}`);
-    // unpinned: the hit wakes #67, actor state 3 sets the bit (GUESS), so the flinch's end asks row 0x40, never row 1
+    // unpinned: the hit wakes #67, actor state 3 sets the bit (its enter FUN_005380a0), so the flinch's end asks row 0x40, never row 1
     const g = run(45, null, P0), ge = g.ev.filter(e => e.startsWith(`clip ${g.a.id} `)), gf = ge.indexOf(`clip ${g.a.id} r_stlld0`);
     ok(g.a.hp > 0 && gf >= 0 && g.a.C.gun === 1 && ge.indexOf(`clip ${g.a.id} r_gst`, gf) < 0 && g.a.C.clip === 'r_st_a',
        `e027 #67 woken (gun bit ${g.a.C.gun}): flinch -> row 0x40, no r_gst after it (events ${ge.join(', ')})`);
