@@ -896,7 +896,12 @@ export function createEnemyAI(opts) {
   // of countdown (+0x142), so the pellets follow each other one frame apart on one line.
   // W = data/aim/weapon.json (export_web_aim.py: speed10 = W+0x2c, range10 = W+0x18, hit = W+0x4a).
   // GUESS: the pellet count is not cut by the rounds left (FUN_00319ee0; the page counts no ammo).
-  // L: no lead correction (P+8 lock-on target: the page has no lock-on, FUN_00329740).
+  // aim = P+0x2b0 = CAM+0xa0: with a lock, the target's lock point (lock_on.js via aim.js). FUN_00577480
+  // adds a lead (aim and direction += C+0x410 x |aim - muzzle| / (W+0x2c x 10) x 60) only when P+8 (a
+  // parent object, FUN_0054a720) is set: never on the page (trace k_lock13: P+8 = 0). The bullets get
+  // +0x12a = the FUN_00329740 target's id; with no W+4 bit 0x2000 (Vincent's W+4 = 0x100) there is no
+  // homing (FUN_00552dd8: +0x154 = W+0x3c only with that bit), and +0x12a only feeds FUN_00567ef0's
+  // HUD popup at the bullet's end (FUN_00554ea8; not on the page).
   // chest = marker 1 (FUN_00342000; Vincent: bone 5, offset 0): FUN_00563148 first pulls the muzzle
   // back along the shot by 0.8 x |muzzle - chest| (unless actor +0x118 bit 0x1000). Then per pellet
   // FUN_005405b0 (W+4 without 0x100000 / 0x200000): s = W+0x1c / +0x20 / +0x24 by |aim - muzzle|
@@ -985,6 +990,34 @@ export function createEnemyAI(opts) {
     return 1;
   }
   const recModel = a => data.records[a.rec] ? data.records[a.rec].model : 'e027';
+
+  // The soldiers as the lock-on (lock_on.js lockFrame, FUN_00328968) sees them: the active actors.
+  // point = vt+0x5c FUN_00563720: bone C+0x765's world position (C+0x765 = the zone header's byte
+  // +0x14, FUN_00340760 at activation: ai.json lock_bones, 3 for z128's soldiers, trace k_lock13), else
+  // FUN_005634e0(actor, 3) = actor +0x30 - 2 up the body; that point is also the line-of-sight end.
+  // alive = HP != 0 (FUN_00316cf8), lockable = +0x38 bit 2 and alive (vt+0x204 FUN_0055ef38).
+  // GUESS (traced values, setters not read): +0x38 = 0x387 alive (probes 0-2) and 0x183 once dead (bits
+  // 2 and 0x200 cleared on the death frame; k_lock14 f836), so a corpse leaves probe 2 and can't be locked.
+  const PROBE_BITS = 0x387, PROBE_BITS_DEAD = 0x183;
+  function lockTargets() {
+    const out = [];
+    for (const a of actors) {
+      if (!(a.flags28 & 1)) continue;                                         // FUN_005449f0: +0x28 bit 0
+      const rec = data.records[a.rec];
+      const lb = data.lock_bones && rec && rec.zones >= 0 ? data.lock_bones[rec.zones] : -1;
+      const top = [a.pos[0], f(a.pos[1] - f(EYE_H - 2.0)), a.pos[2]];
+      let point = top;
+      if (lb != null && lb >= 0) {
+        const bw = world.boneWorld ? world.boneWorld(a) : null;
+        if (bw) point = bw(lb)[3].slice(0, 3);
+        else warnOnce('enemy_ai: no pose for the lock point (boneWorld unset); lock-on aims at the body top');
+      }
+      const alive = !dead(a), bits = alive ? PROBE_BITS : PROBE_BITS_DEAD;
+      out.push({ id: a.id, alive, lockable: alive && !!(bits & 4), probeBits: bits, point,
+                 feet: a.pos.slice(), radius: R_ACTOR, height: EYE_H, losPoint: top });
+    }
+    return out;
+  }
   // FUN_0055bda8: actor +0x19c = *(status +0xa8 + 0x30) + part x 16, or 0 without a zone set
   function zoneRec(a, part) {
     const rec = data.records[a.rec];
@@ -1274,6 +1307,6 @@ export function createEnemyAI(opts) {
   // page (enemies.js partPose) or a test; the part test needs it. playerShot(muzzle, aim, W): Vincent
   // fired, now; queueShot: the same at this frame's player slot inside the next tick (the page).
   const world = { S, actors, triggers, bullets, objects, addActor, tick, runEvent, recById, events, activated, setActive,
-                  playerShot, queueShot, boneWorld: opts.boneWorld || null };
+                  playerShot, queueShot, lockTargets, boneWorld: opts.boneWorld || null };
   return world;
 }

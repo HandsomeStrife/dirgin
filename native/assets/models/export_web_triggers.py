@@ -164,6 +164,19 @@ def zone_set(d, i, n):
     return [dict(scale=d[z + 16 * k], flags=struct.unpack_from('<H', d, z + 16 * k + 2)[0]) for k in range(n)]
 
 
+def lock_bone(d, i):
+    """The lock-on bone of section-19 entry i: header byte +0x14 (status +0xa8, as in zone_set), copied
+    to C+0x765 at activation by FUN_00340760(C, status +0xa8, 0) (FUN_00559748); vt+0x5c = FUN_00563720
+    takes that bone's world position (-1 / no header: FUN_005634e0(actor, 3), 2 below the top)."""
+    sec = SE.sections(d)
+    ver = (d[3] - 0x30) * 100 + (d[4] - 0x30) * 10 + d[5] - 0x30 if d[:3] == b'bzd' else -1
+    o19, n19, _ = sec[0x13]
+    if i < 0 or ver < 0xe or i >= n19:
+        return -1
+    b = d[sec[0x14][0] + SE.u32(d, o19 + 4 * i) + 0x14]
+    return b - 256 if b >= 128 else b
+
+
 def zone_sets(d, recs, boxes):
     """{section-19 index: zone_set} for every index a record of a model with part boxes uses."""
     out = {}
@@ -199,7 +212,8 @@ def main():
     os.makedirs(out, exist_ok=True)
     res = dict(format='enemy-ai-2', stage=os.path.basename(stage), triggers=trig, records=recs,
                weapons=weapons(d), scripts=scr, clips=clip_frames(), hitboxes=boxes,
-               zones=zone_sets(d, recs, boxes))
+               zones=zone_sets(d, recs, boxes),
+               lock_bones={str(r['zones']): lock_bone(d, r['zones']) for r in recs if r['zones'] >= 0})
     path = os.path.join(out, 'ai.json')
     with open(path, 'w') as fh:
         json.dump(res, fh, separators=(',', ':'))

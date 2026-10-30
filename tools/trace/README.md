@@ -200,3 +200,12 @@ a0, a1, v0, f0, f12 and up to 25 words read through the argument pointers after 
 are only taken in `TRACE_CALLLOG_FRAMES=lo:hi` and are written to `<name>.calls.jsonl`. The log uses
 the top 0x30000 bytes of the frame-log area, and scripts must be ≤ 1000 frames. Used for
 notes/enemy-research.md §11 (scripts k_bullet1 / k_bullet2).
+
+### Lock-on fields (TRACE_LOCK=1, worker 0141)
+With `TRACE_FIELDSET=enemy`, `TRACE_LOCK=1` adds the camera's lock state (`cam_170` = CAM+0x170..0x22f,
+`cam_a0` = CAM+0xa0..0xff), `p_8`, `p_272`, `p_vel`, `p_st64`, `hud_60`, `ret_1b0` and per soldier `a38`,
+`par`, `c764`, `vel` (fields.py has the meanings). `TRACE_ENEMIES=n` traces only the first n soldiers
+(default 7) so more frames fit in the log (n = 2: about 189 frames). The call log needs room of its own
+and doesn't fit next to these. Runs need the service's scratch dir as TRACE_SCRATCH (the one in
+~/.config/systemd/user/pcsx2trace.service). Scripts: k_lock13 (lock, swing off, re-lock), k_lock14
+(locked shot kills #66, reticle rests on the corpse).

@@ -1,0 +1,86 @@
+{
+ "name": "k_lock13",
+ "frames": 1010,
+ "log_from": 822,
+ "doc": "worker 0141: lock-on FUN_00328968. k_hits12's inputs to f829 (lock #66 at f823), no shot at 840; rx +0.7 835-870 (swing off #66 until the lock drops), rx -0.7 885-920 (back over him: re-acquire), R1 940 (shot with the lock, kills #66: drop on death), rx -0.7 960-990. TRACE_FIELDSET=enemy TRACE_LOCK=1, TRACE_ENEMIES=2, no call log (no room) (log from f822).",
+ "events": [
+  {
+   "from": 10,
+   "to": 230,
+   "lx": 0.6,
+   "ly": -1.0
+  },
+  {
+   "from": 240,
+   "to": 244,
+   "buttons": [
+    "cross"
+   ]
+  },
+  {
+   "from": 280,
+   "to": 284,
+   "buttons": [
+    "cross"
+   ]
+  },
+  {
+   "from": 300,
+   "to": 470,
+   "lx": 0.6,
+   "ly": -1.0
+  },
+  {
+   "from": 490,
+   "to": 494,
+   "buttons": [
+    "cross"
+   ]
+  },
+  {
+   "from": 500,
+   "to": 787,
+   "lx": 0.6,
+   "ly": -1.0
+  },
+  {
+   "from": 795,
+   "to": 799,
+   "buttons": [
+    "r1"
+   ]
+  },
+  {
+   "from": 805,
+   "to": 817,
+   "rx": -1.0
+  },
+  {
+   "from": 819,
+   "to": 829,
+   "ry": 1.0
+  },
+  {
+   "from": 835,
+   "to": 870,
+   "rx": 0.7
+  },
+  {
+   "from": 885,
+   "to": 920,
+   "rx": -0.7
+  },
+  {
+   "from": 940,
+   "to": 942,
+   "buttons": [
+    "r1"
+   ]
+  },
+  {
+   "from": 960,
+   "to": 990,
+   "rx": -0.7
+  }
+ ]
+}

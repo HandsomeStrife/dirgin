@@ -59,7 +59,7 @@ def resolve_bases(mem):
 
 
 ENEMY_VT = 0x58E1F8    # enemy actor class vtable, set by the constructor FUN_00558790
-ENEMY_MAX = 7          # active e027s in the sea-of-flames save (notes/enemy-research.md)
+ENEMY_MAX = int(__import__("os").environ.get("TRACE_ENEMIES", 7))   # active e027s in the sea-of-flames save (notes/enemy-research.md); TRACE_ENEMIES=2 traces #66 / #67 only (longer logs)
 
 
 def find_enemies(mem):
@@ -267,6 +267,28 @@ ENEMY_FIELDS += [
 ]
 for _k in range(ENEMY_MAX):
     ENEMY_FIELDS += _enemy_fields(_k)
+# Opt-in with TRACE_LOCK=1 (worker 0141, lock-on FUN_00328968 / FUN_00329778): the camera's
+# lock state and the inputs of the picker, plus the per-soldier fields it reads. Off by default so
+# the enemy record layout of the older traces stays the same.
+if __import__("os").environ.get("TRACE_LOCK"):
+    ENEMY_FIELDS += [
+        ("cam_170", "CAM", 0x170, "bytes:192", "D", "CAM+0x170 FOV, +0x174/+0x178 view pitch/yaw, +0x190/+0x194 look stick, +0x1b0/+0x1b4/+0x1b8 lock range / cone / range, +0x1cc reticle angle, +0x1e4/+0x1e6 lock ids, +0x1e8 flags, +0x218 turn gain (FUN_00328968 / FUN_0032ace0)"),
+        ("cam_a0", "CAM", 0xA0, "bytes:96", "D", "CAM+0xa0 aim point, +0xb0 far point, +0xc0 hit normal, +0xf0 look-at (FUN_00329778)"),
+        ("p_8", "P", 0x8, "u32", "L", "P+8 = parent object (FUN_0054a720: 0 -> world position P+0x90); FUN_00577480's lead runs only when set"),
+        ("p_272", "P", 0x270, "u32", "D", "P+0x272 short = aimed-at actor id (FUN_00573378)"),
+        ("p_vel", "C", 0x410, "vec4", "D", "C+0x410 = (pos - last pos) / step (FUN_0034ea18, not in move mode 0xc)"),
+        ("p_st64", "PS", 0x64, "u32", "D", "player status +0x64 bit 4 = no lock-on (FUN_0055f0e0(P, 4) in FUN_00328968)"),
+        ("hud_60", "HUD", 0x60, "bytes:16", "D", "HUD+0x60 reticle mode, +0x64 flags (bit 0 lock option, 2 on target, 0x10 locked, 0x40 camera turn: FUN_0033c018)"),
+        ("ret_1b0", "RET", 0x1B0, "bytes:64", "D", "RET+0x1b0 kind, +0x1b1 on-target/locked bits, +0x1b3.. phases, +0x1c0.. end times, +0x1de.. lengths (FUN_003b0ac0)"),
+    ]
+    for _k in range(ENEMY_MAX):
+        _p = "e%d_" % _k
+        ENEMY_FIELDS += [
+            (_p + "a38", "E%d" % _k, 0x38, "u32", "D", "actor +0x38 probe bits (bit 2 = lockable: FUN_005449f0 probe 2, FUN_0055ef38)"),
+            (_p + "par", "E%d" % _k, 0x8, "u32", "L", "actor +8 parent (FUN_00329778 adds 0.5 x C+0x410 only when set)"),
+            (_p + "c764", "EC%d" % _k, 0x764, "u32", "D", "C+0x765 byte = lock bone (FUN_00340760 <- status +0xa8 +0x14; FUN_00563720)"),
+            (_p + "vel", "EC%d" % _k, 0x410, "vec4", "D", "C+0x410 velocity per tick (FUN_0034ea18)"),
+        ]
 
 FIELDSET = __import__("os").environ.get("TRACE_FIELDSET")
 if FIELDSET == "enemy":

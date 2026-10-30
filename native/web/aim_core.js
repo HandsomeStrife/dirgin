@@ -90,10 +90,15 @@ export function moveAngleDeg(face, move) {
 }
 
 // FUN_003b1048: the pieces of reticle kind k (reticle.json) at draw time t (ms) -> quads in
-// HUD px relative to the reticle centre: { p: 4 corners, rgb, a }.
-export function reticleQuads(data, k, variant, t) {
+// HUD px relative to the reticle centre: { p: 4 corners, rgb, a }. len = the phase's current length
+// RET+0x1dc[k] (the piece animations run while t != len; default: the kind's on-target length, which
+// equals the show length for kinds 1-3).
+// GUESS: the piece flags 0x80 / 0x100 / 0x200 / 0x400 / 0x800 / 0x1000 / 0x20000 (position
+// animations, FUN_003b1048 l.236-375) are not translated; they only act during a transition (t != len).
+export function reticleQuads(data, k, variant, t, len = null) {
   const K = data.kinds[k]; if (!K) return [];
-  const len = K.len, out = [];
+  if (len == null) len = K.len;
+  const out = [];
   for (const pc of K.variants[variant]) {
     const fr = (data.sprite_frames[pc.sprite] || [])[pc.frame];
     const w = pc.w === -1 ? (fr ? Math.abs(fr[2]) : 0) : pc.w, h = pc.h === -1 ? (fr ? Math.abs(fr[3]) : 0) : pc.h;
@@ -150,8 +155,8 @@ export class WeaponSystem {
                  a220: 0,                                      // CAM+0x220: the gun-out jump's eye-offset blend (camJump)
                  e1e2: null };                                 // CAM+0x1e2 written by a type enter (FollowCamera owns the counter)
     this.eye = null; this.hit = null;                           // CAM+0x90 / +0xa0 this frame (the page sets them)
-    this.hud = { mode: 0, offY: 0 };
-    this.r = { kind: 0, phase: new Array(8).fill(0), end: new Array(8).fill(0), len: new Array(8).fill(0) };
+    this.hud = { mode: 0, offY: 0, flags: 0 };                  // HUD+0x60 mode, +0x78 offset, +0x64 bits 2 / 0x10 (on target / locked)
+    this.r = { kind: 0, bits: 0, phase: new Array(8).fill(0), end: new Array(8).fill(0), len: new Array(8).fill(0) };
     this.clock = 0;                                             // DAT_004f58ec (ms; FUN_003e2450)
     this.events = [];                                           // shots this frame (for the page)
     this.fire = null;                                           // stand-fire class FUN_00596460
@@ -318,39 +323,93 @@ export class WeaponSystem {
     if (k === r.kind) return;
     this.hideKind(r.kind); this.showKind(k); r.kind = k;
   }
-  lens(k) { const K = this.ret && this.ret.kinds[k]; return K ? K.len_show : 100; }
-  showKind(k) {                                               // FUN_003b0680 -> FUN_003b0490(k, 0, 1, 3)
-    if (!k) return;
-    const r = this.r, now = this.clock, len = this.lens(k);
-    if (r.phase[k] === 0) { r.len[k] = len; r.end[k] = now + len; }
-    else if (r.phase[k] === 3) { r.len[k] = len; let e = len - (r.end[k] - now); if (len < e) e = len; r.end[k] = now + e; }
+  // the kind's length tables: DAT_00472110 (show / hide), DAT_00472130 (on target), DAT_00472140 (locked)
+  lens(k, t = 'len_show') { const K = this.ret && this.ret.kinds[k]; return K ? K[t] : 100; }
+  // FUN_003b0490(RET, k, a, to, b, len): from phase a a fresh run of len; from b the reverse of the
+  // part already run (len - remaining, at most len); any other phase: no change. Then phase = to.
+  phaseOn(k, a, to, b, len) {
+    const r = this.r, now = this.clock;
+    if (r.phase[k] === a) { r.len[k] = len; r.end[k] = now + len; }
+    else if (r.phase[k] === b) { r.len[k] = len; let e = len - (r.end[k] - now); if (len < e) e = len; r.end[k] = now + e; }
     else return;
-    r.phase[k] = 1;
+    r.phase[k] = to;
   }
-  hideKind(k) {                                               // FUN_003b0738 -> FUN_003b0588(k, 2, 1, 3)
-    if (!k) return;
-    const r = this.r, now = this.clock, len = this.lens(k);
-    if (r.phase[k] === 2) { r.len[k] = len; r.end[k] = now + len; }
-    else if (r.phase[k] === 1) { r.len[k] = len; let e = now - (r.end[k] - len); if (len < e) e = len; r.end[k] = now + e; }
+  // FUN_003b0588(RET, k, a, b, to, len): the same for the way back (from b: the part already run)
+  phaseOff(k, a, b, to, len) {
+    const r = this.r, now = this.clock;
+    if (r.phase[k] === a) { r.len[k] = len; r.end[k] = now + len; }
+    else if (r.phase[k] === b) { r.len[k] = len; let e = now - (r.end[k] - len); if (len < e) e = len; r.end[k] = now + e; }
     else return;
-    r.phase[k] = 3;
+    r.phase[k] = to;
   }
-  // FUN_003b0ac0 (normal phases only; the on-target / locked variants need actors)
+  showKind(k) {                                               // FUN_003b0680
+    if (!k) return;
+    const p = this.r.phase[k];
+    if (p < 4) this.phaseOn(k, 0, 1, 3, this.lens(k));
+    else if (p < 7) { if (this.r.bits & 1) this.onTargetOn(k); else this.onTargetOff(k); }
+    else if (this.r.bits & 2) this.lockedOn(k); else this.lockedOff(k);
+  }
+  hideKind(k) {                                               // FUN_003b0738
+    if (!k) return;
+    const p = this.r.phase[k];
+    if (p < 4) this.phaseOff(k, 2, 1, 3, this.lens(k));
+    else if (p < 7) this.onTargetOff(k);
+    else this.lockedOff(k);
+  }
+  onTargetOn(k) {                                             // FUN_003b07b0: phases 2 -> 4 -> 5
+    if (!k) return;
+    if (this.r.phase[k] < 7) this.phaseOn(k, 2, 4, 6, (this.r.bits & 2) ? 2 : this.lens(k, 'len'));
+    else if (this.r.bits & 2) this.lockedOn(k); else this.lockedOff(k);
+  }
+  onTargetOff(k) {                                            // FUN_003b0840: phases 5 -> 6 -> 2
+    if (!k) return;
+    if (this.r.phase[k] < 7) this.phaseOff(k, 5, 4, 6, this.lens(k, 'len'));
+    else this.lockedOff(k);
+  }
+  lockedOn(k) {                                               // FUN_003b08a0: phases 5 -> 7 -> 8, and the lock marker (kind 4)
+    if (k) { this.phaseOn(k, 5, 7, 9, this.lens(k, 'len_variant')); this.showKind(4); }
+  }
+  lockedOff(k) {                                              // FUN_003b08f8: phases 8 -> 9 -> 5, marker hidden
+    if (k) this.phaseOff(k, 8, 7, 9, this.lens(k, 'len_variant'));
+    this.hideKind(4);
+  }
+  // HUD flag 2 "on target" (FUN_0033c2b8 -> FUN_003b0950) and 0x10 "locked" (FUN_0033c340 ->
+  // FUN_003b09a0); setting either needs the reticle shown (HUD+0x60 != 0). RET+0x1b1 bits 0 / 1.
+  setOnTarget(on) {
+    if (on && this.hud.mode === 0) return;
+    if (on === !!(this.hud.flags & 2)) return;
+    this.hud.flags ^= 2;
+    if (on) { this.r.bits |= 1; this.onTargetOn(this.r.kind); } else { this.r.bits &= ~1; this.onTargetOff(this.r.kind); }
+  }
+  setLocked(on) {
+    if (on && this.hud.mode === 0) return;
+    if (on === !!(this.hud.flags & 0x10)) return;
+    this.hud.flags ^= 0x10;
+    if (on) { this.r.bits |= 2; this.lockedOn(this.r.kind); } else { this.r.bits &= ~2; this.lockedOff(this.r.kind); }
+  }
+  // FUN_003b0ac0, the phase steps (the draw follows: reticleT / reticleVariant)
   reticleFrame(ms) {
     this.clock += ms;
     const r = this.r, now = this.clock;
     for (let k = 1; k < 8; k++) {
-      if (r.phase[k] === 1 && now >= r.end[k]) r.phase[k] = 2;
-      else if (r.phase[k] === 3 && now >= r.end[k]) r.phase[k] = 0;
+      const p = r.phase[k];
+      if (p === 1 && now >= r.end[k]) { r.phase[k] = 2; if ((r.bits & 1) && k !== 5 && k !== 4) this.onTargetOn(k); }
+      else if (p === 3 && now >= r.end[k]) r.phase[k] = 0;
+      else if (p === 4 && now >= r.end[k]) { r.phase[k] = 5; if ((r.bits & 2) && k !== 5 && k !== 4) this.lockedOn(k); }
+      else if (p === 6 && now >= r.end[k]) { r.phase[k] = 2; if (r.kind !== k) this.hideKind(k); }
+      else if (p === 7 && now >= r.end[k]) r.phase[k] = 8;
+      else if (p === 9 && now >= r.end[k]) { r.phase[k] = 5; if (r.kind !== k || !(r.bits & 1)) this.onTargetOff(k); }
     }
   }
-  // draw time t for kind k (FUN_003b0ac0): elapsed in 1, remaining in 3, else the length
+  // draw time t for kind k (FUN_003b0ac0): elapsed in 1 / 4 / 7, remaining in 3 / 6 / 9, else the length
   reticleT(k) {
     const r = this.r, p = r.phase[k];
-    if (p === 1) return this.clock - (r.end[k] - r.len[k]);
-    if (p === 3) return r.end[k] - this.clock;
+    if (p === 1 || p === 4 || p === 7) return this.clock - (r.end[k] - r.len[k]);
+    if (p === 3 || p === 6 || p === 9) return r.end[k] - this.clock;
     return r.len[k];
   }
+  // FUN_003b1048's variant: 0 normal (phases 1-3), 1 on target (4-6), 2 locked (7-9)
+  reticleVariant(k) { const p = this.r.phase[k]; return p < 4 ? 0 : p < 7 ? 1 : 2; }
 
   // ---- 2. input (FUN_003320c0, the parts the page has: no L1/materia, melee, reload).
   // inp: { r1Pressed, r1Held, r3Pressed, circlePressed }, onGround, far: CAM+0xb0 (FUN_003296e0(CAM, ., 0))

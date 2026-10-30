@@ -196,11 +196,13 @@ def weapon_json(w, parts_desc):
 def reticle_json(elf):
     kinds = {}
     sprites = {}
-    # The length tables DAT_00472110 / 00472130 / 00472140 hold 4 entries each (kinds 0-3; the
-    # next table starts right after). The HUD only ever selects kinds 0-2 (FUN_0033c060,
-    # FUN_0033c208, FUN_0033b948 -> FUN_003b0440), and kind 3 has its own draw path
-    # (FUN_003b0e08), so kinds 1-3 are exported.
-    for k in range(1, 4):
+    # The length tables DAT_00472110 / 00472130 / 00472140 are indexed by kind. The HUD only ever
+    # selects kinds 0-2 (FUN_0033c060, FUN_0033c208, FUN_0033b948 -> FUN_003b0440), kind 3 has its own
+    # draw path (FUN_003b0e08), and kind 4 is the lock marker: FUN_003b08a0 / 08f8 (locked on / off)
+    # show / hide it with FUN_003b0680 / 0738 (length DAT_00472110[4] = 2); its len / len_variant
+    # entries are never read (FUN_003b0ac0 skips the on-target / locked steps for kinds 4 and 5).
+    # So kinds 1-4 are exported (worker 0141 added 4).
+    for k in range(1, 5):
         tex_idx = elf.u8(0x4727f0 + 2 * k)
         name_ptr = elf.u32(0x47d500 + 4 * tex_idx)
         tex = elf.read(name_ptr, 8).split(b'\0')[0].decode('latin-1')

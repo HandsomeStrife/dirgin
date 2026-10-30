@@ -10,6 +10,8 @@ import * as THREE from 'three';
 import { GAME, STEP } from './player.js';
 import { WeaponSystem, AIM_SETS, AIM_IDLE, AIM_FIRE, AIM_WALK_THR, quadrant, moveAngleDeg,
          reticleQuads, reticleRay, aimRayPoints } from './aim_core.js';
+import { createLock, lockFrame, lockRay, screenPoint } from './lock_on.js';
+import { cylinderHit } from './enemy_hit.js';
 export { aimRayPoints };
 
 export const HELP = 'LMB draw/fire   Z first person   C holster';
@@ -105,8 +107,8 @@ class ReticleLayer {
       if (!T) continue;
       if (tex && tex !== T) break;                    // one texture per draw call (all kinds use 'menu2')
       tex = T;
-      const frs = this.frames(k, 0);
-      reticleQuads(this.data, k, 0, core.reticleT(k)).forEach((q, j) => {
+      const v = core.reticleVariant(k), frs = this.frames(k, v);  // 0 normal, 1 on target, 2 locked (FUN_003b0ac0)
+      reticleQuads(this.data, k, v, core.reticleT(k), core.r.len[k]).forEach((q, j) => {
         const fr = frs[j];
         if (q.a <= 0 || !fr || n + 6 > this.max) return;
         const u0 = fr[0] / T.w, u1 = (fr[0] + fr[2]) / T.w, v0 = fr[1] / T.h, v1 = (fr[1] + fr[3]) / T.h;
@@ -282,11 +284,32 @@ export async function setupAim({ ctrl, anim, motions, col, follow, output, vin, 
   // FUN_00329778 from this frame's camera (follow.tick ran first in the frame): the ray through the
   // reticle, CAM+0x1cc below the view axis (the reticle lead CAM+0x1fc / +0x200 needs the pad's
   // right stick: 0 on the page, as with the game's USB mouse)
+  // With lock mode (CAM+0x1e8 bit 2 = core.lockOn, the auto-lock option, on in the save) the hit is
+  // replaced by FUN_00328968's result (lock_on.js): the locked soldier's lock point, or the probes'
+  // hit. api.targets() (play.js: the active soldiers) feeds it; without targets the world ray stands.
+  const lock = createLock();
+  const seg = col.segment ? (a, b) => col.segment(a, b) : null;
   function aimRay() {
     const O = { x: follow.eye[0], y: follow.eye[1], z: follow.eye[2] };
     const look = { x: follow.at[0], y: follow.at[1], z: follow.at[2] };
-    return aimRayPoints(O, reticleRay(follow.M, core.cam.c1cc), look, W.range10,
-                        col.segment ? (a, b) => col.segment(a, b) : null);
+    const ray = aimRayPoints(O, reticleRay(follow.M, core.cam.c1cc), look, W.range10, seg);
+    if (!core.lockOn || !api.targets) return ray;
+    const v = p => [p.x, p.y, p.z];
+    // CAM+0x1b0 = CAM+0x1b8 = W+0x18 x 10 (FUN_00575510 with FUN_00326500 true; traced 310), CAM+0x1b4 = 0.4
+    // (setter not found; traced), player status +0x64 bit 4 clear (traced 0): FUN_0055f0e0(P, 4) false
+    const r1b8 = W.range10 * 10, eye = follow.eye.slice();
+    const aim = lockFrame(lock, {
+      S: v(ray.S), F: lockRay(follow.pitch, follow.yaw, core.cam.c1cc), far: v(ray.far),
+      r1b0: r1b8, r1b8, fov: core.cam.fov, k1b4: 0.4, look: follow.look190 || [0, 0],
+      noLock: false /* GUESS: the one traced value (no-lock flag not decoded) */, st2a4: core.P.st, drawn: core.P.drawn,
+      actors: api.targets(), cylinder: cylinderHit,
+      world: seg ? (a, b) => { const h = seg({ x: a[0], y: a[1], z: a[2] }, { x: b[0], y: b[1], z: b[2] }); return h ? (Array.isArray(h.point) ? h.point.slice() : [h.point.x, h.point.y, h.point.z]) : null; } : null,
+      blocked: seg ? (a, b) => !!seg({ x: a[0], y: a[1], z: a[2] }, { x: b[0], y: b[1], z: b[2] }) : null,
+      screen: p => screenPoint(follow.M, eye, core.cam.fov, p),
+    });
+    // HUD flags in FUN_00328968's order: locked (FUN_0033c340), then on target (FUN_0033c2b8)
+    core.setLocked(lock.hudLocked); core.setOnTarget(lock.hudOn);
+    return { ...ray, hit: { x: aim[0], y: aim[1], z: aim[2] }, lockId: lock.id };
   }
 
   // FUN_00577480's bullets start at the muzzle FUN_00341ec8 = marker 15 (bone 56, offset 0:
@@ -338,6 +361,8 @@ export async function setupAim({ ctrl, anim, motions, col, follow, output, vin, 
   const api = {
     core, help: HELP,
     onShot: null,                                   // (muzzle, aim, W, chest) per shot: set by play.js (enemy_ai playerShot)
+    targets: null,                                  // () -> lock_on.js actors (play.js: the active soldiers)
+    lock,                                           // lock_on.js state (CAM+0x1e4 = lock.id)
     // H (respawn): the weapon, the latched buttons and the clip classes (the camera resets itself)
     reset() { core.reset(); clearEdges(); ctl.reset(); },
     // test aid (Playwright): press a game button for one frame ('r1', 'r3', 'circle'); 'r1' also holds

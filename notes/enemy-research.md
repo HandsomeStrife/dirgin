@@ -843,4 +843,7 @@ Translated in enemy_ai.js / enemy_hit.js; test_enemy_hits.mjs. D = code, T = tra
   (FUN_00315050 / FUN_003151c8 via FUN_003153d0); no callee of FUN_00559748 writes +0x20. D
 - Open: the clip choice of classes 0x1e / 0x36 (traced r_stlld0 = part 10, r_stlaf0 = part 6, r_stbf0
   = head); limb 24 vs 25 (§10.2).
+- **Lock-on** (worker 0141): the aim points of these shots were the lock-on's (CAM+0x1e4 = 0x42 / 0x43):
+  bone 3 of the target (vt+0x5c FUN_00563720, C+0x765 = zone header +0x14). On death +0x38 goes 0x387 →
+  0x183 (probe 2 / lockable bit cleared; k_lock14 f836). Decode and page: aim-research.md §4.1, lock_on.js.
 

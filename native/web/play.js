@@ -680,6 +680,8 @@ async function main() {
   // Vincent's bullets vs the soldiers (aim.js onShot -> enemy_ai playerShot, FUN_00577480), fired in
   // enemyAI.tick after the AI scheduler (the game's frame order, FUN_00323128)
   if (weapon && enemyAI) weapon.onShot = (...shot) => enemyAI.queueShot(...shot);
+  // the lock-on's soldiers (FUN_00328968 in aim.js aimRay; lock_on.js)
+  if (weapon && enemyAI) weapon.targets = () => enemyAI.lockTargets();
 
   // detached debug camera (?cam=), same format as main.js
   let detached = null;

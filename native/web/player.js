@@ -1459,6 +1459,7 @@ export class FollowCamera {
     const dl = Math.hypot(this.rampDir[0], this.rampDir[1]);
     if (dl > 0) { sx = this.rampDir[0] / dl * c; sy = this.rampDir[1] / dl * c; } else { sx = 0; sy = 0; }
     const smag = Math.hypot(sx, sy);
+    this.look190 = [sx, sy];                      // CAM+0x190 / +0x194 (l.2486: the look values; read by FUN_00328968's 0x10 / 0x20 bits)
     // look-stick deadzone DAT_0046e464: past it on either axis the update calls
     // FUN_00324440(10) (request bit 10 of DAT_0046e290+0x14); sx / sy are not changed.
     // GUESS: its FUN_00326068(7) gate is taken as open (not decoded); nothing in the port

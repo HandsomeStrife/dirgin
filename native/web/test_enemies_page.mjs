@@ -8,7 +8,8 @@
 //      removes it again; switching off the newest body (51) first, 71 is drawn right in front of 50;
 //   5. Vincent's bullets (aim.js onShot -> enemy_ai playerShot): the part test's pose (enemies.js
 //      partPose) equals the drawn joints; the gun drawn with R1, the camera turned until the reticle ray
-//      crosses #66's chest, R1 fires: #66 (HP 1) dies (actor state 7, AI mode 0, death clip held);
+//      crosses #66's chest: the lock takes him (aim point = his bone 3); the camera turns until the ray
+//      passes beside his body (the lock holds), R1 fires: #66 (HP 1) dies (actor state 7, AI mode 0, death clip held);
 //   6. no console errors or page errors.
 //   node native/web/test_enemies_page.mjs          (needs data/enemies + playwright; else SKIP, exit 0)
 // Serves native/web with python3 http.server on a free port. three.js comes from the CDN (play.html importmap).
@@ -134,14 +135,30 @@ try {
       P.follow.yaw += sy * dy * 0.02 / 0.02; P.follow.pitch += sp * dp; await wait(120);
     }
     const aimErr = Math.max(...err().map(Math.abs));
+    // lock-on (lock_on.js, FUN_00328968): the ray over #66 locks him; CAM+0xa0 = his bone 3 (C+0x765)
+    const b3 = () => { const r = rows(3)[3]; const h = P.aim.core.hit; return Math.hypot(h.x - r[0], h.y - r[1], h.z - r[2]); };
+    const lockId = P.aim.lock.id, lockErr = b3();
+    // turn off him in 0.01 rad steps: the reticle ray's distance from his body axis at his depth
+    // ('side') grows until the keep test drops the lock (the cone, 19.3 deg, is measured from S, 10 past
+    // Vincent, ~20 u short of him at this range); fire at the last step that still holds
+    const side = () => { const c = P.aim.core, e = [c.eye.x, c.eye.y, c.eye.z], m = P.follow.M[2], l = Math.hypot(m[0], m[2]);
+                         const f = [m[0] / l, m[2] / l], v = [a.pos[0] - e[0], a.pos[2] - e[2]], t = v[0] * f[0] + v[1] * f[1];
+                         return Math.hypot(v[0] - f[0] * t, v[1] - f[1] * t); };
+    const y0 = P.follow.yaw, steps = [];
+    for (let i = 1; i <= 25; i++) { P.follow.yaw = y0 + 0.01 * i; await wait(100); steps.push({ i, id: P.aim.lock.id, side: side(), err: b3() }); }
+    const pick = steps.filter(x => x.id === 66).pop();
+    if (pick) { P.follow.yaw = y0 + 0.01 * pick.i; await wait(200); }
+    const heldId = P.aim.lock.id, heldErr = b3(), offErr = pick ? pick.side : 0;
     const hp0 = a.hp;
-    P.aim.press('r1'); await wait(1500);                                    // fire
+    P.aim.press('r1'); await wait(1500);                                    // fire, the reticle off him
 
-    return { poseErr, aimErr, hp0, hp: a.hp, astate: a.astate, mode: a.ai.mode, clip: a.C.clip, drawn: body.clip, hold: a.C.hold };
+    return { poseErr, aimErr, lockId, lockErr, heldId, heldErr, offErr, dropAt: (steps.find(x => x.id !== 66) || {}).i, hp0, hp: a.hp, astate: a.astate, mode: a.ai.mode, clip: a.C.clip, drawn: body.clip, hold: a.C.hold };
   });
   ok(sh.poseErr < 1e-3, `part-test pose = the drawn joints (max ${sh.poseErr.toExponential(1)})`);
   ok(sh.aimErr < 0.01, `reticle ray on #66's chest (angle error ${sh.aimErr.toFixed(4)} rad)`);
-  ok(sh.hp0 === 1 && sh.hp === 0 && sh.astate === 7 && sh.mode === 0, `R1 on #66: HP ${sh.hp0} -> ${sh.hp}, actor state ${sh.astate}, AI mode ${sh.mode}`);
+  ok(sh.lockId === 66 && sh.lockErr < 1e-3, `lock-on: #${sh.lockId} locked, aim point on his bone 3 (${sh.lockErr.toExponential(1)})`);
+  ok(sh.heldId === 66 && sh.heldErr < 0.05 && sh.offErr > 2.5, `lock held with the ray ${sh.offErr.toFixed(2)} u beside his axis: aim still on bone 3 (${sh.heldErr.toFixed(4)}); dropped after ${sh.dropAt ?? '-'} x 0.01 rad`);
+  ok(sh.hp0 === 1 && sh.hp === 0 && sh.astate === 7 && sh.mode === 0, `R1 with the reticle off #66 (auto-aim): HP ${sh.hp0} -> ${sh.hp}, actor state ${sh.astate}, AI mode ${sh.mode}`);
   ok(sh.drawn === sh.clip && /^r_st(laf|bf)0$/.test(sh.clip) && sh.hold, `#66 draws his death clip ${sh.drawn} (held)`);
   ok(errs.length === 0, `no console errors${errs.length ? ': ' + errs.slice(0, 3).join(' | ') : ''}`);
 } finally {

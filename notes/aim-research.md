@@ -174,6 +174,56 @@ D (code) / not traced (no actors at the z128 start).
 **Undecoded:** the auto-lock option value and where FUN_00253fb8 reads it; whether a
 non-lock weapon in this save would differ; CAM+0x1b4's setter.
 
+### 4.1 Lock-on, full decode and the page (worker 0141; lock_on.js, trace k_lock13)
+Corrections to the paragraph above: the lock ray is NOT the camera matrix ray. FUN_00329778 builds
+F_lock = row 2 of rotX(CAM+0x174 + 5·CAM+0x1fc + CAM+0x1cc) · rotY(CAM+0x178 + 5·CAM+0x200)
+(FUN_00259928 / 00259990, FUN_0026125c = B·A, DAT_0046e428 = 5) from the view angles; S stays on the
+reticle ray. Traced 2–9° from CAM+0x80 while the pad's reticle lead CAM+0x1fc / +0x200 is set (0 with
+the USB mouse). "Target position + 0.5·(target+0x410)": +0x410 is the body's velocity per tick
+(FUN_0034ea18), added only when the target has a parent object (actor +8); the point itself is
+vt+0x5c = FUN_00563720 = **world position of bone C+0x765**, C+0x765 = zone header (status +0xa8)
+byte +0x14 (FUN_00340760 from FUN_00559748), **3** for every z128 soldier set (T: 0x20300 at C+0x764,
+aim − feet = (0.45, −11.92, −0.23)). No parents in the trace (P+8 = actor +8 = 0).
+- **Probes** (FUN_005449f0(world, k, hit, n, S, E)): objects with +0x28 bit 0 and +0x38 bit k
+  (soldiers: 0x387, T), closest by |S − hit| − radius for actors. Probe 2 = FUN_0055bda8 mode 2: the
+  lock point within 1.5·radius of the segment, t > 0 (FUN_002614f4), projected inside (−50, 562) ×
+  (−100, 548), and probe 3 from S to FUN_005634e0(actor, 3) (actor +0x30 − 2 up) clear or the target.
+  Hit = the lock point. Probe 1 = mode 1: dead skipped, the cylinder only (FUN_0025c0f8 both ways,
+  hit = midpoint of entry and exit; start inside FUN_0025c770 → S); no part test. T: f973 7.54 u off →
+  no lock, f974 7.44 u → lock (1.5 × 5 = 7.5).
+- **Picker FUN_00328968**, in order: probe 2; in range (≤ CAM+0x1b0) → candidate, else probe 1 and a
+  candidate only with +0x38 bit 2. HUD "on target" = candidate within CAM+0x1b8. Not FUN_0055f0e0(P, 4)
+  and candidate within CAM+0x1b0 → lock (CAM+0x1e4 = id; beep 0x4a05d0 / 0x4a05d8; +0x1e8 0x10 set, 0x20
+  clear) and **skip the keep test**. Else: +0x1e8 0x20 set when the look values CAM+0x190 / +0x194 are 0,
+  else 0x10 cleared once 0x20 is set; keep while vt+0x204 (FUN_0055ef38: +0x38 bit 2 and HP ≠ 0) and
+  (P+0x2a4 ∈ {2, 4} (FUN_00577458) or (|vt+0x5c − S| < 1.1·CAM+0x1b0, angle(F_lock) < FOV·π/240·CAM+0x1b4
+  ·0.875 and projected inside (−60, 572) × (−110, 558))). Drop → id −1, CAM+0xa0 = the last probe's
+  hit or CAM+0xb0. Any change → CAM+0x218 = 0.05. Then FUN_00329778: locked → CAM+0xa0 = lock point,
+  CAM+0x1e6 = CAM+0x1e4, FUN_00573378(P, id) (P+0x272, the target's vt+0x23c / 0x244 → manager events
+  0x1a / 0x1b; not on the page). T (k_lock13): lock f823, held to f836 by probe 1 (the ray still
+  crosses #66's body), drop f837 at 23.1°, re-lock f974; the page matches every frame but f822.
+- **No camera turn, no stick override.** FUN_0032ace0 l.442-536 turns the view toward the target
+  only when FUN_0033c018(HUD, 1) (HUD+0x60 = 1, +0x64 bits 0, 0x10 and **0x40**); HUD+0x64 = 0x13 in
+  the trace, and the view yaw holds at 80.241° through a lock with no input. So the mouse (either
+  mode) and the stick only move the reticle ray; the lock follows the ray rules above.
+- **Shot** FUN_00577480: aim = P+0x2b0 = CAM+0xa0 (= the lock point while locked). The lead
+  (+ C+0x410 · |aim − muzzle| / (W+0x2c·10) · 60 on aim and direction) needs P+8 (a parent): never in
+  z128. Bullet +0x12a = the FUN_00329740 target (CAM+0x1e6 → vt+0x8c → +0x100); homing needs W+4 bit
+  0x2000 (FUN_00552dd8: +0x154 = W+0x3c in radians), Vincent's W+4 = 0x100, so **no homing**; +0x12a only
+  feeds FUN_00567ef0 (HUD popup) at the bullet's end (FUN_00554ea8).
+- **Reticle** (§5.2 made concrete): FUN_0033c2b8 / 0033c340 (only with HUD+0x60 ≠ 0) → FUN_003b0950 /
+  003b09a0 set RET+0x1b1 bits 0 / 1 and call FUN_003b07b0 (2 → 4, length DAT_00472130[k], or 2 while
+  locked) / 003b0840 (5 → 6) / 003b08a0 (5 → 7, DAT_00472140[k] = 2, and shows kind **4** = the lock
+  marker, length 2) / 003b08f8 (8 → 9, hides kind 4), all through FUN_003b0490 / 0588 (fresh run or
+  reverse of the part run). FUN_003b0ac0: 1 → 2 (+ on-target step when bit 0), 4 → 5 (+ locked step when
+  bit 1), 6 → 2 (hide if not the kind), 7 → 8, 9 → 5 (+ on-target off when bit 0 clear); variant 0 / 1 / 2
+  by phase < 4 / < 7 / else; FUN_003b1048 animates against the current length RET+0x1dc. T: kind 2
+  2 → 7 → 8 and kind 4 0 → 2 at the lock; 9 → 6 (×5) → 2 at the release, every frame.
+- Open: f822 (#67 4.8 u from the ray, 109 u out, cylinder crossed, line of sight clear in both
+  collision sets; the game takes nothing; probe 3's object classes / FUN_0055bc90 not read; two
+  attempts). The page's drawn soldier stands 0.145 u behind the game's (constant in his frame), so the
+  aim point is 0.15 off while locked.
+
 ## 5. The reticle (HUD) — D + T + GS dump
 
 ### 5.1 When shown
@@ -335,7 +385,7 @@ ray (which geometry it hits).
 8. **Clips**: request the whole-body sets by state (h_st_a / h_st_f via FUN_00596460, the
    _a movement sets, h_jp*_a), partner chosen by pitch zone. Facing + partner weight stay
    GUESS-labelled until decoded.
-9. **Lock-on** FUN_00328968 once actors exist.
+9. **Lock-on** FUN_00328968: done (worker 0141, §4.1).
 
 **Remove from shoot.js (no counterpart in the game):** the held RMB/Q aim mode and its
 "exit on release"; the GUESS over-the-shoulder camera (dist 20 / height 16.5 / shoulder
