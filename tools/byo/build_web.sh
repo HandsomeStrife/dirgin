@@ -217,6 +217,17 @@ run enemy_e027 $PY export_web_enemy.py export --model e027 --out "$DATA/enemies"
 grep '^wrote' "$LOGS/enemy_e027.log" | sed "s#$REPO/##" | cut -c1-160
 echo "ok"
 
+step "enemy weapons (e027 slot 0: parameter set +0x44 -> w003 / w004 at marker 15) -> data/enemies"
+# inputs 077700c1/c2 (w003) and 07770101/02 (w004), checked by disc.py verify; the skip only guards a partial tree
+if [ -s "$NOPATH/077700c1.bin" ] && [ -s "$NOPATH/077700c2.bin" ] && [ -s "$NOPATH/07770101.bin" ] && [ -s "$NOPATH/07770102.bin" ]; then
+  run enemy_weapons $PY export_web_enemy.py weapon --owner e027 --slot 0 --out "$DATA/enemies"
+  [ -s "$DATA/enemies/e027_weapons.json" ] || fail "data/enemies/e027_weapons.json missing (log: $LOGS/enemy_weapons.log)"
+  grep '^wrote' "$LOGS/enemy_weapons.log" | sed "s#$REPO/##" | cut -c1-160
+  echo "ok"
+else
+  echo "skipped: weapon files 077700c1/c2, 07770101/02 not extracted (soldiers drawn without rifles)"
+fi
+
 step "enemy placements (stage file sections 0/1: stage-load e027s -> data/enemies/placements.json)"
 run enemy_placements $PY export_web_placements.py "$NOPATH/06800001.bin" "$DATA/enemies"
 [ -s "$DATA/enemies/placements.json" ] || fail "data/enemies/placements.json missing (log: $LOGS/enemy_placements.log)"

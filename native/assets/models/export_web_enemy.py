@@ -126,6 +126,16 @@ def smd_blocks(buf):
             for o in offs if buf[o + 8:o + 11] == b'smd' and R._u32(buf, o + 0x10) == R.SM2_MAGIC]
 
 
+def group_scale(buf, P, G):
+    """Position scale of one smd group: the VU gets the float at the group's skin header
+    (group +0x0c -> +4) with y = 32.0 (FUN_005b1260 for smd version > 3, FUN_005b16c0 for
+    version 3; DAT_005b3bf8 = version > 3, FUN_005b0ee0), applied to the V3-16 positions as
+    ITOF12 (/4096). Equals the header's +0x2c / 2048 on version-4 models (e027 3.33525,
+    Cerberus 3.152425, p000 3.465913); version-3 smd (the soldiers' rifle w003) has no
+    header float (+0x2c = 0x10), only this one (1.960384)."""
+    return R._f32(buf, P + R._u32(buf, G + 0x0c) + 4) / 4096.0
+
+
 def decode(buf, NB, sk, variant=None):
     """render_skinned.assemble's walk with parse_drawpackets_cycl. Returns
     (verts, normals, tris, groups, tri_desc). tris as assemble's (a, b, c, uv0..2 raw
@@ -138,10 +148,10 @@ def decode(buf, NB, sk, variant=None):
     if variant is not None:
         blocks = [b for b in blocks[::-1] if struct.unpack_from('<h', buf, b[2] + 0x12)[0] == variant]
     for name, blk, P in blocks:
-        sc = R._f32(buf, P + 0x2c) / 2048.0
         grparr = R._u32(buf, P + 0x20); gc = R._u16(buf, P + 0x0a)
         for gi in range(gc):
             G = P + R._u32(buf, P + grparr + 4 * gi)
+            sc = group_scale(buf, P, G)
             r = R.build_group_pool(buf, NB, Wm, bc, P, G, sc)
             if r is None:
                 print(f"WARN {name}@{blk:#x}.g{gi}: no pool"); continue
@@ -331,6 +341,124 @@ def export(model, out, clip_names, variant=0):
           f"clips " + ' '.join(f"{c}({d['nf']}f{' loop' if d['loop'] else ''})" for c, d in clips.items()))
 
 
+# ---------------------------------------------------------------- weapon (attached model)
+def socket(model, marker):
+    """(bone, offset) of a character's marker (marker.mkd, export_cerberus.markers:
+    FUN_0030bef8 reads rec+0xc as the bone)."""
+    import export_cerberus as EC
+    buf = open(paths(model)['cont'], 'rb').read()
+    xyz, bone = EC.markers(buf)[marker]
+    return int(bone), [float(x) for x in xyz]
+
+
+def weapon_names(owner, slot):
+    """{section-1 record: weapon name} for the owner's placements (FUN_00316058 slot name from
+    the record's parameter set; none when the set's +0x92 bit 4 is set, FUN_00316270)."""
+    import export_web_placements as PL
+    stage = open(NOPATH + '06800001.bin', 'rb').read()
+    (o0, c0, s0), (o1, c1, s1) = PL.sections(stage)[:2]
+    out = {}
+    for k in range(c1):
+        ps = struct.unpack_from('<I', stage, o1 + k * s1)[0]
+        p = o0 + ps * s0
+        if stage[p + 0x20:p + 0x24].decode('latin1') != owner: continue
+        if struct.unpack_from('<H', stage, p + 0x92)[0] & 0x10: continue
+        nm = stage[p + 0x44 + 8 * slot:p + 0x4c + 8 * slot].split(b'\0')[0].decode('latin1')
+        if nm: out[k] = nm
+    return out
+
+
+def export_weapons(owner, slot, out, variant=0):
+    """Every weapon the owner's placements carry in this slot -> WEAPON.glb/json, plus
+    OWNER_weapons.json {record: weapon}."""
+    V.check_ignored(out); os.makedirs(out, exist_ok=True)
+    recs = weapon_names(owner, slot)
+    for nm in sorted(set(recs.values())):
+        export_weapon(owner, slot, nm, out, variant)
+    json.dump(dict(owner=owner, slot=slot, marker=slot + 0xf,
+                   rule='FUN_00315e90 -> FUN_00316058: parameter set +0x44 (+8 x slot) -> FUN_00316270',
+                   records={str(k): v for k, v in sorted(recs.items())}),
+              open(os.path.join(out, f'{owner}_weapons.json'), 'w'), indent=1)
+    print(f"wrote {owner}_weapons.json: {len(recs)} records, " +
+          ' '.join(f"{n} x{list(recs.values()).count(n)}" for n in sorted(set(recs.values()))))
+
+
+def export_weapon(owner, slot, weapon, out, variant=0):
+    """An enemy's weapon model as a static glb in the owner's marker-(slot + 0xf) socket space.
+
+    Which weapon (decoded): FUN_00315e90 (status, non-player: status +0x60 bit 0x200 clear)
+    -> for slots 0-3, FUN_00316058 copies the name at parameter set (section 0) +0x44 / +0x4c /
+    +0x54 / +0x5c; FUN_00316270 loads it (FUN_00408b30), resets its local matrix
+    (FUN_005a6e98(0,0,0, w+0x10)) and attaches it with FUN_005a7698(owner MP, w, slot + 0xf,
+    slot); nothing when parameter set +0x92 bit 4 is set. z128's soldiers (sets 27-32): slot 0
+    'w003', slots 1-3 empty, +0x92 = 0.
+    Where (decoded, as Vincent's gun, export_cerberus.py): FUN_005ab8f0 draws each attached
+    child after the body with child world = owner world x FUN_005ad508 = palette[bone] x
+    T(marker xyz), with the owner's light rig and colour scale. The weapon's own skeleton is
+    not animated here (reset matrix), so a vertex in socket space = the weapon's bind-pose
+    vertex (its own world bind; w003 is rigid, one bone per vertex).
+    Variant: FUN_005b2ef8's smd +0x12 == the weapon object's +0x44b (GUESS 0, as e027's)."""
+    bone, off = socket(owner, slot + 0xf)
+    V.check_ignored(out); os.makedirs(out, exist_ok=True)
+    pth, buf, NB, sk = load(weapon)
+    V0, N0, tris, groups, tdesc = decode(buf, NB, sk, variant)
+    J4, W4, sst = skin(buf, NB, sk, groups, V0)
+    if sst['multi']:
+        sys.exit(f"{weapon}: {sst['multi']} multi-bone vertices; only a rigid weapon is handled")
+    mats = M.material_table(pth['tex'], variant=variant)
+    mat_bytes = sorted({d[0] for d in tdesc})
+    if mat_bytes != [0] or len(mats) != 1:
+        sys.exit(f"{weapon}: material bytes {mat_bytes} / {len(mats)} materials: only one material is handled")
+    vi = np.array([t[:3] for t in tris]).reshape(-1)
+    pos = V0[vi] + np.array(off)                        # T(marker xyz) x bind vertex
+    nrm = N0[vi]
+    uv = np.array([u for t in tris for u in t[3:6]], float) / 4096.0
+    fill = np.repeat([d[2] for d in tdesc], 3)
+    raw = np.array([c for t in tris for c in t[6:9]], float)
+    col = np.where(fill[:, None], 128.0 / 128.0, raw / 128.0)   # FUN_005b0ee0 STCOL 0x80 (as e027)
+    runs = []
+    for i, d in enumerate(tdesc):
+        a = bool(d[1] & 2)
+        if runs and runs[-1][2] == a: runs[-1][1] += 1
+        else: runs.append([i, 1, a])
+    g = V.GLB(); j = g.j; j['asset']['generator'] = 'export_web_enemy.py weapon'
+    A = lambda *x, **k: g.acc(*x, **k)
+    attrs = dict(POSITION=A(pos.astype('<f4'), 5126, 'VEC3', 34962, True),
+                 NORMAL=A(nrm.astype('<f4'), 5126, 'VEC3', 34962),
+                 TEXCOORD_0=A(uv.astype('<f4'), 5126, 'VEC2', 34962),
+                 COLOR_0=A(col.astype('<f4'), 5126, 'VEC4', 34962))
+    prims = [dict(attributes=attrs, indices=A(np.arange(s0_ * 3, (s0_ + n) * 3, dtype='<u2'), 5123, 'SCALAR', 34963),
+                  mode=4, material=1 if a else 0, extras=dict(drawOrder=o, firstTri=s0_, triCount=n, alpha=a))
+             for o, (s0_, n, a) in enumerate(runs)]
+    rgba = M.texture_rgba(pth['tex'], mats[0])
+    png = io.BytesIO(); Image.fromarray(rgba, 'RGBA').save(png, 'PNG')
+    j['images'] = [dict(bufferView=g.view(png.getvalue()), mimeType='image/png', name=mats[0]['name'])]
+    j['samplers'] = [dict(magFilter=9729, minFilter=9729, wrapS=33071, wrapT=33071)]
+    j['textures'] = [dict(source=0, sampler=0)]
+    base = lambda: dict(pbrMetallicRoughness=dict(baseColorTexture=dict(index=0), metallicFactor=0.0, roughnessFactor=1.0),
+                        doubleSided=True, extensions=dict(KHR_materials_unlit={}))
+    j['materials'] = [dict(name='opaque', alphaMode='OPAQUE', **base()),
+                      dict(name='alpha', alphaMode='MASK', alphaCutoff=100 / 255.0, **base())]
+    j['extensionsUsed'] = ['KHR_materials_unlit']
+    j['meshes'] = [dict(name=weapon, primitives=prims)]
+    j['nodes'] = [dict(name=f'{weapon}_mesh', mesh=0)]   # no root flip: socket space = game -Y-up
+    j['scenes'] = [dict(name=weapon, nodes=[0])]; j['scene'] = 0
+    stem = weapon
+    g.write(os.path.join(out, f'{stem}.glb'))
+    side = dict(format=f'{stem}.glb: one static mesh in the owner socket space (game -Y-up, no root flip)',
+                owner=owner, slot=slot, weapon=weapon, marker=slot + 0xf, bone=bone, marker_offset=off,
+                files={k: os.path.basename(v) for k, v in pth.items() if k != 'clips'},
+                variant=dict(value=variant, all=variants(buf)),
+                scale=[round(group_scale(buf, gr['P'], gr['G']), 9) for gr in groups],
+                vertices=len(pos), triangles=len(tris),
+                bbox=[pos.min(0).round(4).tolist(), pos.max(0).round(4).tolist()],
+                texture=dict(name=mats[0]['name'], size=[int(rgba.shape[1]), int(rgba.shape[0])]),
+                draw_runs=[dict(order=o, first_tri=s0_, tri_count=n, alpha=a) for o, (s0_, n, a) in enumerate(runs)])
+    json.dump(side, open(os.path.join(out, f'{stem}.json'), 'w'), indent=1)
+    print(f"wrote {out} {stem}.glb/json: {weapon} var {variant}, {len(tris)} tris, bone {bone} offset {off}, "
+          f"bbox {side['bbox']}")
+
+
 # ---------------------------------------------------------------- self-test
 def selftest():
     """parse_drawpackets_cycl == parse_drawpackets on Vincent's 07703201 (every sub-packet)."""
@@ -361,6 +489,9 @@ if __name__ == '__main__':
         vs = [int(opt('--variant'))] if '--variant' in a else variants(buf)
         for v in vs:
             export(model, out, cl, v)
+    elif a[0] == 'weapon':
+        export_weapons(opt('--owner', 'e027'), int(opt('--slot', '0')), opt('--out', DEFAULT_OUT),
+                       int(opt('--variant', '0')))
     elif a[0] == 'selftest':
         selftest()
     elif a[0] == 'verify':

@@ -127,6 +127,34 @@ export function defence(st, raw, kind, G = GAME) {
 const short = v => (v << 16) >> 16;
 const sub3 = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
 const len3 = v => Math.hypot(v[0], v[1], v[2]);
+const dot3 = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const unit3 = v => { const l = len3(v); return l ? [f(v[0] / l), f(v[1] / l), f(v[2] / l)] : v.slice(); };   // VU vrsqrt x vmulq
+
+// FUN_00323318(r): per-frame fraction for a per-tick rate at step *(DAT_0046e290+4) (as player.js fracStep)
+export function fracStep(r, step) {
+  if (!(1.0 < step)) return f(r * step);
+  let i = 1, k = 1.0;
+  if (1.0 <= step) do { i++; k = f(k * f(1.0 - r)); } while (i <= step);
+  return f(1.0 - k);
+}
+
+// Body yaw toward the aim target, one frame: FUN_0034de50 (from FUN_0034ea18) while C+0x214 = 6.
+// Case 6: C+0x2c0 = unit(C+0x2b0 - C+0x30) (3D), C+0x2cc = 0.5; then LAB_0034e2f0: if the target
+// is behind (face . dir <= -0.97) dir = row 0 (C+0x1c0 bit 0x40 clear: e027 0x10301), else dir as is;
+// face = face + (dir - face) x FUN_00323318(0.5) (FUN_002611f4), unit; FUN_0034a5a8(C, 1) rebuilds
+// the rows from the up row (0,-1,0): face loses its y and is renormalised (row 0 = up x face,
+// row 2 = row 0 x up). Not taken: the rate-limited branch for C+0x45c bit 21 (FUN_0025a560 by
+// C+0x478 x DAT_004eeb28); the lerp branch fits #66 / #67 per frame (test_enemy_ai 'facing').
+// Not translated: C+0x224 (turn rate written for the motion code).
+export function turnBody(face, pos, t2b0, step) {
+  let dir = unit3(sub3(t2b0, pos));
+  if (len3(dir) === 0) dir = face.slice();
+  if (!(-0.97 < dot3(face, dir))) dir = [f(-face[2]), 0, f(face[0])];      // row 0 = up x face, up (0,-1,0)
+  const k = fracStep(0.5, step);
+  let v = unit3([0, 1, 2].map(i => f(face[i] + f(f(dir[i] - face[i]) * k))));
+  v = unit3([v[0], 0, v[2]]);                                                 // FUN_0034a5a8 with up = (0,-1,0)
+  return v;
+}
 // distance from point c to segment a-b (for the BULLET_R stand-in)
 function segPointDist(a, b, c) {
   const ab = sub3(b, a), ac = sub3(c, a), l2 = ab[0] * ab[0] + ab[1] * ab[1] + ab[2] * ab[2];
@@ -213,7 +241,7 @@ export function createEnemyAI(opts) {
       flags28: 0, f118: init.f118 ?? 0, target: init.target ?? null, aim120: null,
       astate: init.astate ?? 0, hp: init.hp ?? 100, s64: 0, f19c: null,
       // body C
-      C: { f564: init.f564 ?? 0, speed: 0, s214: 0, aim: null, motion: null, clip: init.clip || 'r_gst' },
+      C: { f564: init.f564 ?? 0, speed: 0, s214: 0, aim: null, t2b0: null, motion: null, clip: init.clip || 'r_gst' },
       ai: null,
     };
     a.ai = {
@@ -223,6 +251,7 @@ export function createEnemyAI(opts) {
       rounds: init.rounds ?? (W ? W.mag : 0), mode: init.mode ?? 0, amode: 0, cmode: 0, brain: null, timer: null,
       W, hits: 0,
     };
+    a.C.t2b0 = a.pos.map((x, i) => f(x + a.face[i]));                           // FUN_0034b4c8: C+0x2b0 = facing + position (no turn)
     objects.set(a.id, a);
     actors.push(a);
     queueInsert(a.ai);
@@ -329,19 +358,22 @@ export function createEnemyAI(opts) {
 
   function setTarget(ai, t) {                                                 // FUN_0035fc98
     const prev = target(ai);
-    if (t) { ai.owner.f118 |= 3; ai.owner.target = t; }                      // FUN_00562f50
-    else { ai.owner.f118 &= ~2; ai.owner.target = null; }
+    // FUN_00562f50 -> FUN_00342608(C, target): C+0x6c2 = target id and C+0x564 bit 30 (the body
+    // then aims at the target every frame, FUN_00342650 in bodyTrack); none: 0xffff, bit 30 clear
+    if (t) { ai.owner.f118 |= 3; ai.owner.target = t; ai.owner.C.f564 |= 0x40000000; }
+    else { ai.owner.f118 &= ~2; ai.owner.target = null; ai.owner.C.f564 &= ~0x40000000; }
     distances(ai, t !== prev);
     return !!t;
   }
   function eye(o) {                                                           // FUN_005634e0(o, 3): (0, h-2, 0) in o's frame, up = -y
     return [o.pos[0], o.pos[1] - (EYE_H - 2.0), o.pos[2]];
   }
+  const targetPoint = t => [t.pos[0], t.pos[1] - PLAYER_AIM_H, t.pos[2]];   // player vt+0x5c (GUESS, see PLAYER_AIM_H)
   function aimPoint(a) {                                                      // FUN_00360558 -> FUN_00563438 / FUN_00562ff8
     const t = target(a.ai);
-    if (t) a.aim120 = [t.pos[0], t.pos[1] - PLAYER_AIM_H, t.pos[2]];         // target vt+0x5c (GUESS, see PLAYER_AIM_H)
+    if (t) a.aim120 = targetPoint(t);                                         // target vt+0x5c
     else if (!(a.f118 & 1)) a.aim120 = [a.pos[0] + a.face[0] * 1000, a.pos[1] + a.face[1] * 1000, a.pos[2] + a.face[2] * 1000];
-    if (t) a.C.aim = a.aim120.slice();                                         // FUN_003424c0(C, +0x120)
+    if (t) setAim(a, a.aim120);                                               // FUN_00562ff8 -> FUN_003424c0(C, +0x120)
     return a.aim120;
   }
   function distances(ai, retarget) {                                          // FUN_0035e830
@@ -588,9 +620,21 @@ export function createEnemyAI(opts) {
     events.push(`round ${a.id} ${ai.rounds}`);
   }
 
+  // FUN_003424c0: C+0x670 = aim; while C+0x214 = 6 also the turn target C+0x2b0 = aim + row 0 x
+  // stance offset (only with C+0x564 bit 0; e027 0x40000400 / 0x204000 in k_enemy_engage8: offset 0),
+  // through FUN_0034b5e0 = the inverse of the body's parent frame (vt+0x2c). The soldiers stand on
+  // the static room, so that frame is taken as the world (L: the turn fits the traces with it).
+  function setAim(a, aim) {
+    const C = a.C;
+    C.aim = aim.slice();
+    if (C.s214 !== 6) return;
+    if (C.f564 & 1) warnOnce('enemy_ai: C+0x564 bit 0 stance offset (C+0x664, DAT_0046f0e8..f4) not translated');
+    C.t2b0 = aim.slice();
+  }
+
   // FUN_00341b78: aim point to C+0x670, then motion state (current +0x74) or 0xe
   function standShot(a, aim) {
-    a.C.aim = aim;
+    setAim(a, aim);
     const m = a.C.motion;
     if (!m) a.C.motion = { cls: 0xe, phase: 0, timer: 0, done: 0 };
     else if (m.next74) a.C.motion = { cls: m.next74, phase: 0, timer: 0, done: 0 };
@@ -760,8 +804,23 @@ export function createEnemyAI(opts) {
     scheduler(step);
     // 2. bullets (oldest first)
     for (const b of bullets.slice()) if (bulletUpdate(b, step)) bullets.splice(bullets.indexOf(b), 1);
-    // 3. bodies (may spawn bullets)
-    for (const a of actors) bodyUpdate(a, step);
+    // 3. bodies: turn (FUN_0034ea18 -> FUN_0034de50), then the motion state (may spawn bullets).
+    // GUESS: turn before the motion state (their order inside the body update is not traced; the turn
+    // reads only C+0x2b0, which neither changes)
+    for (const a of actors) {
+      // GUESS: a dead soldier stops turning. In the game the turn runs in FUN_0034ea18 until C+0x214 is 0;
+      // the death path (FUN_0055cac8 -> FUN_0035f728) isn't seen to clear it, so he may keep turning
+      // toward his last aim point (notes/fidelity-audit.md 'Dead soldier stops turning').
+      if (dead(a)) { bodyUpdate(a, step); continue; }
+      // FUN_00343160 (motion update): C+0x564 bit 30 -> FUN_00342650: the C+0x6c2 object's vt+0x5c
+      // point -> FUN_003424c0 (no parent-frame transform: vt+0x34 = no parent on the static room, L)
+      // T: the point is where Vincent was before this frame's move (record f's position fits the
+      // game's turn, f+1's does not: k_enemy_engage7 #66 open loop median 0.9 vs 1.0 deg, max 5.5 vs 11)
+      if ((a.C.f564 & 0x40000000) && a.target)
+        setAim(a, targetPoint(a.target === P && playerOld ? { pos: playerOld } : a.target));
+      if (a.C.s214 === 6) a.face = turnBody(a.face, a.pos, a.C.t2b0, step);
+      bodyUpdate(a, step);
+    }
     // 4. messages posted last frame -> event 2 of the receiver (r0 = n, r2 = sender)
     const mail = mailbox.splice(0);
     for (const m of mail) { const o = objects.get(m.to); if (o) runEvent(o, 2, [m.n, 0, m.from, 0]); }

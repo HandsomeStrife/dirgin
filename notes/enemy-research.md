@@ -780,3 +780,26 @@ stops at 362 u (x −1302), short of its 515 u range. The mesh ray is the one th
 Call log: `TRACE_CALLLOG=bullet` / `spread` (tools/trace/calllog.py; frames via
 `TRACE_CALLLOG_FRAMES=780:900`), scripts `k_bullet1` (= engage7 inputs, to f900) and `k_bullet2`
 (= engage8 inputs). Out: tools/trace/out/k_bullet*.calls.jsonl and out/spread/.
+
+## 12. Facing: the awake soldier's body turn (worker 0128, 2026-10-30)
+
+Dan's report (20261030T100134Z-191d): soldiers in the wrong place, not aiming, no rifles. **Position
+was right**: page vs k_enemy_engage7 body C+0x30 for #66 (-1038.978, -146.000, -1100.470) and #67
+(-953.915, -160.370, -1084.805): 0.000 both (matrix also exact vs the save, enemy-placement.md);
+#67 is on the walkway, 12.3 u from his Vincent. The page never turned them (drawn yaw stayed at the
+placement: #67 154.37 deg while the game turns it to about -102).
+
+**Turn (D, T).** setTarget FUN_00562f50 -> FUN_00342608(C, target): C+0x6c2 = target id, C+0x564
+|= 0x40000000 (trace cflags 0x40000400 from the wake). Every frame FUN_00343160 (motion update) with
+that bit -> FUN_00342650: target vt+0x5c point -> FUN_003424c0(C, p): C+0x670 = p and, while
+C+0x214 = 6, C+0x2b0 = p (+ row 0 x stance offset only with C+0x564 bit 0) through FUN_0034b5e0
+(inverse parent frame; static room = world). FUN_0034ea18 -> FUN_0034de50 case 6: C+0x2c0 =
+unit(C+0x2b0 - C+0x30) (3D), C+0x2cc = 0.5; LAB_0034e2f0: face . dir <= -0.97 -> dir = row 0
+(C+0x1c0 bit 0x40 clear), face += (dir - face) x FUN_00323318(0.5) (= 0.5 at step 1.2), unit; then
+FUN_0034a5a8(C, 1) rebuilds the rows from up (0,-1,0) (face loses its y). C+0x45c bit 21 would take
+the rate-limited FUN_0025a560 branch instead (not taken: the lerp fits). Open loop vs the traces:
+#66 median 0.30 (engage8), #67 0.08; with a (0.4, -0.1) offset of Vincent's point in his frame #66
+engage7 0.93 -> 0.06 deg, i.e. the residual is the vt+0x5c GUESS (PLAYER_AIM_H). enemy_ai.js
+`turnBody` / `setAim`; test_enemy_ai 'facing' (closed loop) and fixed-input turnBody checks;
+mutants: no turn, no per-frame look, rate 0.3, no flatten, setTarget without bit 30 all fail;
+'Vincent's post-move point' only moves the engage7 #66 gap.

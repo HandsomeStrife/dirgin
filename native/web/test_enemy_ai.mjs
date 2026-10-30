@@ -97,6 +97,7 @@ function aiOf(r, k) {
     astate: r[`e${k}_astate`] != null ? r[`e${k}_astate`] & 0xff : null,
     cflags: r[`e${k}_cflags`] ?? 0, clip: r[`e${k}_motion`], hp: r[`e${k}_hp`],
     pos: [16, 20, 24].map(o => hex(r[`e${k}_face_pos`]).readFloatLE(o)),
+    face: [0, 4, 8].map(o => hex(r[`e${k}_face_pos`]).readFloatLE(o)),
   };
 }
 
@@ -135,7 +136,7 @@ function run(name) {
       log: m => logs.push(m), damage: true, quiet: true });
     const acts = ids.map((id, k) => {
       const s = aiOf(R[0], k);
-      return W.addActor({ id, rec: id - 22, pos: s.pos, hp: s.hp, mode: s.mode, due: s.due, last: s.last,
+      return W.addActor({ id, rec: id - 22, pos: s.pos, face: s.face, hp: s.hp, mode: s.mode, due: s.due, last: s.last,
         interval: s.interval, aiFlags: s.flags, bstate: s.bstate, rounds: s.rounds ?? undefined,
         astate: s.astate ?? 1, clip: s.clip, f564: s.cflags, f118: s.f118 & ~2 });
     });
@@ -144,7 +145,8 @@ function run(name) {
   }
   function stepTo(B, i) {
     const r0 = R[i - 1], r = R[i];
-    for (let k = 0; k < 7; k++) B.acts[k].C.f564 = aiOf(r0, k).cflags;   // body flags (input)
+    // body flags (input), except bit 30 (look at the target), which the sim sets (FUN_00342608)
+    for (let k = 0; k < 7; k++) { const C = B.acts[k].C; C.f564 = (aiOf(r0, k).cflags & ~0x40000000) | (C.f564 & 0x40000000); }
     B.player.pos = pos(r);
     B.W.tick(r0.step, pos(r0), pos(r));
   }
@@ -176,6 +178,9 @@ function run(name) {
   const mism = {}, first = {};
   const fire = { sim: [], game: [] }, hp = { sim: [], game: [] }, wake = { sim: null, game: null };
   let clockBad = 0, dueBad = 0, modeAllBad = 0, dueAll = 0;
+  // facing (body C+0x20): the sim's heading vs the game's, every frame, closed loop
+  const yaw = v => Math.atan2(v[0], v[2]) * 180 / Math.PI;
+  const face = [{ err: [], moved: 0, bit30: 0 }, { err: [], moved: 0, bit30: 0 }];
   for (let i = 1; i < R.length; i++) {
     const r0 = R[i - 1], r = R[i], f = r.frame;
     const hpBefore = player.hp;
@@ -197,6 +202,10 @@ function run(name) {
       const game = { mode: g.mode, bstate: g.bstate, interval: g.interval, target: !!(g.f118 & 2),
         astate: g.astate, clip: g.clip, rounds: g.rounds, timer: g.timer };
       if (g.due !== a.ai.due) dueBad++;
+      if (r[`e${k}_cflags`] != null && ((g.cflags ^ a.C.f564) & 0x40000000)) face[k].bit30++;
+      const fe = Math.abs(((yaw(a.face) - yaw(g.face)) % 360 + 540) % 360 - 180);
+      face[k].err.push([f, fe]); if (process.env.FACEDBG && k === 0) console.log(f, yaw(a.face).toFixed(2), yaw(g.face).toFixed(2), fe.toFixed(2));
+      if (Math.abs(((yaw(g.face) - yaw(aiOf(R[0], k).face)) % 360 + 540) % 360 - 180) > 30) face[k].moved++;
       for (const fl of fields) {
         if (game[fl] == null) continue;
         const key = `#${ids[k]} ${fl}`;
@@ -213,6 +222,20 @@ function run(name) {
   ok(wake.game === wake.sim && wake.game != null, `${name}: #66 wakes (mode 0 -> 2) at f${wake.game} (sim f${wake.sim})`);
   ok(modeAllBad === 0, `${name}: AI mode of all 7 soldiers every frame (${modeAllBad} off)`);
   ok(dueAll === 0, `${name}: next think time (AI +0x18) of all 7 every frame (${dueAll} off)`);
+  // Facing: FUN_0034de50 case 6 (enemy_ai turnBody). The aim point is Vincent's feet - PLAYER_AIM_H
+  // (GUESS for vt+0x5c), so a residual of a few tenths of a degree is that point's xz, and it grows
+  // when Vincent is close (k_enemy_engage7: he passes within ~5 u of #66).
+  for (let k = 0; k < 2; k++) {
+    const e = face[k].err.map(x => x[1]).sort((a, b) => a - b);
+    const med = e[e.length >> 1], max = e[e.length - 1], at = face[k].err.find(x => x[1] === max)[0];
+    if (R[0].e0_cflags != null) ok(face[k].bit30 === 0, `${name}: #${ids[k]} C+0x564 bit 30 (target look, FUN_00342608) every frame (${face[k].bit30} off)`);
+    ok(face[k].moved > 0 && med < 3, `${name}: #${ids[k]} facing every frame: median ${med.toFixed(2)} deg (game turns > 30 deg on ${face[k].moved} frames)`);
+    // open loop, a fixed (0.4, -0.1) offset of Vincent's point in his frame takes #66's engage7 median
+    // 0.93 -> 0.06 deg: the residual is the vt+0x5c GUESS (PLAYER_AIM_H), large when he is within ~5 u
+    // (k_enemy_engage7 #66 only: there Vincent walks past it; elsewhere he stays >= 30 u away)
+    if (name === 'k_enemy_engage7' && k === 0) gap(max < 2, `${name}: #${ids[k]} facing max ${max.toFixed(2)} deg (f${at}) < 2 [aim point vt+0x5c GUESS]`);
+    else ok(max < 2, `${name}: #${ids[k]} facing max ${max.toFixed(2)} deg (f${at}) < 2`);
+  }
   const noFlags = R[0].e0_cflags == null;                 // engage7: C+0x564 not traced
   for (const [key, n] of Object.entries(mism)) {
     const msg = `${key}: ${n} frames off${n ? ' (first ' + first[key] + ')' : ''}`;
@@ -257,6 +280,19 @@ for (const [side, damage, dist, flight] of [[0, true, 30, 3], [40, true, 30], [0
   ok(shotAt != null && hit === (side === 0 && !!damage), `synthetic: Vincent ${dist} u away ${side ? 'steps ' + side + ' u aside' : 'stands'} after the shot${damage ? '' : ' (damage option not given: off)'} -> ${hit ? 'hit' : 'no hit'}`);
   // 2 frames of countdown (+0x142), then 1.2 x 50 = 60 u per frame along the path
   if (flight) ok(hitAt - shotAt === flight, `synthetic: ${dist} u: hit ${hitAt - shotAt} frames after the shot (expected ${flight})`);
+}
+
+// turnBody (FUN_0034de50 case 6) on fixed inputs: a target straight behind (face . dir <= -0.97)
+// turns toward row 0 = up x face, up (0,-1,0): face (0,0,1) -> row 0 (-1,0,0) -> half way = yaw -45;
+// at step 1.2 the fraction is FUN_00323318(0.5) = 0.5, at step 2.4 it is 1 - 0.5^2 = 0.75.
+{
+  const y = v => Math.atan2(v[0], v[2]) * 180 / Math.PI;
+  const behind = AI.turnBody([0, 0, 1], [0, 0, 0], [0, -10, -50], 1.2);
+  ok(Math.abs(y(behind) + 45) < 1e-4 && behind[1] === 0, `turnBody: target behind -> toward row 0, yaw ${y(behind).toFixed(3)} (-45)`);
+  const side = AI.turnBody([0, 0, 1], [0, 0, 0], [50, -12.4, 0], 1.2);
+  const want = Math.atan2(50 / Math.hypot(50, 12.4), 1) * 180 / Math.PI;     // the 3D unit dir's x is < 1 (dy), so < 45
+  ok(Math.abs(y(side) - want) < 1e-3 && side[1] === 0, `turnBody: target 90 deg right and 12.4 up, 3D lerp 0.5 then flattened: yaw ${y(side).toFixed(3)} (${want.toFixed(3)})`);
+  ok(Math.abs(AI.fracStep(0.5, 2.4) - 0.75) < 1e-7 && Math.abs(AI.fracStep(0.5, 0.5) - 0.25) < 1e-7, 'fracStep: FUN_00323318(0.5) at step 2.4 = 0.75, at 0.5 = 0.25');
 }
 
 // A dead soldier (HP 0) doesn't think or shoot: the death path FUN_0055cac8 -> FUN_0035f728 puts

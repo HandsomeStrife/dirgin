@@ -205,6 +205,10 @@ INPUTS = {
     '076506c1.bin': 'a4e4e9d70dbf65d279acb18fdcba34717e4006afdc4c42c46a9dc31e8c9b9f73',   # e027 model (export_web_enemy)
     '076506c2.bin': 'b69e6647ad51724335f325eec6b7ff97c019bde8dfa8868e7c4ec51f071c820a',   # e027 textures
     '076506cb.bin': '95430e94db04ee4cd74dd28b991ce8d30540423a827e162b24bdc1f470bac500',   # e027 rifle clips (r_gst)
+    '077700c1.bin': '3651ff2ee1a90b9ff2c40de1078d9a1d4d829c31c8edb178a100792c082fed4e',   # w003 rifle model (soldiers)
+    '077700c2.bin': 'b3872f96ba1ca583b327c0edcd0279638928356d0acc734f4e2d88fecbac11a5',   # w003 textures
+    '07770101.bin': 'abddbc0ed50cdcf956cf807ffde04258e9a21fb0916f1168376384e7e6a3aab9',   # w004 model
+    '07770102.bin': '241f2c235d69e0b2f04b132279aff9d0d889527220348da94337b029c8387dfd',   # w004 textures
     '07703201.bin': '9b5570610fb12e2eaf834cec0025c3cc18f7c8a64ba5f92d416d0b78e5d315d9',
     '07703202.bin': '06cfcf6ce98c8e60abb4ba119489c67da2a70429bfd32df3c44acd271cb137c3',
     '07703200.bin': 'bac21ed575aa60e3742de4b0c1c36b787444de612f566b4d4e24f1a842181a75',

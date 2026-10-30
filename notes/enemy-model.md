@@ -83,3 +83,38 @@ So the page draws THREE.BackSide, as Vincent's. UV-unique triangles alone agree 
 
 - top-4 skin weights (three.js): 3 vertices of var 0 had a 5th bone (max dropped 0.077).
 - FPS 60 assumed for clips.
+
+## Rifle (worker 0128, 2026-10-30)
+
+**Which weapon (D).** FUN_00315e90 (status; non-player: +0x60 bit 0x200 clear) -> for slots 0-3
+FUN_00316058 copies the parameter set's (stage section 0) name at +0x44 / +0x4c / +0x54 / +0x5c;
+FUN_00316270 loads it (FUN_00408b30), resets its matrix (FUN_005a6e98(0,0,0, w+0x10)) and attaches
+it: FUN_005a7698(owner MP, w, slot + 0xf, slot). Nothing when set +0x92 bit 4. z128: records 44 / 45
+(set 31) slot 0 = **w003**, slots 1-3 empty; 95 e027 records carry w003, 31 carry w004
+(e027_weapons.json). Files (FUN_00249cb8): w003 = 077700c1 (models: marker, w003_S01 x4, w003_S02 x2,
+5-bone skeleton) + 077700c2 (w003_1 256, w003lw_1); w004 = 07770101 / 07770102.
+
+**Where (D, as Vincent's Cerberus).** FUN_005ab8f0 draws each attached child right after the body:
+world = owner world x FUN_005ad508 = palette[bone] x T(marker xyz), with the owner's light rig.
+e027 marker 15 = **bone 26** (child of the right hand 16; no skinned vertices), offset (0,0,0).
+
+**Scale (D).** w003's smd blocks are version 3 (byte +4 = 3) and have no header float at +0x2c
+(it is 0x10). The VU scale is per group: FUN_005b16c0 (version 3) / FUN_005b1260 (version > 3,
+DAT_005b3bf8 from FUN_005b0ee0) load `*(group +0xc) + 4` with y = 32.0; positions x that / 4096.
+On version-4 models it equals +0x2c / 2048 (e027 3.33525, Cerberus 3.152425, p000 3.465913), so
+export_web_enemy.decode now uses `group_scale` for every model: e027 glb/json/local md5 unchanged.
+w003 1.960384 -> rifle 10.1 u long.
+
+**Checks (hero dump 163235, scratch scripts riflecheck.py / attachcheck.py, worker 0128).** The dump
+draws w003 **var 1** (w003lw_1): 290 triangles, all UV-matched, all 99 export triangles covered; var 0
+and w004 are not drawn. Six rifle instances: similarity fit scale 0.9925-1.0005, RMS 0.15-0.32 u.
+Attach: whole-body fit of the nearest e027 (var 2, r_gst / r_gst_lk frames, UV-unique corners) then
+the rifle through that pose's bone 26: median 0.09 / 0.06 / 0.04 / 0.12 u, max <= 1.04 (four
+soldiers incl. #66 and #67); one has 6 body corners (0.80), one has no body on screen. Winding
+(UV-unique drawn tris, export index order): cw 145 / ccw 14 -> BackSide.
+
+Inputs for tools/byo/disc.py INPUTS (not added: outside this job's files):
+077700c1 3651ff2ee1a90b9ff2c40de1078d9a1d4d829c31c8edb178a100792c082fed4e,
+077700c2 b3872f96ba1ca583b327c0edcd0279638928356d0acc734f4e2d88fecbac11a5,
+07770101 abddbc0ed50cdcf956cf807ffde04258e9a21fb0916f1168376384e7e6a3aab9,
+07770102 241f2c235d69e0b2f04b132279aff9d0d889527220348da94337b029c8387dfd.

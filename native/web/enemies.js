@@ -52,6 +52,55 @@ const SCALE_BYTE = 122;
 // FUN_005b0380 not decoded (as Vincent's)
 const ACTOR_CENTRE = [-0.2927, -8.2564, -0.7635];
 
+// Weapon (decoded, notes/enemy-model.md "Rifle"): FUN_00315e90 -> FUN_00316058 slot 0 = the
+// parameter set's +0x44 name (z128 soldiers: w003, some w004) -> FUN_00316270 attaches it at
+// marker 15 (slot + 0xf); FUN_005ab8f0 draws it right after the body with world = owner world x
+// palette[bone] x T(marker xyz) (FUN_005ad508), with the owner's light rig. e027 marker 15 =
+// bone 26 (child of the right hand 16), offset 0. The glb holds the weapon in that socket space,
+// so the mesh takes joint j26's world matrix, as gun.js does with Vincent's j56.
+// Checked on hero dump 163235 (w003 low LOD, 290 drawn triangles, all UV-matched): shape fit
+// scale 0.993-1.0005, RMS 0.15-0.32 u; placed through bone 26 of each soldier's best-fit idle
+// pose: median 0.04-0.12 u from the game's rifle (4 soldiers). Winding cw 145 / ccw 14: BackSide.
+async function loadWeapons(list) {
+  let map;
+  try { map = await json(DIR + 'e027_weapons.json'); }
+  catch (e) { console.warn('enemy weapons not shown:', e.message); return null; }
+  const names = [...new Set(list.map(p => map.records[p.rec]).filter(Boolean))];
+  const glb = {};
+  for (const n of names) {
+    try { glb[n] = await new GLTFLoader().loadAsync(DIR + n + '.glb'); }
+    catch (e) { console.warn(`enemy weapon ${n} not shown:`, e.message); }
+  }
+  return { map, glb };
+}
+function attachWeapon(weapons, rec, scn, body, U, litPatch) {
+  const name = weapons?.map.records[rec];
+  const g = name && weapons.glb[name];
+  if (!g) return null;
+  const sock = 'j' + String(26).padStart(2, '0');              // marker 15 -> bone 26 (e027 marker.mkd)
+  let joint = null;
+  scn.traverse(n => { if (!joint && n.name === sock) joint = n; });
+  if (!joint) { console.warn(`enemy ${rec}: no joint ${sock}, weapon not shown`); return null; }
+  const mesh = g.scene.clone(true);
+  mesh.traverse(o => {
+    if (!o.isMesh) return;
+    o.frustumCulled = false;
+    o.material = o.material.clone();
+    const m = o.material;
+    if (m.map) { m.map.colorSpace = THREE.NoColorSpace; m.map.needsUpdate = true; }
+    m.side = THREE.BackSide;                                   // measured on the hero dump (see above)
+    // the owner's rig (FUN_005ab8f0). Static mesh: the 'cloth' variant of program D reads the
+    // normal attribute through modelMatrix (no skinning)
+    if (U && litPatch) litPatch(m, U, true);
+  });
+  mesh.matrixAutoUpdate = false;
+  mesh.traverse(o => { o.matrixAutoUpdate = false; o.matrix.identity(); });
+  // joint world at draw time = owner world x palette[26]; after the body (added last: drawn after it)
+  mesh.traverse(o => { if (o.isMesh) o.onBeforeRender = () => { o.matrixWorld.copy(joint.matrixWorld); }; });
+  body.add(mesh);
+  return { name, mesh };
+}
+
 async function json(path) {
   const r = await fetch(path);
   if (!r.ok) throw new Error(`${path}: HTTP ${r.status}`);
@@ -84,6 +133,8 @@ export async function setupEnemies({ root, litPatch, light, extra = [] }) {
     json(DIR + 'e027.json'),
     fetch(DIR + 'e027_local.bin').then(r => { if (!r.ok) throw new Error(`e027_local.bin: HTTP ${r.status}`); return r.arrayBuffer(); }),
   ]);
+  // weapons (export_web_enemy.py weapon): {record: name} and one static glb per name
+  const weapons = await loadWeapons(list);
   const lp = side.local_pose;
   if (!lp || !lp.clips[CLIP]) throw new Error(`e027.json: no local pose for ${CLIP}`);
   const s = SCALE_BYTE / 128;
@@ -130,7 +181,9 @@ export async function setupEnemies({ root, litPatch, light, extra = [] }) {
       };
       for (const o of prims) litPatch(o.material, U);
       a.light = { point: p.toArray(), L2: dir.toArray(), C2: col.toArray() };
+      a.U = U;
     }
+    a.weapon = attachWeapon(weapons, pl.rec, scn, body, a.U, litPatch);
     pose.poseLocal(CLIP, 0, null, 0, 1);
     actors.push(a);
   }
@@ -143,6 +196,9 @@ export async function setupEnemies({ root, litPatch, light, extra = [] }) {
     tick(ai) {
       for (const a of actors) {
         const s = ai && ai.actors.find(x => x.rec === a.rec);
+        // body matrix: the AI's body C+0x20 facing (enemy_ai turnBody, FUN_0034de50) and C+0x30
+        // position, drawn as at setup (play.js bodyYaw: rotation.y = atan2(face.x, face.z) + pi)
+        if (s) { a.body.position.set(...s.pos); a.body.rotation.y = Math.atan2(s.face[0], s.face[2]) + Math.PI; }
         const want = s && lp.clips[s.C.clip] && side.clips[s.C.clip] ? s.C.clip : a.clip;
         if (want !== a.clip) { a.clip = want; a.frame = 0; }
         a.pose.poseLocal(a.clip, a.frame, null, 0, 1);
