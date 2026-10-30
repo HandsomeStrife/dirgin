@@ -1,0 +1,3 @@
+{"name": "k_enemy_engage2", "frames": 640, "log_from": 220, "doc": "enemy notice/engage, attempt 2 (worker 0116): run east (lx 0.6, ly -1) frames 10-165, stopping short of the x~-1186 event line (k_enemy_engage froze there), ~190 units from live e027 #66; then R1 x3 (230, 270, 310) and wait. Use TRACE_FIELDSET=enemy.",
+ "events": [{"from": 10, "to": 165, "lx": 0.6, "ly": -1.0},
+            {"from": 230, "to": 234, "buttons": ["r1"]}, {"from": 270, "to": 274, "buttons": ["r1"]}, {"from": 310, "to": 314, "buttons": ["r1"]}]}

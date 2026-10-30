@@ -210,6 +210,18 @@ step "Vincent's gun (Cerberus)"
 run gun $PY export_web_gun.py --no-dump "$DATA/vincent"
 echo "ok"
 
+step "enemy e027 (z128 soldier): skinned glb per variant + r_gst idle -> data/enemies"
+run enemy_e027 $PY export_web_enemy.py export --model e027 --out "$DATA/enemies" --clips r_gst,r_gst_lk,r_st_a,r_st_f,r_stlld0,r_stlaf0,r_stbf0
+[ -s "$DATA/enemies/e027.glb" ] || fail "data/enemies/e027.glb missing after the enemy export (log: $LOGS/enemy_e027.log)"
+grep '^wrote' "$LOGS/enemy_e027.log" | sed "s#$REPO/##" | cut -c1-160
+echo "ok"
+
+step "enemy placements (stage file sections 0/1: stage-load e027s -> data/enemies/placements.json)"
+run enemy_placements $PY export_web_placements.py "$NOPATH/06800001.bin" "$DATA/enemies"
+[ -s "$DATA/enemies/placements.json" ] || fail "data/enemies/placements.json missing (log: $LOGS/enemy_placements.log)"
+head -n 1 "$LOGS/enemy_placements.log" | cut -c1-160
+echo "ok"
+
 step "weapon stats + reticle tables and texture (bgd.bin parts, menudata.bin menu2, ELF from the disc) -> data/aim"
 run aim $PY export_web_aim.py --iso "$ISO" -o "$DATA/aim"
 tail -n 1 "$LOGS/aim.log"

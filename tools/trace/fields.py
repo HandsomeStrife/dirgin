@@ -12,6 +12,8 @@ G_OBJTAB = 0x46E880    # DAT_0046e880: object table owner (FUN_0053bb08)
 STEP = 0x4EEB24        # DAT_004eeb24: logic step in ticks (FUN_00322f88)
 DT = 0x4EEB28          # DAT_004eeb28: step in seconds = step / 60 (FUN_00322f88)
 FLAGS = 0x46E298       # DAT_0046e298: script flags (FUN_00326298)
+G_GSTATE = 0x46E294    # DAT_0046e294: game-state bit set (FUN_00326068 / FUN_00326018 / FUN_00326040)
+G_AISCHED = 0x46F4EC   # DAT_0046f4ec: AI scheduler (FUN_00365dd8 creates, FUN_00365008 runs)
 RETICLE = 0x471380     # DAT_00471380: reticle sprite object (FUN_003b0440 / FUN_003b0ac0)
 
 
@@ -42,7 +44,50 @@ def resolve_bases(mem):
     HUD = u32(mem, u32(mem, G_GAME) + 0x44)     # view/HUD object (FUN_0033c060, FUN_0033c868)
     RET = u32(mem, RETICLE)                       # reticle sprite object (FUN_003b0440)
     BM = u32(mem, MP + 0x3F8)                     # bone matrices (FUN_005a87a0 -> FUN_005b2d58)
-    return dict(P=P, C=C, CAM=CAM, MP=MP, MP2=MP2, HUD=HUD, RET=RET, BM=BM, **find_cape(mem))
+    bases = dict(P=P, C=C, CAM=CAM, MP=MP, MP2=MP2, HUD=HUD, RET=RET, BM=BM)
+    if FIELDSET == "enemy":
+        bases.update(find_enemies(mem))
+        # game-state bit set: FUN_00326068(n) -> FUN_0036b610(DAT_0046e294, n) tests word n>>5
+        # of *(*DAT_0046e294 + 4). Bit 6 set = AI scheduler paused (FUN_00365008 via FUN_00325b40).
+        bases["GSB"] = u32(mem, u32(mem, u32(mem, G_GSTATE)) + 4)
+        bases["AIQ"] = u32(mem, G_AISCHED)
+        bases["PS"] = u32(mem, P + 0x17C)          # player status record (FUN_0055a370)
+        bases["EVF"] = u32(mem, 0x47DBB0)        # DAT_0047dbb0: event-flag block (FUN_003ff658 / FUN_003ff738)
+    else:
+        bases.update(find_cape(mem))
+    return bases
+
+
+ENEMY_VT = 0x58E1F8    # enemy actor class vtable, set by the constructor FUN_00558790
+ENEMY_MAX = 7          # active e027s in the sea-of-flames save (notes/enemy-research.md)
+
+
+def find_enemies(mem):
+    """Active enemy actors at load: object table *(M+0x1164)[0..255] (FUN_0053e040), class
+    vtable ENEMY_VT, with a body (+0xe8), status (+0x17c, FUN_0055a370) and AI (+0x184), i.e.
+    already activated by vtable +0x144 = FUN_00559748. Enemies activated later in the run have
+    no body yet and are NOT traced (the hook copies fixed addresses)."""
+    m = u32(mem, G_OBJTAB)
+    tab = u32(mem, m + 0x1164)
+    out = {}
+    n = 0
+    for i in range(256):
+        o = u32(mem, tab + 4 * i)
+        if not o or u32(mem, o + 0x18) != ENEMY_VT:
+            continue
+        C, ST, AI = u32(mem, o + 0xE8), u32(mem, o + 0x17C), u32(mem, o + 0x184)
+        if not (C and ST and AI) or not u32(mem, o + 0x28) & 1:
+            continue
+        out.update({"E%d" % n: o, "EC%d" % n: C, "ES%d" % n: ST, "EA%d" % n: AI, "EI%d" % n: i})
+        n += 1
+        if n == ENEMY_MAX:
+            break
+    if n == 0:
+        raise RuntimeError("no active enemy actors in this state")
+    for k in range(n, ENEMY_MAX):     # pad with the first enemy so the record layout is fixed
+        for p in ("E", "EC", "ES", "EA", "EI"):
+            out["%s%d" % (p, k)] = out["%s0" % p]
+    return out
 
 
 CAPE_N = 82            # cloth vertices in Vincent's cape block (p000_cloth.py)
@@ -171,7 +216,60 @@ JUMP_FIELDS = [f for f in FIELDS if f[0] in (
     ("p_2a8", "P", 0x2A8, "u32", "D", "FUN_00574808 bits; FUN_00575698 tests 8 and 0x10 in the air"),
 ]
 
-if __import__("os").environ.get("TRACE_FIELDSET") == "jump":
+# Opt-in set for enemy AI research (TRACE_FIELDSET=enemy, worker 0116): no cape; a little of
+# the player, then the same block for each of the ENEMY_MAX actors found by find_enemies.
+# notes/enemy-research.md §3 explains the objects.
+def _enemy_fields(k):
+    A, C, S, I = "E%d" % k, "EC%d" % k, "ES%d" % k, "EA%d" % k
+    p = "e%d_" % k
+    return [
+        (p + "flags", A, 0x28, "u32", "D", "actor+0x28 bit 0 = active (FUN_00541c98, FUN_00558f68 test it before vtable +0x144)"),
+        (p + "target", A, 0x118, "bytes:8", "D", "FUN_00563200: actor+0x118 bit 1 set -> target = object id u16 actor+0x11c (FUN_0053e040)"),
+        (p + "face_pos", C, 0x20, "bytes:32", "D", "body C+0x20 = facing row, C+0x30 = position (same layout as the player's, FUN_0034c388)"),
+        (p + "mflags", C, 0x1C0, "u32", "D", "C+0x1c0 move flags (as the player's); FUN_00361690 reads bit 0x100000"),
+        (p + "move_mode", C, 0x1C8, "u32", "D", "C+0x1c8 move mode (FUN_0034c388)"),
+        (p + "speed", C, 0x1D8, "f32", "D", "C+0x1d8 ground speed units/s (FUN_0034c388)"),
+        (p + "motion", C, 0x570, "name8", "D", "C+0x570 current clip (FUN_003449a0)"),
+        (p + "hp", S, 0x20, "u32", "D", "status+0x20 HP (FUN_0055c7f8 subtracts damage via FUN_003168c8)"),
+        (p + "ai", I, 0x14, "bytes:48", "D", "AI +0x14 flags, +0x18 next think time, +0x20 interval/sub-state, +0x24 state, +0x34..+0x40 target distance/angle floats (FUN_00365110, FUN_00361690)"),
+        (p + "ai_mode", I, 0xD0, "u32", "D", "AI +0xd0 brain mode (FUN_0035f300 / FUN_0035f268)"),
+        (p + "ai_hit", I, 0x4C, "u32", "D", "AI +0x4c time of last hit taken (FUN_00360870, from FUN_0055db50)"),
+        (p + "ai_hits", I, 0x70, "u32", "D", "AI +0x70 short = hits taken (FUN_00360870); +0x72 next"),
+        # worker 0121 (combat AI, notes/enemy-research.md §9)
+        (p + "ai_ammo", I, 0x7C, "u32", "D", "AI +0x7c short = rounds left (FUN_00360418 loads weapon +0x48; FUN_003605d8 -1 per shot); +0x7e"),
+        (p + "ai_timer", I, 0xFC, "u32", "D", "AI +0xfc = fire-timer entry on the scheduler's 2nd list (FUN_003607a8 / FUN_00365478), 0 = not firing"),
+        (p + "astate", A, 0x104, "u32", "D", "actor +0x104 byte = actor state (FUN_0055b8e0; 3 = gun up; 0x80-0xbf = attack, FUN_0055bb40)"),
+        (p + "cflags", C, 0x564, "u32", "D", "C+0x564 motion flags: 0x4000 / 0x200000 tested by the shot FUN_003605d8; C+0x565 bit 7 = busy (FUN_0055ab08)"),
+        # worker 0123 (why #66 takes no damage, notes/enemy-research.md §9.10)
+        (p + "zone", A, 0x19C, "u32", "D", "actor +0x19c = hit-zone record (status +0xa8 -> +0x30 + part*16) set by the hit test FUN_0055bda8; byte 0 scales damage x0.05 (FUN_0055d2c0)"),
+        (p + "part", A, 0x140, "u32", "D", "actor +0x142 byte = part index hit (FUN_0055bda8, from FUN_005ad118)"),
+        (p + "st64", S, 0x64, "u32", "D", "status +0x64: bits 0/1 = no damage (FUN_0055f0e0 in FUN_0055db50), 0x20 (FUN_00317b68)"),
+        (p + "ai_90", I, 0x90, "u32", "D", "AI +0x90 = shooter (+0x4c<<16 | +0x20) by FUN_003608d8; set only on the FUN_0055db50/0055e498 path, not the masked-part path FUN_0055df90"),
+        (p + "pmask", C, 0x77C, "bytes:8", "D", "C+0x77c part mask; a hit on a set bit goes to FUN_0055df90 (hit counted, no damage) in FUN_0055bda8"),
+    ]
+
+
+ENEMY_FIELDS = [f for f in FIELDS if f[0] in ("step", "pad_held", "p_state", "matrix", "motion")]
+ENEMY_FIELDS += [
+    ("p_aim", "P", 0x2B0, "vec4", "D", "P+0x2b0 = weapon aim point = CAM+0xa0 (FUN_005784d8; notes/aim-research.md)"),
+    ("cam_lock", "CAM", 0x1E4, "bytes:8", "D", "CAM+0x1e4 = locked actor id, CAM+0x1e8 bit 2 = lock mode (FUN_00328968)"),
+    ("p_hp", "PS", 0x20, "u32", "D", "player status (P+0x17c, FUN_0055a370) +0x20 = HP (FUN_0055c7f8 subtracts damage; 780 in the save)"),
+    ("gstate", "GSB", 0, "bytes:8", "D", "game-state bits 0..63 (FUN_0036b610); bit 6 = AI paused (FUN_00325b10, set by the event VM FUN_0037def0 / FUN_0037cf30)"),
+    ("ai_now", "AIQ", 0, "u32", "D", "AI scheduler clock in ticks (FUN_00365008: += int(step) accumulated)"),
+    ("evt_obj", None, 0x47DBB0, "u32", "D", "DAT_0047dbb0: event-flag block; FUN_0037e3c0 waits until flag N == value (FUN_003ff738)"),
+    ("evt_flags", "EVF", 0x38, "bytes:64", "D", "event flags 0..63, stored XOR DAT_0047dbf0[n] (FUN_003ff658 writes, FUN_003ff738 reads)"),
+    ("evt_key", None, 0x47DBF0, "bytes:64", "D", "DAT_0047dbf0: XOR key for evt_flags"),
+    # worker 0124 (steer the aim onto #67): camera forward +0x80 and eye +0x90 (FUN_0032ace0)
+    ("cam_fwd", "CAM", 0x80, "vec4", "L", "CAM+0x80 = camera forward (FUN_0032ace0); the aim ray runs eye + fwd * far (FUN_00329778)"),
+    ("cam_eye", "CAM", 0x90, "vec4", "L", "CAM+0x90 = camera eye (FUN_0032ace0)"),
+]
+for _k in range(ENEMY_MAX):
+    ENEMY_FIELDS += _enemy_fields(_k)
+
+FIELDSET = __import__("os").environ.get("TRACE_FIELDSET")
+if FIELDSET == "enemy":
+    FIELDS = ENEMY_FIELDS
+elif __import__("os").environ.get("TRACE_FIELDSET") == "jump":
     FIELDS = JUMP_FIELDS
 elif __import__("os").environ.get("TRACE_FIELDSET") == "cam":
     FIELDS = CAM_FIELDS

@@ -181,3 +181,13 @@ KillSignal=SIGKILL
 TimeoutStopSec=5
 Restart=no
 ```
+
+### Enemy set (TRACE_FIELDSET=enemy, worker 0116)
+
+Logs the enemies that are active in the loaded state (`fields.find_enemies`, up to 7) as
+`e<k>_*` fields; the header's `bases` gives each one's object-table index (`EI<k>`).
+Enemies activated during the run are not traced (fixed addresses). See
+notes/enemy-research.md §6. Script: scripts/k_enemy_engage*.json. k_enemy_engage7 (worker
+0119) climbs the ladder and crosses trigger volume 95 (x -1074, y -146): e027 #66/#67 wake at
+frame 784 (AI mode 2, target player) and fire; see §8 and tools/stage_events.py. k_enemy_engage12 (worker 0124) kills #66, sweeps the aim onto
+#67 (new fields `cam_fwd`, `cam_eye`) and records its non-lethal hit and death (§10).

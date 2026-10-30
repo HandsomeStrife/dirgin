@@ -1,0 +1,4 @@
+{"name": "k_enemy_engage5", "frames": 1020, "log_from": 672, "doc": "worker 0117: run east (frames 10-230) into the x~-1186 message box, close it with cross x2 (400, 450: game-state bit 6 clears, AI resumes), then keep running east (lx 0.6, ly -1, frames 470-1000) toward the live e027s (x -1039..-901). TRACE_FIELDSET=enemy.",
+ "events": [{"from": 10, "to": 230, "lx": 0.6, "ly": -1.0},
+            {"from": 400, "to": 404, "buttons": ["cross"]}, {"from": 450, "to": 454, "buttons": ["cross"]},
+            {"from": 470, "to": 1000, "lx": 0.6, "ly": -1.0}]}

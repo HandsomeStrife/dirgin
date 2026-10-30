@@ -1,0 +1,9 @@
+{"name": "k_enemy_engage7", "frames": 1020, "log_from": 667, "doc": "worker 0119: k_enemy_engage6 compressed. Run east (10-230) into the x~-1186 message (opens ~frame 205: AI clock 1575 -> 1821), close it with cross at 240 and 280, run on (300-470) to the ladder bottom (-1110,-91,-1109), cross (490) + stick (500-880) to climb toward the e027s' level (y ~-146), then R1 x5 (890..990). Goal: a bullet hit fires event 8 (FUN_0055c978), whose script (108/109/126/127/128/92, tools/stage_events.py) sends 0x143 (AI mode) + 0x193 (target player). TRACE_FIELDSET=enemy.",
+ "events": [{"from": 10, "to": 230, "lx": 0.6, "ly": -1.0},
+            {"from": 240, "to": 244, "buttons": ["cross"]}, {"from": 280, "to": 284, "buttons": ["cross"]},
+            {"from": 300, "to": 470, "lx": 0.6, "ly": -1.0},
+            {"from": 490, "to": 494, "buttons": ["cross"]},
+            {"from": 500, "to": 880, "lx": 0.6, "ly": -1.0},
+            {"from": 890, "to": 894, "buttons": ["r1"]}, {"from": 915, "to": 919, "buttons": ["r1"]},
+            {"from": 940, "to": 944, "buttons": ["r1"]}, {"from": 965, "to": 969, "buttons": ["r1"]},
+            {"from": 990, "to": 994, "buttons": ["r1"]}]}

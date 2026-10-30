@@ -1,0 +1,2 @@
+{"name": "k_enemy_engage3", "frames": 1020, "log_from": 623, "doc": "worker 0117: run east as k_enemy_engage (lx 0.6, ly -1, frames 10-230) into the x~-1186 stop, then no input; log frames 623-1020 (1024 = script-area cap) to see whether the event that pauses the AI (game-state bit 6, FUN_00325b10) ends and the e027s get a mode. TRACE_FIELDSET=enemy.",
+ "events": [{"from": 10, "to": 230, "lx": 0.6, "ly": -1.0}]}

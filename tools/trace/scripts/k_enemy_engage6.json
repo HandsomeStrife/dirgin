@@ -1,0 +1,8 @@
+{"name": "k_enemy_engage6", "frames": 1020, "log_from": 672, "doc": "worker 0117: as k_enemy_engage5 (run east, close the x~-1186 message with cross x2) to the ladder bottom (-1110,-91,-1109), ~90 units below e027 #66; then R1 x5 (660..790: first raises the gun, the rest fire), then cross + stick up (820..1000) at the ladder. TRACE_FIELDSET=enemy.",
+ "events": [{"from": 10, "to": 230, "lx": 0.6, "ly": -1.0},
+            {"from": 400, "to": 404, "buttons": ["cross"]}, {"from": 450, "to": 454, "buttons": ["cross"]},
+            {"from": 470, "to": 640, "lx": 0.6, "ly": -1.0},
+            {"from": 660, "to": 664, "buttons": ["r1"]}, {"from": 700, "to": 704, "buttons": ["r1"]},
+            {"from": 730, "to": 734, "buttons": ["r1"]}, {"from": 760, "to": 764, "buttons": ["r1"]},
+            {"from": 790, "to": 794, "buttons": ["r1"]},
+            {"from": 820, "to": 824, "buttons": ["cross"]}, {"from": 830, "to": 1000, "lx": 0.6, "ly": -1.0}]}

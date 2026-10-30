@@ -23,6 +23,7 @@ import { loadRoom } from './room.js';
 import { CapeCloth } from './cloth.js';
 import { createOutputStage } from './output.js';
 import { setupAim } from './aim.js';
+import { setupEnemies } from './enemies.js';
 
 const params = new URLSearchParams(location.search);
 const hud = document.getElementById('hud');
@@ -30,6 +31,7 @@ const msg = document.getElementById('msg');
 if (params.get('hud') === '0') hud.style.display = 'none';
 
 const SPAWN = { x: -1395.63, z: -1110.51 };
+const ENEMIES = params.get('enemies') !== '0';       // enemies.js: z128's stage-load soldiers, idle
 const AIM = params.get('aim') !== '0';               // aim.js (aim_core.js): the weapon, its camera views, the reticle
 const PACKS = params.has('packs') ? params.get('packs').split(',').filter(Boolean) : (AIM ? ['ladder', 'jump', 'shoot'] : ['ladder', 'jump']);
 // Placement: the game draws the model with the motion player's matrix MP+0x10 (FUN_005ab8f0
@@ -263,7 +265,7 @@ async function setupCharLighting(vin, cape) {
     U.uL2.value.copy(dir); U.uC2.value.copy(col);              // light 2: not x MP+0x450
   }
   const centre = V(...L.actor_center);
-  return { U, frame, centre, pick };
+  return { U, frame, centre, pick, env: L.env };               // env: unscaled, for enemies.js
 }
 
 // ------------------------------------------------------------ cape cloth (cloth.js)
@@ -544,7 +546,7 @@ async function main() {
   const renderer = new THREE.WebGLRenderer({ antialias: params.get('aa') === '1', alpha: false });
   renderer.setPixelRatio(params.has('dpr') ? +params.get('dpr') : Math.min(devicePixelRatio, 2));
   renderer.setSize(innerWidth, innerHeight);
-  renderer.sortObjects = false;                    // keep the game's draw order (Vincent added last)
+  renderer.sortObjects = false;                    // keep the game's draw order: scene-graph order (enemies.js: actors after Vincent)
   renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
   renderer.setClearColor(new THREE.Color().setRGB(...scene.clear, THREE.LinearSRGBColorSpace), 1);
   document.body.appendChild(renderer.domElement);
@@ -606,6 +608,8 @@ async function main() {
     const prevHook = anim.drawHook;
     anim.drawHook = () => { if (prevHook) prevHook(); light.frame(actorPoint()); };
   }
+  const enemies = ENEMIES ? await setupEnemies({ root, litPatch, light })
+    .catch(e => { console.warn('enemies off:', e.message); return null; }) : null;
   // test aids that move him (H, ?ladder=): the cloth restarts from the new pose (cloth.js reset)
   // and the camera resets as at spawn (player.js reset(): FUN_003285d0's snap; GUESS: the
   // angles are CAM_SPAWN, and whether the game resets the camera on a warp is not decoded)
@@ -774,6 +778,7 @@ async function main() {
       const g = col.groundY(ctrl.pos.x, ctrl.pos.z, ctrl.pos.y);
       if (g != null) stats.groundErrMax = Math.max(stats.groundErrMax, Math.abs(g - ctrl.pos.y));
       stats.lastGroundErr = g == null ? null : g - ctrl.pos.y;
+      if (enemies) enemies.tick();
       acc -= TICK; n++; stats.ticks++;
     }
     if (n === 8) acc = 0;                          // fell far behind (tab hidden): drop time
@@ -805,7 +810,7 @@ async function main() {
       `click: mouse look (drag works too)   WASD move (walk)   Shift run   ${actionHelp.join('   ')}   H respawn   R report`;
   }
   window.__play = { ctrl, anim, follow, aim: weapon, col, stats, camera, renderer, output, root, vin, light, spawnY: gy,
-                    playerState, camView, report, keys, pressed, motions, packsReady, actionHelp, cape };
+                    playerState, camView, report, keys, pressed, motions, packsReady, actionHelp, cape, enemies };
   requestAnimationFrame(frame);
 }
 

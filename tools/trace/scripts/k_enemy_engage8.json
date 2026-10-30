@@ -1,0 +1,15 @@
+{"name": "k_enemy_engage8", "frames": 1020, "log_from": 760, "doc": "worker 0121: k_enemy_engage7 up to the trigger, then kill #66. Same route (message closed at 240/280, ladder climbed, run east); the stick is released at 787, just after trigger 95 (frame 784) wakes #66/#67. R1 at 795 draws the gun; its aim ray points ~14 deg right of #66 and ~17 deg up, so no lock (run 2 of this script, CAM+0x1e4 = 0xffff). rx -1 at 805-813 and ry +1 at 815-825 (aim_d_turn: rx +1 = bearing up ~1.7 deg/frame, ry -1 = aim up) bring the ray onto #66; R1 at 830/860/890/920/950 fire. #66 has HP 1 in the save. Goal: hit reaction / HP loss / death of #66 (FUN_0055db50 -> FUN_0055d2c0 -> FUN_0055c7f8) and #67's shots at Vincent (p_hp). TRACE_FIELDSET=enemy.", "events": [
+ {"from": 10, "to": 230, "lx": 0.6, "ly": -1.0}, 
+ {"from": 240, "to": 244, "buttons": ["cross"]}, 
+ {"from": 280, "to": 284, "buttons": ["cross"]}, 
+ {"from": 300, "to": 470, "lx": 0.6, "ly": -1.0}, 
+ {"from": 490, "to": 494, "buttons": ["cross"]}, 
+ {"from": 500, "to": 787, "lx": 0.6, "ly": -1.0}, 
+ {"from": 795, "to": 799, "buttons": ["r1"]}, 
+ {"from": 805, "to": 813, "rx": -1.0}, 
+ {"from": 815, "to": 825, "ry": 1.0}, 
+ {"from": 830, "to": 834, "buttons": ["r1"]}, 
+ {"from": 860, "to": 864, "buttons": ["r1"]}, 
+ {"from": 890, "to": 894, "buttons": ["r1"]}, 
+ {"from": 920, "to": 924, "buttons": ["r1"]}, 
+ {"from": 950, "to": 954, "buttons": ["r1"]}]}

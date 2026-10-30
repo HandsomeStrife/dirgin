@@ -1,0 +1,3 @@
+{"name": "k_enemy_engage", "frames": 620, "log_from": 200, "doc": "enemy notice/engage (worker 0116): run east as g_ladder_route2 (lx 0.6, ly -1) to the wall at x~-1186, ~150 units from live e027 #66 (-1039,-146,-1100); stand, then R1 x3 (330, 380, 430) toward the soldiers, then wait. Use TRACE_FIELDSET=enemy.",
+ "events": [{"from": 10, "to": 230, "lx": 0.6, "ly": -1.0},
+            {"from": 330, "to": 334, "buttons": ["r1"]}, {"from": 380, "to": 384, "buttons": ["r1"]}, {"from": 430, "to": 434, "buttons": ["r1"]}]}

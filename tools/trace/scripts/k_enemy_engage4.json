@@ -1,0 +1,5 @@
+{"name": "k_enemy_engage4", "frames": 730, "log_from": 380, "doc": "worker 0117: run east as k_enemy_engage (frames 10-230) into the x~-1186 event stop (AI paused, game-state bit 6), then press cross (400, 450), start (520), cross (580), start (640) in case the event waits on the player; event flags logged. TRACE_FIELDSET=enemy.",
+ "events": [{"from": 10, "to": 230, "lx": 0.6, "ly": -1.0},
+            {"from": 400, "to": 404, "buttons": ["cross"]}, {"from": 450, "to": 454, "buttons": ["cross"]},
+            {"from": 520, "to": 524, "buttons": ["start"]}, {"from": 580, "to": 584, "buttons": ["cross"]},
+            {"from": 640, "to": 644, "buttons": ["start"]}]}
