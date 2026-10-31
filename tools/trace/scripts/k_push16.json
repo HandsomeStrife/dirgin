@@ -1,0 +1,47 @@
+{
+"name": "k_push16",
+"frames": 1020,
+"log_from": 760,
+"doc": "worker 0154: k_enemy_engage8's route (message closed, ladder, run east across trigger 95, which wakes #66 / #67 at f784), but the stick is held to f900 so Vincent runs on into #66 (5 u to his side at f784's line), then stands to f1020. No shots. Goal: the actor push-out FUN_00542ab8 (actor +0x130, TRACE_PUSH=1) between Vincent and #66, and whether a woken mode-2 soldier starts a melee attack (actor state 0x80+) with Vincent next to him. TRACE_FIELDSET=enemy TRACE_ENEMIES=2 TRACE_PUSH=1.",
+"events": [
+{
+"from": 10,
+"to": 230,
+"lx": 0.6,
+"ly": -1.0
+},
+{
+"from": 240,
+"to": 244,
+"buttons": [
+"cross"
+]
+},
+{
+"from": 280,
+"to": 284,
+"buttons": [
+"cross"
+]
+},
+{
+"from": 300,
+"to": 470,
+"lx": 0.6,
+"ly": -1.0
+},
+{
+"from": 490,
+"to": 494,
+"buttons": [
+"cross"
+]
+},
+{
+"from": 500,
+"to": 900,
+"lx": 0.6,
+"ly": -1.0
+}
+]
+}

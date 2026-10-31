@@ -723,6 +723,9 @@ else {
   const player = { pos: [rec.pos[0] + fw[0] * 15, rec.pos[1], rec.pos[2] + fw[2] * 15], hp: 780, id: 0x16, f118: 0, s64: 0 };
   const W = AI.createEnemyAI({ data, player, rand: () => 0.05, quiet: true });
   const a = W.addActor({ rec: 69, mode: 6 });
+  // test aid: the flag-0x20 trigger volumes disarmed. His own shots cross trigger 100 (script 18: wake n0
+  // -> 69-71, enemy_ai shotVolumes), whose script changes his mode; this checks brain 6 alone.
+  for (const o of W.triggers) if (o.shot) W.setActive(o, 0);
   let atk = null, back = null;
   const st = new Set();
   for (let i = 0; i < 400; i++) {

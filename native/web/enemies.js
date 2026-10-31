@@ -1,6 +1,6 @@
 // z128's enemies: e027 soldiers, and any other type export_web_enemy.py exported (e048, e030,
 // e036, e023, e024, e001). Separate module, hooked from play.js; ?enemies=0 turns it off. The AI
-// (enemy_ai.js) drives records 44 / 45 (play.js `extra`); no collision or damage taken yet.
+// (enemy_ai.js) drives the save's live records 44-49 / 66 (play.js `extra`); the push-out is enemy_ai.js pushOut.
 // Start state = the sea-of-flames save: the stage-load soldiers 41 / 42 are dead there and have
 // no body, so they are not drawn (placements.json `dead`, export_web_placements.py SAVE_STATE_DEAD).
 //

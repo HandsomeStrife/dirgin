@@ -192,6 +192,11 @@ notes/enemy-research.md §6. Script: scripts/k_enemy_engage*.json. k_enemy_engag
 frame 784 (AI mode 2, target player) and fire; see §8 and tools/stage_events.py. k_enemy_engage12 (worker 0124) kills #66, sweeps the aim onto
 #67 (new fields `cam_fwd`, `cam_eye`) and records its non-lethal hit and death (§10).
 
+### Push-out fields (TRACE_PUSH=1, worker 0154)
+With `TRACE_FIELDSET=enemy`, `TRACE_PUSH=1` adds the actor push-out state (FUN_00542ab8): Vincent's `p_a28`,
+`p_cyl` (+0x2c radius, +0x30 height, +0x38), `p_a118`, `p_push` (+0x130), `p_c430`, `p_c1c0`, and per soldier
+`cyl`, `a118`, `push`. Script: k_push16 (run into #66 on the ladder top; use TRACE_ENEMIES=2).
+
 ### Call logger (TRACE_CALLLOG, worker 0127)
 
 `TRACE_CALLLOG=<set>` (sets in `calllog.py`: `bullet`, `spread`) wraps chosen game calls, either a

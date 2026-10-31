@@ -237,6 +237,37 @@ function segBox(a, b, lo, hi) {
   return 0;
 }
 
+// FUN_0025e400(out1, out2, a, b, lo, hi): clips the segment a..b to the box, low planes then high
+// planes per axis (x, y, z). Returns the face where b was clipped (2 x axis low, 2 x axis + 1 high), -1
+// when b was not clipped or the clipped segment misses the box (FUN_0025f638 on both ends); p2 = the
+// clipped b (a and b themselves when it misses).
+function clipSeg(a, b, lo, hi) {
+  let p1 = a.slice(0, 3), p2 = b.slice(0, 3), face = -1, ax1 = -1, ax2 = -1;
+  const lerp = (t, u, v) => [0, 1, 2].map(k => f(u[k] + f(f(v[k] - u[k]) * f(t))));   // FUN_002611f4
+  for (let k = 0; k < 3; k++) {
+    const v = lo[k];
+    if (v <= p1[k] || p2[k] < v) {
+      if (p2[k] < v && v <= p1[k]) { p2 = lerp(f(f(v - p1[k]) / f(p2[k] - p1[k])), p1, p2); face = k << 1; ax2 = k; }
+    } else { p1 = lerp(f(f(v - p1[k]) / f(p2[k] - p1[k])), p1, p2); ax1 = k; }
+  }
+  for (let k = 0; k < 3; k++) {
+    const v = hi[k];
+    if (p1[k] <= v || v < p2[k]) {
+      if (v < p2[k] && p1[k] <= v) { p2 = lerp(f(f(v - p1[k]) / f(p2[k] - p1[k])), p1, p2); face = 2 * k + 1; ax2 = k; }
+    } else { p1 = lerp(f(f(v - p1[k]) / f(p2[k] - p1[k])), p1, p2); ax1 = k; }
+  }
+  if (!inBoxBut(p1, lo, hi, ax1) && !inBoxBut(p2, lo, hi, ax2)) return { face: -1, p1: a.slice(0, 3), p2: b.slice(0, 3) };
+  return { face, p1, p2 };
+}
+// FUN_0025f638(p, lo, hi, axis): p inside the box on the two axes other than `axis` (all three for -1;
+// the last test of the 3-axis form is strict on z's high side)
+function inBoxBut(p, lo, hi, axis) {
+  if (axis === 0) return !(p[1] < lo[1] || p[2] < lo[2] || hi[1] < p[1] || hi[2] < p[2]);
+  if (axis === 1) return !(p[0] < lo[0] || p[2] < lo[2] || hi[0] < p[0] || hi[2] < p[2]);
+  if (axis === 2) return !(p[0] < lo[0] || p[1] < lo[1] || hi[0] < p[0] || hi[1] < p[1]);
+  return lo[0] <= p[0] && lo[1] <= p[1] && lo[2] <= p[2] && p[0] <= hi[0] && p[1] <= hi[1] && !(hi[2] < p[2]);
+}
+
 // ---------------------------------------------------------------- the world
 // createEnemyAI(opts):
 //   data    ai.json (export_web_triggers.py)
@@ -285,6 +316,10 @@ export function createEnemyAI(opts) {
   // Trigger volumes = section-8 objects; vars at +0xa0 (cmd 0x104 / 0x105, FUN_0054cd70).
   const triggers = data.triggers.map(t => {
     const o = { kind: 'trigger', id: 't' + t.idx, t, vars: new Int16Array(8), flags28: 0, script: t.script };
+    // FUN_005503e8 (shapes 0 / 8): flags +0xa4 bit 5 (0x20) -> +0x40 |= 0x10 (FUN_005511e8 runs event
+    // 0x12), +0x38 |= 1 (bullets test it, FUN_005442d8) and +0x28 |= 0x100 (see-through: listed, not the
+    // closest hit). Shape 3 clears +0x28 bit 8 and sets no +0x38 bit 0.
+    o.shot = (t.shape === 0 || t.shape === 8) && !!(t.flags & 0x20);
     objects.set(o.id, o);
     return o;
   });
@@ -1612,6 +1647,7 @@ export function createEnemyAI(opts) {
       damage: W.damage,                                                       // +0x134 = (short)W+0x40
       kind: (W.flags & 0x80000) && JITTER_ON ? 2 : 0,                        // FUN_00554738 (flag 2 clear; FUN_00326500)
       target: target(a.ai),
+      shooter: a.id,                                                          // +0x128 owner id
     };
     bullets.push(b);
     events.push(`shot ${a.id}`);
@@ -1641,7 +1677,10 @@ export function createEnemyAI(opts) {
     // room probe are not decoded; #66 shows no hit or near miss from #67's f875 bullet, so the
     // filter skips soldiers: L). Off unless opts.damage.
     if (b.from === P) return playerBulletHit(b) || done;                      // Vincent's bullet: the soldiers
-    if (DAMAGE && b.target === P && segPointDist(b.prev, b.pos, playerAim()) <= BULLET_R) {
+    const hitP = DAMAGE && b.target === P && segPointDist(b.prev, b.pos, playerAim()) <= BULLET_R;
+    // GUESS: the soldier bullet's player hit point = his aim point (BULLET_R stand-in above)
+    shotVolumes(b, hitP ? len3(sub3(b.prev, playerAim())) : FLT_MAX);
+    if (hitP) {
       damagePlayer(b);
       bulletEnd(b, 1);
       return 1;
@@ -1747,6 +1786,44 @@ export function createEnemyAI(opts) {
   // bit 8 / bullet +0x120 bit 0x40 would list every hit instead; bit 8 is not exported); W flags 0x100
   // has no 0x40. L: the object filter vt+0x1ac lets Vincent's bullets reach every soldier; the room
   // probe after the objects (probe 0) is not done (bullets pass walls, as the soldiers' do).
+  // FUN_005442d8's see-through objects: the trigger volumes with +0x38 bit 0 and +0x28 bit 8 (o.shot)
+  // that are active (+0x28 bit 0) take every bullet (filter vt+0x1ac = 0x552838: returns 1; vt+0x8c /
+  // vt+0xbc = 0). Ray test vt+0x17c = FUN_00550da0(o, 0, ...): the segment in the box's frame, clipped
+  // from the end toward the start (FUN_0025e400: the entry point), and when the start is inside, from
+  // the start toward the end (the exit point); no point when both ends are inside or it misses. Every
+  // listed volume nearer the start (|start - point|) than the closest solid hit (`nearest`, the
+  // soldier / player hit, else DAT_0058b5b4 = FLT_MAX) gets vt+0x1b4 = FUN_005511e8 before the solid hit's,
+  // in list order: with +0x40 bit 4, its script event 0x12 with r0 = the bullet's owner id (+0x128),
+  // r1 = that object's id (FUN_0053b978; -1 when gone). The scripts' return value is not used here.
+  // GUESS: list order = trigger index (the bullet grid M+0x1170 order is not read). L: a trigger with
+  // +0x38 bit 0 is in that grid. The room probe is not done (bullets pass walls; see playerBulletHit),
+  // so a volume behind a wall can fire on the page where the game's bullet stops at the wall.
+  const FLT_MAX = 3.4028234663852886e38;                                     // DAT_0058b5b4
+  function shotVolumes(b, nearest) {
+    // MISSING: bullets with +0x120 bit 0x800 (the page's never set it) take another path in FUN_005442d8:
+    // segment start from param_3 (l.57), then a radius test, |start - end| <= bullet +0x2c (x 0.5 with
+    // bit 0x80000000 unless vt+0x8c) -> vt+0x19c / vt+0x3c, or vt+0x184 (the swept test with radius +0x2c)
+    // instead of vt+0x17c. Not decoded (vt+0x184 / +0x19c of the trigger vtable not read): no volume
+    // test for them rather than the +0x17c one.
+    if (b.f120 & 0x800) { warnOnce('enemy_ai: bullet +0x120 bit 0x800 volume test (FUN_005442d8 vt+0x184) not translated'); return; }
+    const list = [];
+    for (const o of triggers) {
+      if (!o.shot || !o.active) continue;
+      const t = o.t;
+      const s = xform(t.inv, b.prev), e = xform(t.inv, b.pos);                 // FUN_0026135c (no parent)
+      let c = clipSeg(e, s, t.lo, t.hi);
+      if (c.face === -1) c = clipSeg(s, e, t.lo, t.hi);
+      if (c.face === -1) continue;
+      const point = xform(t.m, c.p2);                                     // FUN_0026135c(record +0x00)
+      list.push({ o, dist: f(len3(sub3(b.prev, point))) });
+    }
+    for (const h of list.slice(0, 0x20)) {
+      if (!(h.dist < nearest)) continue;
+      const owner = objects.get(b.shooter);
+      events.push(`shot volume ${h.o.id}`);
+      runEvent(h.o, 0x12, [b.shooter ?? 0, owner ? owner.id : -1]);            // FUN_005511e8 (+0x40 bit 4 = o.shot)
+    }
+  }
   function playerBulletHit(b) {
     let best = null;
     for (const a of actors) {                                                 // active only (+0x28 bit 0: setActive keeps the list)
@@ -1767,6 +1844,7 @@ export function createEnemyAI(opts) {
       const dist = len3(sub3(b.prev, cyl.point));
       if (!best || dist < best.dist) best = { a, part, point: cyl.point, dist };
     }
+    shotVolumes(b, best ? best.dist : FLT_MAX);
     if (!best) return 0;
     best.a.part = best.part;                                                  // +0x142
     best.a.f19c = zoneRec(best.a, best.part);                                 // +0x19c = zone record (null: status +0xa8 = 0)
@@ -1783,6 +1861,93 @@ export function createEnemyAI(opts) {
   // GUESS (traced values, setters not read): +0x38 = 0x387 alive (probes 0-2) and 0x183 once dead (bits
   // 2 and 0x200 cleared on the death frame; k_lock14 f836), so a corpse leaves probe 2 and can't be locked.
   const PROBE_BITS = 0x387, PROBE_BITS_DEAD = 0x183;
+
+  // ---- actor push-out, FUN_00542ab8 (run by the manager frame FUN_0053b500 before the actors move).
+  // Every actor on the manager list +0x1274 whose +0x38 has bit 9 (0x200): Vincent (+0x38 = 0x381, T
+  // k_push16) and the live soldiers (0x387; a corpse has 0x183, k_lock14 f836). Each actor's push vector
+  // +0x130 is cleared, then every pair whose horizontal distance (vsub/vmul .xz, vaddbc x += z) is at
+  // most the sum of the radii pushes both: i from j's capsule (FUN_0025d508) and j from i's, each by
+  // (overlap^2 / own radius) x DAT_0046e90c (0.25 in the ELF), along the capsule's normal.
+  // GUESS: list order = Vincent, then the AI actors in activation order (the +0x1274 order is not read;
+  // it only changes the order of the float sums). Not ported: the neighbour counters +0x158..+0x15b
+  // (FUN_0056a8c8 / FUN_0056a908; no reader on the page) and FUN_0025d860 (+0x118 bit 0x8000000).
+  const PUSH_K = 0.25;                                                        // DAT_0046e90c
+  const H_PLAYER = 18.0;                                                      // P+0x30 (T: k_push16 p_cyl 5 / 18)
+  // FUN_0025d508(r, out p2, out n3, p, a, b): the point on the cylinder a..b of radius r (flat end at a,
+  // round end b - r..b) nearest p, and the unit normal there. Returns null where the game writes nothing.
+  // unit(v) as the VU does it (vrsqrt, vmulq): length 0 -> rsqrt = +max float, 0 x max = 0 (no NaN)
+  const vunit = v => { const l = f(len3(v)); return l > 0 ? v.map(x => f(x / l)) : [0, 0, 0]; };
+  function capsule(r, p, a, b) {
+    const ab = sub3(b, a), L = f(len3(ab)), u = ab.map(x => f(x / L));
+    const t = f(dot3(sub3(p, a), u));                                        // FUN_002614f4
+    const foot = a.map((x, k) => f(x + u[k] * t));
+    const dl = f(len3(sub3(foot, p)));
+    if (t < 0) {
+      if (r <= dl) {
+        const w = sub3(p, a), wu = f(dot3(w, u)), rej = w.map((x, k) => f(x - u[k] * wu));   // FUN_00260e28
+        const ru = vunit(rej), p2 = a.map((x, k) => f(x + ru[k] * r));
+        return { p: p2, n: vunit(sub3(p, p2)) };
+      }
+      return { p: p.map((x, k) => f(x - u[k] * t)), n: u.map(x => f(-x)) };
+    }
+    if (f(L - r) <= t) {
+      const c = a.map((x, k) => f(x + u[k] * f(L - r))), n = vunit(sub3(p, c));
+      return { p: c.map((x, k) => f(x + n[k] * r)), n };
+    }
+    if (0 <= t && t <= L) {
+      const n = vunit(sub3(p, foot));
+      return { p: foot.map((x, k) => f(x + n[k] * r)), n };
+    }
+    return null;
+  }
+  // FUN_0054b3a0 with up row (0,-1,0): feet, top = feet + up x +0x30, low = feet + up x +0x2c
+  // MISSING: with +0x28 bit 0x10000 all three move up by vt+0x64() (the class's value is not read). T: the
+  // bit is clear on Vincent (0x20901f) and the soldiers (0x208403 / 0x20c403 / 0x20c40b) in k_push16.
+  const cyl = (pos, r, h, f28 = 0) => {
+    if (f28 & 0x10000) warnOnce('enemy_ai: FUN_0054b3a0 +0x28 bit 0x10000 offset (vt+0x64) not translated');
+    return { feet: pos, top: [pos[0], f(pos[1] - h), pos[2]], low: [pos[0], f(pos[1] - r), pos[2]], r };
+  };
+  // one half of the pair body: push i out of j's capsule (FUN_00542ab8 0x542c78.. / 0x543038..)
+  function pushHalf(i, j) {
+    if (j.f118 & 0x8000000) { warnOnce('enemy_ai: FUN_0025d860 push-out (actor +0x118 bit 0x8000000) not translated'); return; }
+    const s = capsule(j.c.r, i.c.low, j.c.feet, j.c.top);
+    if (!s) return;
+    const ov = f(i.c.r - f(len3(sub3(s.p, i.c.low))));
+    if (!(0.0 <= ov)) return;
+    if (i.attacking && !(i.flags28 & 4)) return;                            // FUN_0055bb40, +0x28 bit 2
+    const m = f(f(ov * ov) / i.c.r), k = (j.f118 & 0x4000000) ? m : f(m * PUSH_K);
+    if (!(i.f118 & 0x10000000)) i.push = i.push.map((x, q) => f(x + f(s.n[q] * k)));
+    // both bodies, the other's C+0x1c0 bit 0x100000 (move ended): this one's too when its C+0x90 points
+    // within 30 deg of the other (FUN_00260fe8). Nothing on the page sets that bit yet.
+    if (i.C && j.C && (j.C.f1c0 & 0x100000)) warnOnce('enemy_ai: FUN_00542ab8 blocked-bit branch (C+0x90 angle) not translated');
+  }
+  // Vincent's push vector for this frame (actor +0x130 -> C+0x430, FUN_00343160); the soldiers' pushes go
+  // to a.push (T k_push16: #66 is pushed but does not move, so nothing applies them).
+  function pushOut(ppos) {
+    // Vincent's +0x28 = 0x20901f (T: k_push16 p_a28, every frame)
+    const list = [{ c: cyl(ppos, R_PLAYER, H_PLAYER, 0x20901f), f118: (P && P.f118) | 0, flags28: 0x20901f, attacking: false, C: null, push: [0, 0, 0] }];
+    for (const a of actors) {
+      a.push = [0, 0, 0];
+      // GUESS: +0x38 bit 9 stand-in = on the active list (+0x28 bit 0) and alive. The page keeps no +0x38;
+      // traced 0x387 alive / 0x183 dead (PROBE_BITS above), so bit 9 goes at the death; its setter is not read.
+      if (!(a.flags28 & 1) || dead(a)) continue;
+      list.push({ a, c: cyl(a.pos, a.size.r, a.size.h, a.flags28), f118: a.f118 | 0, flags28: a.flags28, attacking: attacking(a), C: a.C, push: [0, 0, 0] });
+    }
+    for (let x = 0; x < list.length; x++) {
+      for (let y = x + 1; y < list.length; y++) {
+        const i = list[x], j = list[y];
+        // 0x542bc8: the pair is skipped when both have +0x28 bit 0x20 and both +0x118 bit 0x20000 (T: Vincent
+        // 0x20901f / 0x20209 and #66 0x20c403 / 0x203 in k_push16: never on this page)
+        if ((i.flags28 & 0x20) && (j.flags28 & 0x20) && (i.f118 & 0x20000) && (j.f118 & 0x20000)) continue;
+        const dx = f(j.c.feet[0] - i.c.feet[0]), dz = f(j.c.feet[2] - i.c.feet[2]);
+        if (!(f(Math.sqrt(f(f(dx * dx) + f(dz * dz)))) <= f(i.c.r + j.c.r))) continue;
+        pushHalf(i, j);
+        pushHalf(j, i);
+      }
+    }
+    for (const e of list) if (e.a) e.a.push = e.push;
+    return list[0].push;
+  }
   function lockTargets() {
     const out = [];
     for (const a of actors) {
@@ -2095,7 +2260,7 @@ export function createEnemyAI(opts) {
   // page (enemies.js partPose) or a test; the part test needs it. playerShot(muzzle, aim, W): Vincent
   // fired, now; queueShot: the same at this frame's player slot inside the next tick (the page).
   const world = { S, actors, triggers, bullets, objects, addActor, tick, runEvent, recById, events, activated, setActive,
-                  playerShot, queueShot, lockTargets, boneWorld: opts.boneWorld || null,
+                  playerShot, queueShot, lockTargets, pushOut, boneWorld: opts.boneWorld || null,
                   attackPick: a => attackPick(a.ai),     // FUN_0035ff98 on an actor's AI (tests)
                   // single translated functions, for the tests' direct state checks
                   t: { brain5, brain6, stateMotion, setActorState, bulletEnd, target } };

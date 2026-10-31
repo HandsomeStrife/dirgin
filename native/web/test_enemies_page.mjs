@@ -1,6 +1,9 @@
 // The page's enemy activation path (play.js -> enemy_ai.js onActivate / onDeactivate -> enemies.js
 // add / remove), in a headless browser on the real page:
-//   1. at the save only records 44 / 45 are drawn;
+//   1. at the save the save's seven live soldiers are drawn, records 44-49 and 66 (T: k_enemy_engage8
+//      f760), each at its placement and driven by its AI actor in the save's actor state;
+//   1b. walking Vincent (W, steered with A / D) into #66: the push-out keeps them apart (enemy_ai pushOut);
+//   1c. then idle beside him: he is not moved by the push;
 //   2. walking east across trigger 56 (x -1228 on the start deck) makes enemies.js draw two new
 //      bodies, records 50 / 51 (script 91 event 0xd: cmd 0x108 on both; notes/enemy-activation.md §2);
 //   3. the save's dead records (41-43) refuse activation (FUN_00559748), so no body appears;
@@ -17,7 +20,8 @@
 //      clip (m_gst) and posed for the part test (enemies.js partPose); after 5, so it doesn't shift #66;
 //   7. record 51 (Dan's report): mode 1, the fire clip's blend-out against k_fire_emp15;
 //   8. record 69 hit (script event 8 -> AI mode 5) keeps firing; with Vincent close he attempts the melee
-//      attack (m_atk drawn); no console errors or page errors.
+//      attack (m_atk drawn);
+//   9. a shot over the platform (trigger 77, bullets only) wakes records 46-49; no console errors or page errors.
 //   node native/web/test_enemies_page.mjs          (needs data/enemies + playwright; else SKIP, exit 0)
 // Serves native/web with python3 http.server on a free port. three.js comes from the CDN (play.html importmap).
 import { existsSync, readFileSync } from 'node:fs';
@@ -55,8 +59,62 @@ try {
   }
   await pg.waitForFunction(() => window.__play && window.__play.stats.ticks > 30, null, { timeout: 120000 });
   const recs = () => pg.evaluate(() => window.__play.enemies.actors.map(a => a.rec).sort((a, b) => a - b));
-  ok(JSON.stringify(await recs()) === '[44,45]', `at the save: records ${await recs()} drawn (want 44,45)`);
+  const SAVE = [44, 45, 46, 47, 48, 49, 66];
+  ok(JSON.stringify(await recs()) === JSON.stringify(SAVE), `at the save: records ${await recs()} drawn (want ${SAVE})`);
+  // the platform soldiers (46-49 on the raised floor north-east of the ladder, 66 west of it): each at its
+  // placement, with an AI actor in the save's actor state (#68 / #69 = 1, #70 / #71 = 2, #88 = 1)
+  const save = await pg.evaluate(async () => {
+    const P = window.__play, recs = await fetch('data/enemies/ai.json').then(r => r.json()).then(a => a.records);
+    return [46, 47, 48, 49, 66].map(k => { const b = P.enemies.actors.find(a => a.rec === k), s = P.enemyAI.actors.find(a => a.rec === k);
+      const p = b && b.body.position.toArray();
+      return { k, err: p ? Math.hypot(p[0] - recs[k].pos[0], p[2] - recs[k].pos[2]) : null, inRoot: !!b && b.body.parent === P.root, astate: s ? s.astate : null }; });
+  });
+  const SAVE_STATE = { 46: 1, 47: 1, 48: 2, 49: 2, 66: 1 };
+  for (const s of save) ok(s.inRoot && s.err !== null && s.err < 0.2 && s.astate === SAVE_STATE[s.k],
+    `record ${s.k}: drawn ${s.err?.toFixed(2)} u from its placement, AI actor state ${s.astate} (save ${SAVE_STATE[s.k]})`);
   ok(await pg.evaluate(() => !!window.__play.enemyAI), 'enemy AI running');
+
+  // 1b. Dan: "I can run through the soldiers". Vincent on the ladder-top deck, in line with #66 (record
+  // 44) 30 u behind him along the camera's forward (~west; test aid: position write; the walk mesh is clear), then W held
+  // (the start camera looks east) for 6 s; then he is put back where he was: the push-out (enemy_ai pushOut = FUN_00542ab8, player.js integrate) keeps the
+  // two cylinders apart (5 + 5; head-on he stops where the push along his walk matches his step: player.js
+  // GUESS, walk + (push . w_hat) w_hat; test_push_out checks it against k_push16).
+  const push = await pg.evaluate(async () => {
+    const P = window.__play, c = P.ctrl, rec = await fetch('data/enemies/ai.json').then(r => r.json()).then(a => a.records[44]);
+    const home = { ...c.pos };
+    c.pos = { x: rec.pos[0] - 30, y: rec.pos[1], z: rec.pos[2] }; c.prev = { ...c.pos }; c.locate(); if (c.onTeleport) c.onTeleport();
+    let dmin = Infinity, pushed = 0, xmax = -Infinity;
+    const tick = P.enemies.tick;
+    P.enemies.tick = x => { tick(x); const d = Math.hypot(c.pos.x - rec.pos[0], c.pos.z - rec.pos[2]); dmin = Math.min(dmin, d);
+      xmax = Math.max(xmax, c.pos.x); if (c.push && (c.push[0] || c.push[2])) pushed++; };
+    window.__pushT = { tick, home, get: () => ({ dmin, pushed, xmax }),
+      side: () => { const b = P.follow.basis(), v = [rec.pos[0] - c.pos.x, rec.pos[2] - c.pos.z]; return v[0] * b.r.x + v[1] * b.r.z; } };
+    return true;
+  });
+  await pg.keyboard.down('w');
+  let held = null;
+  for (let i = 0; i < 80; i++) {
+    await pg.waitForTimeout(100);
+    const { side, pushed } = await pg.evaluate(() => ({ side: window.__pushT.side(), pushed: window.__pushT.get().pushed }));
+    if (pushed > 60) break;
+    const want = side > 0.5 ? 'd' : side < -0.5 ? 'a' : null;
+    if (want !== held) { if (held) await pg.keyboard.up(held); if (want) await pg.keyboard.down(want); held = want; }
+  }
+  if (held) await pg.keyboard.up(held);
+  await pg.keyboard.up('w');
+  // 1c. then idle beside #66, keys up, for 1 s: the game holds Vincent in place under the push (k_push16
+  // f909-f1019: push 0.58 u per frame, moved +-0.03 u); the page must not slide him either
+  const idle0 = await pg.evaluate(async () => { const c = window.__play.ctrl; await new Promise(r => setTimeout(r, 300));
+    return { x: c.pos.x, z: c.pos.z, n: window.__pushT.get().pushed }; });
+  await pg.waitForTimeout(1000);
+  const idle1 = await pg.evaluate(() => { const c = window.__play.ctrl; return { x: c.pos.x, z: c.pos.z, n: window.__pushT.get().pushed,
+    q: c.push ? Math.hypot(c.push[0], c.push[2]) : 0 }; });
+  const idleMove = Math.hypot(idle1.x - idle0.x, idle1.z - idle0.z);
+  ok(idle1.n - idle0.n > 20 && idle1.q > 0.01 && idleMove < 0.05,
+     `idle beside #66 for 1 s: pushed on ${idle1.n - idle0.n} frames (push ${idle1.q.toFixed(2)} u), moved ${idleMove.toFixed(3)} u (game: held in place)`);
+  const pr = await pg.evaluate(() => { const T = window.__pushT, P = window.__play, c = P.ctrl, r = T.get(); P.enemies.tick = T.tick;
+    c.pos = { ...T.home }; c.prev = { ...c.pos }; c.locate(); if (c.onTeleport) c.onTeleport(); return r; });
+  ok(push && pr.pushed > 10 && pr.dmin > 4.5, `walking into #66: pushed on ${pr.pushed} frames, closest ${pr.dmin.toFixed(2)} u between the centres (radii 5 + 5; no pass-through), x reached ${pr.xmax.toFixed(1)}`);
 
   // 2. walk across trigger 56. Test aid: put him at the west end of the passage east of the start
   // (a plain position write: the walk keeps body.poly and FUN_00357d48 resolves it onto the walk
@@ -70,9 +128,9 @@ try {
   }
   await pg.keyboard.up('w');
   ok(x >= -1215, `walked east past trigger 56 (x ${x.toFixed(1)})`);
-  await pg.waitForFunction(() => window.__play.enemies.actors.length >= 4, null, { timeout: 15000 }).catch(() => {});
+  await pg.waitForFunction(() => window.__play.enemies.actors.length >= 9, null, { timeout: 15000 }).catch(() => {});
   const after = await recs();
-  ok(JSON.stringify(after) === '[44,45,50,51]', `after trigger 56: records ${after} drawn (want 44,45,50,51)`);
+  ok(JSON.stringify(after) === '[44,45,46,47,48,49,50,51,66]', `after trigger 56: records ${after} drawn (want 44-49,50,51,66)`);
   const st = await pg.evaluate(() => window.__play.enemies.actors.filter(a => a.rec === 50 || a.rec === 51).map(a => ({
     rec: a.rec, inRoot: a.body.parent === window.__play.root, pos: a.body.position.toArray().map(v => +v.toFixed(1)),
     ai: !!window.__play.enemyAI.actors.find(s => s.rec === a.rec) })));
@@ -246,12 +304,20 @@ try {
     if (!body) return null;
     const log = [], tick = P.enemies.tick;
     P.enemies.tick = x => { tick(x); log.push({ head: body.head && body.head.clip, out: body.out ? body.out.clip : null, rem: body.blend ? body.blend.rem : null, len: body.blend ? body.blend.len : null, w: body.weight, outF: body.out ? body.out.frame : null }); };
+    // Test aid: trigger 76 disarmed for this step. #51 stands inside it, so his own bullets run its event
+    // 0x12 (script 99: wake 46-50); their shots then draw from the shared RNG and bring his next shot
+    // forward, cutting the fade that is compared with k_fire_emp15 (where no other soldier fires).
+    const t76 = ai.objects.get('t76'), t76on = t76.active;
+    ai.setActive(t76, 0);
     ai.runEvent(obj(51), 2, [2, 0, 't90', 0]);
     const s51 = ai.actors.find(a => a.rec === 51);
     const t2 = performance.now();
     while (!log.some(l => l.out === 'm_st_f') && performance.now() - t2 < 20000) await new Promise(r => setTimeout(r, 100));
-    await new Promise(r => setTimeout(r, 600));
+    // until m_st_f stops being the blend-out layer (a fixed 600 ms cut the fade short on a slow frame rate)
+    const t3 = performance.now(), i0 = log.findIndex(l => l.out === 'm_st_f');
+    while (i0 >= 0 && log.slice(i0).every(l => l.out === 'm_st_f') && performance.now() - t3 < 10000) await new Promise(r => setTimeout(r, 100));
     P.enemies.tick = tick;
+    ai.setActive(t76, t76on);
     const mode = s51 ? s51.ai.mode : null;
     ai.setActive(obj(51), 0);
     return { mode, log };
@@ -262,7 +328,12 @@ try {
     const fade = [];                                                          // the frames m_st_f is the blend-out layer
     for (let j = i; i >= 0 && j < L.length && L[j].out === 'm_st_f'; j++) fade.push(L[j]);
     const fired = L.some(l => l.head === 'm_st_f');
-    ok(g51 && g51.mode === 1 && fired && i >= 0 && L[i].head === 'm_st_a' && fade.length >= 8 && fade[fade.length - 1].outF > fade[0].outF,
+    // The fade ends when the blend runs out, or earlier when his next shot requests m_st_f (a new head
+    // layer replaces it, in the game too). When that shot comes depends on the page's shared RNG (one
+    // GameRandom for every soldier), whose draws before this step depend on how many frames the earlier
+    // steps' waits lasted, so an early cut is accepted, and the frames before it are compared below.
+    const nxt = i >= 0 ? L[i + fade.length] : null, cut = !!nxt && nxt.head === 'm_st_f';
+    ok(g51 && g51.mode === 1 && fired && i >= 0 && L[i].head === 'm_st_a' && fade.length >= 5 && fade[fade.length - 1].outF > fade[0].outF,
        `record 51 (mode ${g51 && g51.mode}): fire clip m_st_f drawn, then blends out under m_st_a over ${fade.length} frames, its frame advancing ${fade[0]?.outF?.toFixed(1)} -> ${fade[fade.length - 1]?.outF?.toFixed(1)}`);
     // The game's fade (k_fire_emp15 #66: r_st_f is the blend-out layer f788-797): the new head's countdown
     // +0x24 and length +0x1d each frame. The page's countdown after each frame must match, and the weight
@@ -278,10 +349,11 @@ try {
       }
       const len = game[0]?.len;
       const want = game.map((g, j) => ({ rem: g.rem, w: (len - (j ? game[j - 1].rem : len)) / len }));
-      const bad = want.length !== fade.length ? -2 : want.findIndex((g, j) => Math.abs(fade[j].rem - g.rem) > 1e-4 || Math.abs(fade[j].w - g.w) > 1e-6 || fade[j].len !== len);
-      ok(game.length >= 8 && bad === -1,
+      const bad = !(want.length === fade.length || (cut && fade.length < want.length)) ? -2
+        : fade.findIndex((l, j) => Math.abs(l.rem - want[j].rem) > 1e-4 || Math.abs(l.w - want[j].w) > 1e-6 || l.len !== len);
+      ok(game.length >= 8 && fade.length >= 5 && bad === -1,
          `record 51 blend vs k_fire_emp15 (len ${len}): countdown game ${want.map(g => g.rem.toFixed(1)).join(' ')} page ${fade.map(l => l.rem?.toFixed(1)).join(' ')}; ` +
-         `weight game ${want.map(g => g.w.toFixed(3)).join(' ')} page ${fade.map(l => l.w?.toFixed(3)).join(' ')}${bad >= 0 ? ` (first diff at ${bad})` : bad === -2 ? ' (length differs)' : ''}`);
+         `weight game ${want.map(g => g.w.toFixed(3)).join(' ')} page ${fade.map(l => l.w?.toFixed(3)).join(' ')}${cut ? ' (cut by his next shot)' : ''}${bad >= 0 ? ` (first diff at ${bad})` : bad === -2 ? ' (length differs, not cut by a shot)' : ''}`);
     }
   }
   // 8. A hit soldier keeps acting: record 69 (e027, stance 0x1e, script 24) activated; his damage event 8
@@ -319,6 +391,49 @@ try {
      `record 69 hit (event 8): AI mode ${g69?.mode} (5), keeps firing: m_st_f drawn ${g69?.after.fired}, brain states ${JSON.stringify(g69?.after.states)}, combat layer ${g69?.after.cmode}, actor state ${g69?.after.astate}`);
   ok(g69 && g69.atk.melee && g69.atk.hp === g69.atk.hp0,
      `record 69 with Vincent 12 u in front: melee attempt, body draws m_atk (${g69?.atk.melee}), Vincent HP ${g69?.atk.hp0} -> ${g69?.atk.hp} (no hit: hit volume not decoded)`);
+  // 9. The platform soldiers (records 46-49, Dan's report "they can't react"). Trigger 77 (script 100) is a
+  // flag-0x20 volume over their raised floor: FUN_005503e8 makes it see-through to bullets, and a bullet
+  // crossing it runs event 0x12 (FUN_005442d8 -> vt+0x1b4 FUN_005511e8): wake n1 -> 46-49. Walking into it
+  // fires nothing (its enter / leave bits 0 / 1 are clear). Vincent stands on the ladder-top deck as in
+  // step 5 (test aid: position write), the gun drawn, the camera turned onto the volume's middle (the
+  // same correction loop as step 5), then R1: aim.js onShot -> playerShot -> the bullet update.
+  // Script 126 (48 / 49) sets AI mode 1; scripts 127 / 128 (46 / 47) set mode 0 and run a sub-routine
+  // the page's VM stops at (op 37: notes/fidelity-audit.md).
+  // A fresh page: earlier in this run #51's bullets (he stands inside trigger 76, script 99: wake n1 ->
+  // 46-49) and then 46-49's own bullets (inside 77) have already woken them.
+  await pg.goto(`http://127.0.0.1:${port}/play.html`, { waitUntil: 'load' });
+  await pg.waitForFunction(() => window.__play && window.__play.stats.ticks > 30, null, { timeout: 120000 });
+  const pf = await pg.evaluate(async () => {
+    const P = window.__play, ai = P.enemyAI, c = P.ctrl, wait = n => new Promise(r => setTimeout(r, n));
+    const recs = [46, 47, 48, 49], act = k => ai.actors.find(a => a.rec === k);
+    const before = recs.map(k => act(k)?.ai?.mode);
+    const seen = [], t0 = ai.tick;
+    ai.tick = (...x) => { const ev = t0(...x); for (const e of ev) if (/^shot volume t77|^event t77 |^event (68|69|70|71) /.test(e)) seen.push(e); return ev; };
+    c.pos = { x: -1070.0, y: -146.1, z: -1105.6 }; c.prev = { ...c.pos }; c.locate(); if (c.onTeleport) c.onTeleport();
+    await wait(400);
+    if (!P.aim.state().drawn) { P.aim.press('r1'); await wait(800); }
+    const m = ai.triggers[77].t.m, tgt = [m[3][0], m[3][1] - 14, m[3][2]];
+    const dirTo = (from, to) => { const v = [0, 1, 2].map(k => to[k] - from[k]); const l = Math.hypot(...v); return v.map(x => x / l); };
+    const angles = v => [Math.atan2(v[0], v[2]), Math.asin(v[1])];
+    const err = () => { const k = P.aim.core, e = [k.eye.x, k.eye.y, k.eye.z], h = [k.hit.x, k.hit.y, k.hit.z];
+                        const w = angles(dirTo(e, tgt)), g = angles(dirTo(e, h)); return [w[0] - g[0], w[1] - g[1]]; };
+    const e0 = err(); P.follow.yaw += 0.02; await wait(120); const sy = Math.sign(e0[0] - err()[0]) || 1;
+    const e1 = err(); P.follow.pitch += 0.02; await wait(120); const sp = Math.sign(e1[1] - err()[1]) || 1;
+    for (let i = 0; i < 40; i++) {
+      const [dy, dp] = err();
+      if (Math.abs(dy) < 0.01 && Math.abs(dp) < 0.01) break;
+      P.follow.yaw += sy * dy; P.follow.pitch += sp * dp; await wait(120);
+    }
+    const quiet = seen.length;                                             // nothing fired before R1
+    P.aim.press('r1'); await wait(2500);
+    ai.tick = t0;
+    return { before, after: recs.map(k => act(k)?.ai?.mode), seen, quiet, var0: ai.triggers[77].vars[0] };
+  });
+  ok(pf && pf.quiet === 0 && pf.seen.includes('shot volume t77') && pf.seen.some(e => e.startsWith('event t77 script 100 ev 18')) && pf.var0 === 1,
+     `a shot over the platform crosses trigger 77: event 0x12 ran (script 100; once-var ${pf?.var0}); ${pf?.seen.slice(0, 3).join(' | ')}`);
+  ok(pf && [68, 69, 70, 71].every(id => pf.seen.some(e => e.startsWith(`event ${id} script `) && / ev 2 r 1,/.test(e))) &&
+     pf.before.every(m => m === 0) && pf.after[2] === 1 && pf.after[3] === 1 && pf.after[0] === 0 && pf.after[1] === 0,
+     `records 46-49 woken (event 2, n 1): AI modes ${pf?.before} -> ${pf?.after} (scripts 127 / 128: 0, 126: 1)`);
   ok(errs.length === 0, `no console errors${errs.length ? ': ' + errs.slice(0, 3).join(' | ') : ''}`);
 } finally {
   await browser.close();

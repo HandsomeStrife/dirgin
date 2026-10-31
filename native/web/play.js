@@ -615,9 +615,11 @@ async function main() {
     const prevHook = anim.drawHook;
     anim.drawHook = () => { if (prevHook) prevHook(); light.frame(actorPoint()); };
   }
-  // enemy AI data (export_web_triggers.py). GUESS: records 44 / 45 (#66 / #67) are active from
-  // the start, as in the sea-of-flames save (their activation by event cmd 0x108 is not on this page).
-  const AWAKE = [44, 45];
+  // enemy AI data (export_web_triggers.py). The save's live soldiers: records 44-49 and 66 (objects
+  // #66-#71, #88), active, HP > 0 (T: k_enemy_engage8 f760, every e<k>_flags bit 0 set; the hero dump
+  // draws 44-47 / 66). GUESS: they are active from the start, as in the save (what activated 45-49 / 66
+  // before it is not decoded, notes/enemy-activation.md §1; records 41-43 are the save's dead).
+  const AWAKE = [44, 45, 46, 47, 48, 49, 66];
   // ai.json also places them (section-1 records), so it loads with ?enemyai=0 too: the soldiers stay, the AI is off
   let aiData = ENEMIES ? await fetch('data/enemies/ai.json').then(r => r.ok ? r.json() : null).catch(() => null) : null;
   if (ENEMIES && !aiData) console.warn('enemy AI off: data/enemies/ai.json missing');
@@ -641,9 +643,10 @@ async function main() {
       onDeactivate: rec => { enemies.remove(rec); },
       // GUESS: FUN_005449f0 probe 3 = the page's collision triangle set (probe sets not decoded)
       los: (a, b) => !!(col.segment && col.segment({ x: a[0], y: a[1], z: a[2] }, { x: b[0], y: b[1], z: b[2] })) }) : null;
-    // actor state +0x104 of the save's soldiers (T: k_enemy_engage8 f760: #66 = 1, #67 = 2); they were
-    // activated before the save, so FUN_00559748's pick is not rerun (GUESS: what put #66 in 1 is not decoded)
-    const AWAKE_STATE = { 44: 1, 45: 2 };
+    // actor state +0x104 of the save's soldiers (T: k_enemy_engage8 f760: #66 = 1, #67 = 2, #68 / #69 = 1,
+    // #70 / #71 = 2, #88 = 1); they were activated before the save, so FUN_00559748's pick is not rerun
+    // (GUESS: what put them in 1 is not decoded)
+    const AWAKE_STATE = { 44: 1, 45: 2, 46: 1, 47: 1, 48: 2, 49: 2, 66: 1 };
     if (enemyAI) for (const k of AWAKE) enemyAI.addActor({ rec: k, astate: AWAKE_STATE[k] });
   } catch (e) { console.warn('enemy AI off:', e.message); enemyAI = null; }
   // test aids that move him (H, ?ladder=): the cloth restarts from the new pose (cloth.js reset)
@@ -822,6 +825,9 @@ async function main() {
                     stick: moving ? (inp.run ? KEY_RUN : KEY_WALK) : 0, pad: null });
       const b = follow.basis();                    // re-aim the keys with this frame's matrix
       const pOld = [ctrl.pos.x, ctrl.pos.y, ctrl.pos.z];
+      // FUN_0053b500 -> FUN_00542ab8 (actor push-out) runs before the actors move (T: k_push16, the push of
+      // frame f comes from the positions it starts with and moves Vincent in the same frame)
+      ctrl.push = enemyAI ? enemyAI.pushOut(pOld) : null;
       ctrl.step(aim(inp, b));
       pressed.clear();                             // an edge is seen by one tick only
       // feet vs ground check (for the HUD / tests)

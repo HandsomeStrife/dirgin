@@ -399,3 +399,82 @@ in every write (mode 1 state 9, mode 6 state 6, the starts). Actor states 6 / 0x
 FUN_00538420 -> FUN_00537aa0, so 0x80 + i from 5 / 6 / 0x1b is motion 0x1000 + i. Mode 6 states 2-5
 re-pick unconditionally (FUN_0035fe80 -> FUN_005608e8, FUN_0035fec0, FUN_0035fc98): translated with the
 candidate GUESS (the player); FUN_0035fec0's two-target switch (FUN_0054aa50 -> FUN_0054a9d0) warns.
+
+## Dan's play report: melee, push-out, platform soldiers (worker 0154, 2026-10-31)
+
+New trace **k_push16** (`TRACE_FIELDSET=enemy TRACE_ENEMIES=2 TRACE_PUSH=1`; engage8's route, stick held to
+f900 so Vincent runs on into #66 along the ladder-top railing, no shots). New opt-in fields (fields.py
+TRACE_PUSH): actor +0x28, +0x2c..+0x3b (radius, height, +0x38), +0x118, +0x130 for Vincent and the soldiers,
+Vincent's C+0x430 / C+0x1c0.
+
+- **No melee (point 1): the game doesn't either.** e027 / e048 are shooters (C+0x808 bit 0), and modes 1 / 2
+  reach the attack pick FUN_0035ff98 only in their non-shooter states (FUN_00362ef8 state 7, FUN_00362998
+  state 8). k_push16: #66 woken (mode 2, f784) with Vincent 4-7 u from him for ~200 frames stays in actor
+  state 3; no 0x80+ state. Melee happens from modes 3 / 5 / 6 only (most soldiers' scripts switch to 5 when
+  hit; worker 0152's page test step 8 sets that up by the hit event). test_push_out checks the trace and the
+  page AI on the same path (0 attack frames; an invented mode-2 swing is caught: 216).
+- **Push-out (point 2): FUN_00542ab8**, from the manager frame FUN_0053b500 before the actors move. Actors
+  on list +0x1274 with +0x38 bit 9 (Vincent 0x381, live soldiers 0x387; a corpse's 0x183 leaves it). Clears
+  each +0x130; for each pair with horizontal distance <= r_i + r_j: i's low point (feet + r_i up) against
+  j's cylinder (FUN_0025d508: flat end at the feet, round end at the top), overlap = r_i - |surface - low|,
+  push_i += normal x overlap^2 / r_i x 0.25 (DAT_0046e90c; x1 with j's +0x118 bit 0x4000000), skipped
+  while i attacks (FUN_0055bb40) unless +0x28 bit 2, not added with i's +0x118 bit 0x10000000 (#67 has it);
+  then the same for j. Matches k_push16 to 7e-5. FUN_00343160 copies +0x130 to C+0x430; the code that
+  adds it to the move was **not found** (three attempts). The trace fits "ground move = walk x step +
+  push, then the walk-mesh slide" to 0.002 u (player.js, GUESS row). #66's push is never applied (he
+  stands still), so the page applies none to soldiers.
+- **Platform soldiers (point 3):** the save has seven live soldiers, records 44-49 and 66 (k_enemy_engage8
+  f760: active, HP > 0, actor states 1 2 1 1 2 2 1); the page only spawned 44 / 45. play.js AWAKE now has
+  all seven (46-49 on the raised floor north-east of the ladder top, 66 by the west walkway). Triggers
+  89 / 77 / 76 / 78 already name them; 77 / 76 / 78 are event-0x12 volumes the page still doesn't run.
+
+## Platform soldiers' wake, push-out tests (worker 0155, 2026-10-31)
+
+- **Event 0x12 = a bullet crossing the volume (D).** Trigger vtable 0x58cdf8 +0x1b4 = FUN_005511e8, called
+  only from the bullet ray test FUN_005442d8 (FUN_00556870 <- the bullet update). FUN_005503e8 gives shape
+  0 / 8 triggers with flags +0xa4 bit 5 (0x20): +0x40 |= 0x10 (FUN_005511e8 runs the event), +0x38 |= 1
+  (bullets test it) and +0x28 |= 0x100 (see-through: listed, never the closest hit). Filters for a trigger:
+  vt+0x1ac 0x552838 returns 1 (every bullet, the soldiers' too), vt+0x8c / +0xb4 / +0xbc return 0. Ray test
+  vt+0x17c FUN_00550da0(o, 0, ..): segment to the box frame, FUN_0025e400(end, start) (clip; returns the face
+  where its 2nd point was clipped), and if -1, FUN_0025e400(start, end): entry point, else exit point when
+  the start is inside, nothing when both ends are inside. A listed volume nearer the segment start than the
+  closest solid hit gets event 0x12 with r0 = bullet +0x128 (owner id), r1 = that object's +0x20 (or -1).
+  Scripts 98-101 don't read r0 / r1. Walking into 75-78 fires nothing (bits 0 / 1 clear); trigger 89
+  (ev 0xd, on the lower floor east, x -788 z -966) is the walk-in wake of 46-49.
+- enemy_ai.js `shotVolumes` (both Vincent's and the soldiers' bullets), `clipSeg` = FUN_0025e400,
+  `inBoxBut` = FUN_0025f638. test_shot_volumes.mjs; test_enemies_page step 9 (fresh page: R1 over the
+  platform from the deck -> 77 -> 46-49 woken: 48 / 49 mode 1; 46 / 47 mode 0 + a script sub-routine the
+  VM stops at, op 37 / 39 / 40 + cmds 0x142 / 0x131: not translated).
+- Consequence: #51 stands inside trigger 76 (script 99, not once): each of his shots wakes 46-50. In the
+  page test this brought his next shot forward through the shared RNG, so step 7 disarms 76 for its
+  blend comparison (test aid).
+- **Push-out step (test gap, not decoded).** player.js integrate per frame with pushOut (test_push_out):
+  the step along the game's path matches (0.005 u) but the position is 0.81 u off sideways. The game's
+  steps fit walk + (push . walk direction) x walk direction to ~0.005 u, and standing next to #66
+  (f909-f1020, push 0.58) he only jitters +-0.03 u. So the push does not enter as a displacement the way
+  the page's stand-in adds it. Not ported (a fit, not a decode); the reader of C+0x430 is the next decode.
+- MISSING / GUESS labels in pushOut: FUN_0054b3a0 +0x28 bit 0x10000 offset (warns), +0x38 bit 9 stand-in.
+  Pair skip (both +0x28 0x20 and both +0x118 0x20000) translated. #67's +0x118 0x10000000 (never pushed in
+  the game) has no setter on the page.
+
+## Push into the step, shot-volume gaps, #51's re-wakes (worker 0156, 2026-10-31)
+
+- **Where C+0x430 enters the move: still not decoded** (attempts 4-5). REA's rizin backend isn't installed
+  (`rizin` ENOENT), so the same scan was done by hand: every lw / lwc1 / lq / lqc2 / ld with offset
+  0x430-0x438 in the ELF hits only stack slots (FUN_0035a440's r29 0x430 / 0x438 are locals) and
+  FUN_0034c388's zero test (via `addiu r2, 0x430(r21)`); FUN_00358fb8 / FUN_003590c8 / FUN_00357d48 /
+  FUN_0035a440 never read body (C+0x3b0) + 0x80. player.js now uses worker 0155's fit (GUESS row):
+  move = w + (push . w_hat) w_hat, nothing while idle. k_push16: full position 0.005 u (f809-f826), idle
+  0.000 u, closest approach 3.996 vs 3.999 u.
+- **The f827 stop is not the push.** The stick is held to f900 (lx 204, ly 0; facing 113.5 deg, travel 87.9 deg
+  along the railing from f796, before any contact). At f827 the game cuts his step to 0.35 u and from f828
+  holds him 6.55 u past #66 (+-0.1 u alternating), with the push (0.49, -0.34) pointing along his walk.
+  C+0x1c0 stays 0xd0f04 (0x10f04 only at f825 / f826). The page's walk mesh has nothing there; he walks
+  ~3 u on. Unknown blocker (object primitive in FUN_0035a440?): test_push_out `gap` line.
+- shotVolumes: MISSING label for +0x120 bit 0x800 bullets (FUN_005442d8's radius path, vt+0x184 /
+  vt+0x19c); skipped with a warning.
+- #51 / trigger 76: script 99 re-runs on every one of his shots, but the targets' event-2 scripts (126 / 127
+  / 128 / 141 / 142) open with `cmd 0x105 (var 0) == 0`, then `cmd 0x104 var 0 = 1`: the wake is run-once per
+  soldier, and later shots rebuild no brain (test_shot_volumes 7; mutant 0x105 -> 0 caught). No PCSX2 trace
+  (#51 must first be woken by trigger 90; not in the save). Open: 46-49 were active at the save, so their
+  var 0 may already be 1 there, while the page starts it at 0.

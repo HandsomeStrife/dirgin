@@ -545,8 +545,21 @@ export class PlayerController {
       return;
     }
     if (B.state === 0) {
-      // move = body+0x40 x step -> FUN_00357d48 (collision.js navMove)
-      const r = col.navMove(B.poly, p.x, p.y, p.z, v.x * STEP, v.z * STEP, false);
+      // move = body+0x40 x step -> FUN_00357d48 (collision.js navMove), plus this frame's actor push-out
+      // (FUN_00542ab8 -> actor +0x130 -> C+0x430 by FUN_00343160; enemy_ai.js pushOut; this.push, set by
+      // play.js before the step).
+      // GUESS: where the push enters the step (not decoded; the reader of C+0x430 / +0x130 in the move is
+      // not found, five attempts, notes/fidelity-audit.md "Where the push enters Vincent's step"). Worker
+      // 0155's fit to k_push16: walk w + (push . w_hat) w_hat, so the push only lengthens / shortens the
+      // walk along its own direction and does nothing while he stands (f909-f1019: held in place under a
+      // 0.58 u push); then slid like the walk.
+      let mx = v.x * STEP, mz = v.z * STEP;
+      const q = this.push, wl = Math.hypot(mx, mz);
+      if (q && wl > 0) {
+        const k = (q[0] * mx + q[2] * mz) / (wl * wl);
+        mx += k * mx; mz += k * mz;
+      }
+      const r = col.navMove(B.poly, p.x, p.y, p.z, mx, mz, false);
       this.hitWall = r[4];
       B.poly = r[3];
       // second switch case 0: pos = body+0x10, stored as the game's f32 (PS2 rounds toward zero)

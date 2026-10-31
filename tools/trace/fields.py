@@ -301,6 +301,26 @@ if __import__("os").environ.get("TRACE_EMP"):
             (_p + "mp_layers", "EM%d" % _k, 0x200, "layers", "L", "8 layers x 0x30 at MP+0x200 (as mp_layers)"),
         ]
 
+# Opt-in with TRACE_PUSH=1 (worker 0154, actor push-out FUN_00542ab8): the push vector each actor
+# gets (actor +0x130, cleared and summed by FUN_00542ab8), its cylinder and the flags the pair test reads,
+# for the player and each traced soldier.
+if __import__("os").environ.get("TRACE_PUSH"):
+    ENEMY_FIELDS += [
+        ("p_a28", "P", 0x28, "u32", "D", "actor +0x28 flags (FUN_00542ab8 tests 0x20 / 4)"),
+        ("p_cyl", "P", 0x2C, "bytes:16", "D", "actor +0x2c radius, +0x30 height, +0x38 u16 (bit 9 = takes part in FUN_00542ab8)"),
+        ("p_a118", "P", 0x118, "u32", "D", "actor +0x118 flags (0x8000000 / 0x4000000 / 0x10000000 / 0x20000 in FUN_00542ab8)"),
+        ("p_push", "P", 0x130, "vec4", "D", "actor +0x130 = push vector summed by FUN_00542ab8"),
+        ("p_c430", "C", 0x430, "vec4", "D", "C+0x430 = copy of actor +0x130 (FUN_00343160)"),
+        ("p_c1c0", "C", 0x1C0, "u32", "D", "C+0x1c0 move flags"),
+    ]
+    for _k in range(ENEMY_MAX):
+        _p = "e%d_" % _k
+        ENEMY_FIELDS += [
+            (_p + "cyl", "E%d" % _k, 0x2C, "bytes:16", "D", "actor +0x2c radius, +0x30 height, +0x38 u16"),
+            (_p + "a118", "E%d" % _k, 0x118, "u32", "D", "actor +0x118 flags"),
+            (_p + "push", "E%d" % _k, 0x130, "vec4", "D", "actor +0x130 push vector (FUN_00542ab8)"),
+        ]
+
 FIELDSET = __import__("os").environ.get("TRACE_FIELDSET")
 if FIELDSET == "enemy":
     FIELDS = ENEMY_FIELDS
