@@ -213,9 +213,10 @@ echo "ok"
 step "enemy e027 (z128 soldier): skinned glb per variant + r_gst idle -> data/enemies"
 # clips: r_gst idle, r_gst_lk, r_st_a / r_st_f (enemy_ai.js), r_stlld0 / r_stlaf0 / r_stbf0 (hit / death, notes/enemy-research.md §10);
 # the m_* rows of stance 0x1e (class-2 weapons, FUN_00564228) for the same motions (ai.json model_clips lists them);
+# r_gwk / r_grn (+ m_*): the walk / run rows 9 / 0x10 of the locomotion table (motion state 8, path walking);
 # r_sq_a / r_sq_f / m_sq_*: crouched aim / fire (brain mode 1's posture change, motions 0x78 / 0x7b);
 # r_atk_0 / m_atk: the attack tables' play-clip commands (zone sets 7 / 6, ai.json attacks)
-run enemy_e027 $PY export_web_enemy.py export --model e027 --out "$DATA/enemies" --clips r_gst,r_gst_lk,r_st_a,r_st_f,r_stlld0,r_stlaf0,r_stbf0,m_gst,m_st_a,m_st_f,m_stlld0,m_stlaf0,m_stbf0,r_sq_a,r_sq_f,m_sq_a,m_sq_f,r_atk_0,m_atk
+run enemy_e027 $PY export_web_enemy.py export --model e027 --out "$DATA/enemies" --clips r_gst,r_gst_lk,r_st_a,r_st_f,r_stlld0,r_stlaf0,r_stbf0,m_gst,m_st_a,m_st_f,m_stlld0,m_stlaf0,m_stbf0,r_sq_a,r_sq_f,m_sq_a,m_sq_f,r_atk_0,m_atk,r_gwk,r_grn,m_gwk,m_grn
 [ -s "$DATA/enemies/e027.glb" ] || fail "data/enemies/e027.glb missing after the enemy export (log: $LOGS/enemy_e027.log)"
 grep '^wrote' "$LOGS/enemy_e027.log" | sed "s#$REPO/##" | cut -c1-160
 echo "ok"

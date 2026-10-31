@@ -546,3 +546,67 @@ Dan on e3480ee: "Does this match exactly how the game manages it?" The three ene
   overlap ends (the page: 0.99 u, then push 0); in k_push16 only the 0x80 wall east of him held him. 1c should
   expect that (e.g. moved > 0 and the final push ~0, or the centres >= r_i + r_j apart), or idle him against
   a wall as k_push16 does. No play.js change is needed (ctrl.push is set before ctrl.step as before).
+
+## Path walking (worker 0159, 2026-10-31)
+
+Dan: "go ahead with soldier walking". Part 1 = the stage-path walk of cmd 0x131 (pathfinding is a later job).
+
+- **Data.** Section 9 = paths (0x20 B: +0 s16 node count, +2 s16 (not read by mover 1), +4 first node, +8 flags,
+  +0xc spline TENSION, +0x10 length), section 10 = nodes (0x60 B: +0x14 flags, +0x18 segment length, +0x20..+0x4f
+  rows, +0x50 position). export_web_triggers.py writes ai.json `paths` (all 136) and per record `speed` (status
+  +0x70 = parameter set +0x38 x 10, FUN_003153d0; 50 for every z128 e027). Worker 0157's "speed 0.4" is the
+  tension (FUN_0034edf0 copies +0xc to C+0x210, which only FUN_0025fcc8 / FUN_0025fd58 read).
+- **Start** (FUN_0055a6d8, not path flag bit 3): FUN_00352cb8 (C+0x310 path, +0x314 node 0, +0x318 last = n - 1 or -1
+  looped), turn mode 6 when the AI has a target and C+0x590 bit 24, else 5 (FUN_0034e960 -> FUN_0034dc50 case 5:
+  C+0x2c0 = facing, C+0x21c = -1), FUN_0034edf0(C, 1): C+0x210 tension, C+0x328 = sum of node +0x18, C+0x32c =
+  C+0x1d0, t = 0, mover 1, then FUN_0034f178 (C+0x1c4 bit 4) -> FUN_0034f4a0.
+- **Segment** (FUN_0034f4a0): path flags 4 (bit 2 set, bit 1 clear) -> always a spline: C+0x100..0x13f = node
+  positions i-1, i, i+1, i+2 through FUN_003217e0 (not looped: -1 -> node 1, >= n -> n - 2), gated on
+  FUN_00310c40 = G+0x64 = 48 > 8; then FUN_0034db80(C, 9) -> FUN_0034bd10 case 9: chord |P1 - P2|, polyline
+  count 0x20 (or chord x 10 + 2 below 3 u), FUN_00353480 samples FUN_0025fcc8 (cardinal basis) into C+0x3a0 and
+  cumulative lengths C+0x3a4; duration = arc / C+0x1d4 (C+0x1c0 bit 0). The clock keeps its remainder across
+  segments (C+0x1c4 bit 4 set by FUN_0034f178).
+- **Every frame** (FUN_0034ea18): FUN_0034f8c0 -> FUN_0034fad0 (on arrival bit C+0x1c4 bit 2: node++, done at the
+  last node) -> FUN_0034c388 mode 9 (arc = length x t / duration, lerp on the polyline, direction = the spline
+  slope FUN_0025fdf0 normalised, ground speed = C+0x1d4) -> t += DAT_0046e290 +0xc (0.02 s, T) -> FUN_0034d870
+  at t >= duration (mode 0, arrival bit) -> FUN_0034de50 case 5 (facing := move direction: FUN_00323318(1.0) = 1
+  at step 1.2, then FUN_0034a5a8(C, 1) keeps it level with C+0x1c0 bit 8). No ground drop in mode 9: the walk
+  follows the path's own heights (T: y matches).
+- **End.** The last arrival stops the mover (FUN_00352a60) before the move, so the soldier stays at the last
+  evaluated point (46: 0.65 u, 47: 0.58 u short of the last node, T). FUN_0034f8c0 sends the body listener
+  (C+0x540 = actor +0xc0, vtable 0x58e1e0 -> FUN_005690c8) event 2 -> FUN_00588550 jump table 0x591ef0 case 2
+  (0x588678) -> FUN_0053fbe8(manager, 0xf, id) -> FUN_0053fde8 case 0x10 -> script event 0x13. Scripts 127 / 128
+  event 19: cmd 0x193 (target the player), 0x143(1) (AI mode 1), ... so they turn on Vincent and fire (brain1).
+- **Motion.** State 2's motion 3 (FUN_00593e70) requests row 1 (r_gst) on its first update and, once C+0x1d8 > 0,
+  returns 8. Motion 8 (FUN_00594f98) installs the table rows 1 / 9 / 0x10 (r_gst / r_gwk / r_grn), thresholds 0 /
+  30 u/s, root speeds of entries 1 / 2; FUN_00343160 runs FUN_00346860 (choice: 50 u/s -> r_grn, flags 0x87) and
+  FUN_00346c10 (rate s / root clamped [0.9, 1.0] for the run: 50 / 49.35 -> 1.0 -> MP+0x40c 0.5). Standing again ->
+  blend 0x14, back to 3. T: r_gst at the wake, r_grn two frames later, r_gst after the end (both soldiers).
+  The flinch's phase 2 now returns FUN_00341b20 (3 / 6 / 0x16) instead of ending the motion, so a soldier hit on
+  his walk picks up r_grn again (test_enemy_hits 'hits on the path walk'; worker 0160).
+- **Trace.** The intended wake (a shot over trigger 77 from the ladder top) can't happen in the game: in four runs
+  every shot's aim ray (CAM+0xa0) hit a wall ~95 u out at (-1036, -163, -1056), whatever the pitch. The page's bullet
+  from the same spot does reach 77 (test_enemies_page 9): a page collision / aim gap, not chased. Instead
+  `TRACE_POKE=9540a4=6e,10a2140=6e` gives trigger 95 (crossed at f783 on k_lock14's route) trigger 89's walk-in
+  script 110 (object +0x34 and record +0xa0), which wakes 46 / 47 with the same commands. Script
+  tools/trace/scripts/w159_walk95.json, `TRACE_FIELDSET=path TRACE_ERECS=46,47 TRACE_ENEMIES=2` (new field set:
+  mover / move / clock / turn per soldier). New opt-in `TRACE_LOG_AT=<hex>` moves the log start for scripts over
+  1024 frames.
+- **Pathfinding notes for the next job** (mover 2 / 0xd, FUN_0055a628 / FUN_00353110): FUN_0034edf0 case 2 / 0xd
+  needs DAT_0046e878 +0x10 (a nav graph) and keeps a node list at C+0x3a8 (u16, -1 ended; C+0x316 / +0x318 indices);
+  FUN_00352a60 case 2 walks that list decrementing each node's +0x1d byte (FUN_00310f50: an occupancy count?) and
+  calls FUN_00368398(DAT_0046e290 +100, C+0x310 bits 44-47) once; FUN_0034f8c0 sends the listener event 4 with the
+  node from that list at the end; FUN_005690c8 case 4 / 5 -> FUN_00563a50(node). Mover 2 per frame = FUN_0034fbb0.
+- **Review fixes (worker 0160).** Per frame FUN_00343160: motion update (vt+0x24, returns the next class) -> body
+  FUN_0034ea18 -> the table step FUN_00346860 / FUN_00346c10 only when it returned 0, else FUN_00341780 (leave, FUN_00345678,
+  enter). Motion 8: vtable 0x5a6790 (enter 0x594f30 empty, leave FUN_00594f38 = FUN_00345b58(C, 0, 0, 0) + clear C+0x564
+  8 / 0x10); motion 3: enter 0x593dd0 (C+0x564 &= ~0x4000, FUN_003419e0(C, 0)), leave 0x593e08. So at the path end
+  (f897) the body stops after motion 8's update, the table picks r_gst (pushed, MP+0x448 T), f898 8 -> 3, f899 3's row-1
+  request is dropped by the MP: FUN_005a91c8 skips a flags-0x80 request whose clip is on the top layer; the aimed
+  FUN_005a9398 also compares the partner (+0x208; plain layers store 0), which is why k_fire_emp15 #67 pushes r_st_a twice.
+  Rate clamps C+0x768..0x774 = 0.1 / 1.1 / 0.9 / 1.0 (FUN_0033ff18). FUN_00565bd0 resets C+0x1d4 by gait (0: status
+  +0x70, 1: x 0.4 FUN_00317660, 2: x 0.2) and C+0x45c bit 3.
+- Tests: test_path_walk.mjs (mover alone and the AI world vs w159_walk95, MP pushes vs MP+0x448, hand cases), test_enemy_ai
+  '46 / 47 wake' (path start events), test_enemy_hits 'hits on the path walk', test_enemies_page 9 (46 / 47 walk, stop
+  within 0.01 u of the game's stops (measured 0.005 / 0.007), r_grn drawn at 0.6 frames / game frame, AI mode 1 after;
+  its wake through trigger 77 is page-only, see the audit).

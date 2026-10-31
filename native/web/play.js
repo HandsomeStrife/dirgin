@@ -641,6 +641,8 @@ async function main() {
       // cmd 0x108 / 0x109 / 0x130 on a section-1 record: its body appears / goes (enemies.js add / remove)
       onActivate: rec => { enemies.add(rec); },
       onDeactivate: rec => { enemies.remove(rec); },
+      // the locomotion table's root speeds (FUN_00345e58, motion state 8; enemies.js rootSpeed)
+      rootSpeed: (model, clip) => enemies.rootSpeed(model, clip),
       // GUESS: FUN_005449f0 probe 3 = the page's collision triangle set (probe sets not decoded)
       los: (a, b) => !!(col.segment && col.segment({ x: a[0], y: a[1], z: a[2] }, { x: b[0], y: b[1], z: b[2] })) }) : null;
     // The save's soldiers, as stored in sea-of-flames.p2s (object table *(DAT_0046e880+0x1164)[rec + 22]):

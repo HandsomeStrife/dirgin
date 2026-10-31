@@ -49,6 +49,8 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { clone as cloneSkinned } from 'three/addons/utils/SkeletonUtils.js';
 import { SpeedAnimator, STEP } from './player.js';
 import { boneRows } from './enemy_hit.js';
+import { rootSpeed as clipRootSpeed } from './aim.js';
+import { mpDrops, carryFrame } from './enemy_ai.js';
 
 const DIR = 'data/enemies/';
 const CLIP = 'r_gst';            // GUESS: the idle the brain requests at activation (FUN_0055b8e0 from the brain; not decoded). Save state: idle soldiers play r_gst / r_gst_lk
@@ -295,14 +297,20 @@ export async function setupEnemies({ root, litPatch, light, extra = [] }) {
   }
   // FUN_005aa2a8 on one layer: frame += rate x weight/128 x step (weight byte 128); a looped layer
   // resets to 0 at n, any other holds n - 1 (player.js advLayer)
-  function advance(a, L) {
-    L.frame = Math.fround(L.frame + Math.fround(Math.fround(RATE * 1.0) * STEP));
+  function advance(a, L, rate = RATE) {
+    L.frame = Math.fround(L.frame + Math.fround(Math.fround(rate * 1.0) * STEP));
     const n = a.side.clips[L.clip].frames;
     if (L.loop) { if (n <= L.frame) L.frame = 0; }
     else if (n - 1 <= L.frame) L.frame = n - 1;
   }
   return {
     actors, deadRecs, add, remove, partPose,
+    // FUN_00345e58 -> FUN_00344340: a clip's root speed (aim.js rootSpeed, its GUESS frame unit) from a drawn
+    // actor of that model; null when no such actor or clip is loaded
+    rootSpeed(model, clip) {
+      const a = actors.find(x => x.model === model && x.side.clips[clip]);
+      return a ? clipRootSpeed(a.side.clips, clip) : null;
+    },
     // the drawn actor that draws first (FUN_005a7978 list head side); play.js sets Vincent's body
     set mpHead(o) { base = o; },
     // one game frame: draw pose = this frame's clip frame(s), then FUN_005aa2a8's advance.
@@ -331,9 +339,18 @@ export async function setupEnemies({ root, litPatch, light, extra = [] }) {
         }
         if (s && s.C.req !== a.req) {
           a.req = s.C.req;
-          if (has(s.C.clip)) {
+          // FUN_005a91c8 / FUN_005a9398 (enemy_ai mpDrops): a request with flags bit 0x80 (all of enemy_ai's: 0x82 /
+          // 0x83 / 0x86 / 0x87) is dropped while the top layer (a.head: the page always has one) already plays
+          // that clip with that partner (plain = none).
+          // T: w159_walk95 MP+0x448 (test_path_walk).
+          const drop = mpDrops(s.C.flags, a.head, s.C.clip, s.C.partner);
+          if (!drop && has(s.C.clip)) {
             a.out = a.head;
-            a.head = { clip: s.C.clip, frame: 0, loop: s.C.loop !== false };
+            // a locomotion-table switch (FUN_00346860, enemy_ai C.reqCarry) starts the new clip at the old
+            // head's frame (FUN_005a8fd0: min(max(2 frame, 0), 2 n - 1) / 2); a first choice / request at 0
+            const n = a.side.clips[s.C.clip].frames;
+            const fr = s.C.reqCarry ? carryFrame(a.head.frame, n) : 0;
+            a.head = { clip: s.C.clip, frame: fr, loop: s.C.loop !== false, partner: s.C.partner ?? null };
             const len = (s.C.blendLen ?? BLEND_DEFAULT) + 1;
             a.blend = { len, rem: len };
           }
@@ -345,9 +362,11 @@ export async function setupEnemies({ root, litPatch, light, extra = [] }) {
         a.pose.poseLocal(a.head.clip, a.head.frame, a.out ? a.out.clip : null, a.out ? a.out.frame : 0, w);
         a.clip = a.head.clip; a.frame = a.head.frame;
         a.posed = { pos: a.body.position.toArray(), heading: a.body.rotation.y - Math.PI };
-        // GUESS (other types): e027's RATE (MP+0x40c 0.5) for every type
-        advance(a, a.head);
-        if (blending) { advance(a, a.out); b.rem = Math.fround(b.rem - STEP); if (b.rem <= 0) b.rem = 0; }
+        // MP+0x40c: the body's locomotion rate (enemy_ai C.rate, FUN_00346c10) while a table is installed,
+        // else 0.5 (FUN_003456c0 rate 1.0). GUESS (other types): e027's RATE for every type
+        const rate = s && s.C.rate != null ? s.C.rate : RATE;
+        advance(a, a.head, rate);
+        if (blending) { advance(a, a.out, rate); b.rem = Math.fround(b.rem - STEP); if (b.rem <= 0) b.rem = 0; }
         a.frame = a.head.frame;
       }
     },

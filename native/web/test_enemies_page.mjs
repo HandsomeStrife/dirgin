@@ -22,7 +22,9 @@
 //   7. record 51 (Dan's report): mode 1, the fire clip's blend-out against k_fire_emp15;
 //   8. record 69 hit (script event 8 -> AI mode 5) keeps firing; with Vincent close he attempts the melee
 //      attack (m_atk drawn);
-//   9. a shot over the platform (trigger 77, bullets only) wakes records 46-49; no console errors or page errors.
+//   9. a shot over the platform (trigger 77, bullets only) wakes records 46-49; 46 / 47 walk stage paths 5 / 8
+//      (cmd 0x131, path_mover.js: running clip r_grn, stop where the game stops them, trace w159_walk95,
+//      then script event 0x13: AI mode 1); no console errors or page errors.
 //   node native/web/test_enemies_page.mjs          (needs data/enemies + playwright; else SKIP, exit 0)
 // Serves native/web with python3 http.server on a free port. three.js comes from the CDN (play.html importmap).
 import { existsSync, readFileSync } from 'node:fs';
@@ -433,6 +435,9 @@ try {
   // same correction loop as step 5), then R1: aim.js onShot -> playerShot -> the bullet update.
   // Script 126 (48 / 49) sets AI mode 1; scripts 127 / 128 (46 / 47) set mode 0 and run a sub-routine
   // the page's VM stops at (op 37: notes/fidelity-audit.md).
+  // KNOWN GAP (notes/fidelity-audit.md, trigger volumes row): this wake is page-only. In the game the aim ray from
+  // the ladder top hits a wall ~95 u out (four PCSX2 runs), so no bullet reaches 77 from here; the page's aim /
+  // bullet miss that wall. The walk itself is traced by another route (w159_walk95, trigger 89's script).
   // A fresh page: earlier in this run #51's bullets (he stands inside trigger 76, script 99: wake n1 ->
   // 46-49) and then 46-49's own bullets (inside 77) have already woken them.
   await pg.goto(`http://127.0.0.1:${port}/play.html`, { waitUntil: 'load' });
@@ -442,7 +447,16 @@ try {
     const recs = [46, 47, 48, 49], act = k => ai.actors.find(a => a.rec === k);
     const before = recs.map(k => act(k)?.ai?.mode);
     const seen = [], t0 = ai.tick;
-    ai.tick = (...x) => { const ev = t0(...x); for (const e of ev) if (/^shot volume t77|^event t77 |^event (68|69|70|71) /.test(e)) seen.push(e); return ev; };
+    const walk = [];                                                       // the walkers' clips and path events, by tick
+    const drawn = [];                                                      // #46's drawn head layer (enemies.js) before each game frame
+    ai.tick = (...x) => {
+      const d = P.enemies.actors.find(e => e.rec === 46);
+      if (d && d.head) drawn.push([d.head.clip, d.head.frame]);
+      const ev = t0(...x);
+      for (const e of ev) if (/^shot volume t77|^event t77 |^event (68|69|70|71) /.test(e)) seen.push(e);
+      for (const e of ev) if (/^path |^clip (68|69) /.test(e)) walk.push(e);
+      return ev;
+    };
     c.pos = { x: -1070.0, y: -146.1, z: -1105.6 }; c.prev = { ...c.pos }; c.locate(); if (c.onTeleport) c.onTeleport();
     await wait(400);
     if (!P.aim.state().drawn) { P.aim.press('r1'); await wait(800); }
@@ -459,15 +473,41 @@ try {
       P.follow.yaw += sy * dy; P.follow.pitch += sp * dp; await wait(120);
     }
     const quiet = seen.length;                                             // nothing fired before R1
-    P.aim.press('r1'); await wait(2500);
+    const start = [46, 47].map(k => act(k).pos.slice());
+    P.aim.press('r1'); await wait(1000);
+    const after = recs.map(k => act(k)?.ai?.mode);                           // mid-walk (46 / 47 need 2.3 / 3 s)
+    for (let i = 0; i < 100 && walk.filter(e => e.startsWith('path end')).length < 2; i++) await wait(100);
     ai.tick = t0;
-    return { before, after: recs.map(k => act(k)?.ai?.mode), seen, quiet, var0: ai.triggers[77].vars[0] };
+    const d46 = P.enemies.actors.find(e => e.rec === 46);
+    const model = d46 ? { lp: !!d46.lp.clips.r_grn, side: !!d46.side.clips.r_grn } : null;
+    return { before, after, seen, quiet, var0: ai.triggers[77].vars[0], walk, start, drawn, model,
+             end: [46, 47].map(k => act(k).pos.slice()), endModes: [46, 47].map(k => act(k)?.ai?.mode) };
   });
   ok(pf && pf.quiet === 0 && pf.seen.includes('shot volume t77') && pf.seen.some(e => e.startsWith('event t77 script 100 ev 18')) && pf.var0 === 1,
      `a shot over the platform crosses trigger 77: event 0x12 ran (script 100; once-var ${pf?.var0}); ${pf?.seen.slice(0, 3).join(' | ')}`);
   ok(pf && [68, 69, 70, 71].every(id => pf.seen.some(e => e.startsWith(`event ${id} script `) && / ev 2 r 1,/.test(e))) &&
      pf.before.every(m => m === 0) && pf.after[2] === 1 && pf.after[3] === 1 && pf.after[0] === 0 && pf.after[1] === 0,
      `records 46-49 woken (event 2, n 1): AI modes ${pf?.before} -> ${pf?.after} (scripts 127 / 128: 0, 126: 1)`);
+  {
+    // where the game stops them (w159_walk95 records 898 / 931: the last evaluated point of the last segment, rounded
+    // to 0.01 u; measured 0.005 / 0.007 u off, so within 0.01)
+    const STOP = [[-835.85, -148.89, -936.55], [-846.04, -144.56, -950.40]];
+    const w = pf?.walk || [], d = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
+    const off = pf ? pf.end.map((p, i) => d(p, STOP[i])) : [];
+    console.log(`     measured stop offsets ${off.map(x => x.toFixed(4))} u`);
+    ok(pf && w.includes('path 68 5') && w.includes('path 69 8') && w.includes('path end 68') && w.includes('path end 69') &&
+       w.includes('clip 68 r_grn') && w.includes('clip 69 r_grn') && off.every(x => x < 0.01) && pf.start.every((p, i) => d(p, pf.end[i]) > 50) &&
+       pf.endModes.every(m => m === 1) && pf.model && pf.model.lp && pf.model.side,
+       `46 / 47 walk paths 5 / 8 and stop ${off.map(x => x.toFixed(3))} u from the game's stops, AI mode ${pf?.endModes} after the end: ` +
+       w.filter(e => /^path|r_grn/.test(e)).join(' | ') + (w.includes('clip 68 r_grn') ? '' : ' || 68: ' + w.filter(e => / 68( |$)/.test(e)).join(' | ')) +
+       `; e027 model has r_grn: local ${pf?.model?.lp}, side ${pf?.model?.side}`);
+    // the drawn run: enemies.js plays r_grn at MP+0x40c = C.rate (FUN_00346c10: 50 / 49.35 clamped to 1.0 -> 0.5),
+    // so the head frame moves 0.5 x 1.2 = 0.6 per game frame (no wrap between samples)
+    const dr = pf?.drawn || [], steps = [];
+    for (let i = 1; i < dr.length; i++) if (dr[i][0] === 'r_grn' && dr[i - 1][0] === 'r_grn' && dr[i][1] > dr[i - 1][1]) steps.push(dr[i][1] - dr[i - 1][1]);
+    ok(steps.length > 30 && steps.every(x => Math.abs(x - 0.6) < 1e-4),
+       `#46 drawn r_grn advances ${[...new Set(steps.map(x => x.toFixed(4)))].join(' / ')} frames per game frame over ${steps.length} frames (0.6 = rate 0.5 x step 1.2)`);
+  }
   ok(errs.length === 0, `no console errors${errs.length ? ': ' + errs.slice(0, 3).join(' | ') : ''}`);
 } finally {
   await browser.close();

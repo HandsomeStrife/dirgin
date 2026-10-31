@@ -1,0 +1,47 @@
+{
+ "name": "w159_walk95",
+ "frames": 1020,
+ "log_from": 770,
+ "doc": "worker 0159: path walk of 46 / 47 (cmd 0x131). k_lock14's route to the ladder top (trigger 95 entered ~f784), then no input. Run with TRACE_POKE=9540a4=6e,10a2140=6e: trigger 95's object +0x34 and record +0xa0 script 27 -> 110 (trigger 89's walk-in script: event 13 wakes 46 / 47 n1 -> scripts 127 / 128 event 2 -> cmd 0x131). TRACE_FIELDSET=path TRACE_ERECS=46,47 TRACE_ENEMIES=2.",
+ "events": [
+  {
+   "from": 10,
+   "to": 230,
+   "lx": 0.6,
+   "ly": -1.0
+  },
+  {
+   "from": 240,
+   "to": 244,
+   "buttons": [
+    "cross"
+   ]
+  },
+  {
+   "from": 280,
+   "to": 284,
+   "buttons": [
+    "cross"
+   ]
+  },
+  {
+   "from": 300,
+   "to": 470,
+   "lx": 0.6,
+   "ly": -1.0
+  },
+  {
+   "from": 490,
+   "to": 494,
+   "buttons": [
+    "cross"
+   ]
+  },
+  {
+   "from": 500,
+   "to": 787,
+   "lx": 0.6,
+   "ly": -1.0
+  }
+ ]
+}

@@ -30,6 +30,15 @@ Decoded (D) layout, read here, nothing copied into the repo:
   - per zone set the actor size (FUN_00563fc0, see zone_size) and every z128 enemy type's part
     boxes; clip frame counts per model for the motions enemy_ai.js requests (model_clips).
 
+  - section 9 = stage paths (0x20 B; FUN_00311120 = FUN_00310b40(9) + stride x i): +0 s16 node count,
+    +2 s16 (not read by the path mover), +4 first node (section-10 index), +8 flags (bit 0 loop, bits 1 / 2
+    spline choice FUN_0034f4a0, bit 3 -> mover 0xe instead of 1, FUN_0055a6d8), +0xc spline tension
+    (C+0x210, FUN_0034edf0 -> FUN_0025fcc8 / FUN_0025fd58), +0x10 path length.
+  - section 10 = path nodes (0x60 B; FUN_00311180): +0x14 flags (bit 0 = straight segment, FUN_0034f4a0
+    with path flags 6), +0x18 segment length (FUN_0034edf0 / FUN_0034f4a0 -> C+0x31c), +0x20 / +0x30 /
+    +0x40 rows, +0x50 position (the spline's control point, FUN_0034f4a0 -> FUN_0034aea8).
+    The path walk (cmd 0x131) is notes/enemy-ai-hook.md 'Path walking'.
+
 Usage: export_web_triggers.py STAGE.bin OUTDIR
 (the stance file is read from STAGE's directory: 06800009.bin next to 06800001.bin)
 """
@@ -47,8 +56,9 @@ AI_CLIPS = ('r_gst', 'r_gst_lk', 'r_st_a', 'r_st_f', 'r_stlld0', 'r_stlaf0', 'r_
 # motion ids enemy_ai.js requests (FUN_0055b8e0 / FUN_00345818 index C+0x7fc rows): 0 / 2 idle (GUESS
 # which one the brain starts), 1 the flinch's end without the gun out (FUN_00598950), 0x40 aim (r_st_a for stance 0x1f), 0x57 fire (r_st_f), 0x28 / 0x2b /
 # 0x2c the flinch / death rows the k_hits12 trace shows (r_stlld0 / r_stbf0 / r_stlaf0), 0x78 crouched aim
-# (motions 0x18 / 0x16 / 0xf: FUN_005978e8 / FUN_005971d8 / FUN_00597c60) and 0x7b crouched fire (0xf)
-AI_MOTIONS = (0x00, 0x01, 0x02, 0x40, 0x57, 0x28, 0x2b, 0x2c, 0x78, 0x7b)
+# (motions 0x18 / 0x16 / 0xf: FUN_005978e8 / FUN_005971d8 / FUN_00597c60) and 0x7b crouched fire (0xf),
+# 0x09 / 0x10 the walk / run rows of the locomotion table (motion state 8, FUN_00594f98 -> FUN_00345b58(C, 1, 9, 0x10))
+AI_MOTIONS = (0x00, 0x01, 0x02, 0x40, 0x57, 0x28, 0x2b, 0x2c, 0x78, 0x7b, 0x09, 0x10)
 STANCE_FILE = '06800009.bin'      # z128's 'bmd' file (stage 0x0680, k 9)
 
 
@@ -75,6 +85,29 @@ def triggers(d):
     nscr = len(SE.scripts(d))
     for t in out:
         t['acts'] = SE.activations(d, t['script']) if 0 <= t['script'] < nscr else []
+    return out
+
+
+def paths(d):
+    """Section 9 paths with their section-10 nodes (FUN_00311120 / FUN_003217e0 / FUN_00311180)."""
+    sec = SE.sections(d)
+    o9, n9, s9 = sec[9]
+    o10, n10, s10 = sec[10]
+    if s9 != 0x20 or s10 != 0x60:
+        raise ValueError('section 9 / 10 stride %#x / %#x, expected 0x20 / 0x60' % (s9, s10))
+    out = []
+    for k in range(n9):
+        r = o9 + k * s9
+        cnt, s2, first, flags = struct.unpack_from('<hhiI', d, r)
+        tension, length = struct.unpack_from('<2f', d, r + 0xc)
+        nodes = []
+        for j in range(first, first + max(cnt, 0)):
+            if not 0 <= j < n10:
+                raise ValueError('path %d node %d outside section 10 (%d)' % (k, j, n10))
+            q = o10 + j * s10
+            nodes.append(dict(pos=f32s(d, q + 0x50, 4), seg=f32s(d, q + 0x18, 1)[0], flags=SE.u32(d, q + 0x14)))
+        out.append(dict(idx=k, n=cnt, s2=s2, first=first, flags=flags, tension=round(tension, 6),
+                        length=round(length, 6), nodes=nodes))
     return out
 
 
@@ -123,7 +156,12 @@ def records(d):
                         pos=f32s(d, o + 0xc, 3), face=f32s(d, o + 0x1c, 3), weapon=weapon, hp=hp, lvl=lvl, zones=zi,
                         # +0x4c / +0x4d -> AI +0x98 / +0x99 (signed bytes, FUN_00559748): the odds FUN_0035f7c0 /
                         # FUN_0035f8b0 draw against
-                        b98=struct.unpack_from('b', d, o + 0x4c)[0], b99=struct.unpack_from('b', d, o + 0x4d)[0]))
+                        b98=struct.unpack_from('b', d, o + 0x4c)[0], b99=struct.unpack_from('b', d, o + 0x4d)[0],
+                        # status +0x70 = parameter set +0x38 x 10 (FUN_003153d0; parameter set +0x6c == 5 takes
+                        # FUN_00315278 instead: none of the AI types): the move speed FUN_00565bd0 hands to
+                        # FUN_0034b978 (C+0x1d4; x 0.4 walking, x 0.2 stance 2)
+                        speed=(None if struct.unpack_from('<i', d, o0 + ps * s0 + 0x6c)[0] == 5 else
+                               round(struct.unpack_from('<f', d, o0 + ps * s0 + 0x38)[0] * 10.0, 6))))
     return out
 
 
@@ -381,12 +419,13 @@ def main():
                weapons=weapons(d), scripts=scr, clips=clip_frames(), hitboxes=boxes,
                zones=zone_sets(d, recs, boxes), stances=st, model_clips=model_clips(recs, st, atk), attacks=atk,
                sizes={str(r['zones']): zone_size(d, r['zones']) for r in recs if r['zones'] >= 0},
-               lock_bones={str(r['zones']): lock_bone(d, r['zones']) for r in recs if r['zones'] >= 0})
+               lock_bones={str(r['zones']): lock_bone(d, r['zones']) for r in recs if r['zones'] >= 0},
+               paths=paths(d))
     path = os.path.join(out, 'ai.json')
     with open(path, 'w') as fh:
         json.dump(res, fh, separators=(',', ':'))
-    print('wrote %s: %d triggers, %d records, %d weapons, %d scripts, zone sets %s, clips %s, stances %s, model clips %s' % (
-        path, len(trig), len(recs), len(res['weapons']), len(scr), sorted(res['zones']), res['clips'],
+    print('wrote %s: %d triggers, %d records, %d weapons, %d scripts, %d paths, zone sets %s, clips %s, stances %s, model clips %s' % (
+        path, len(trig), len(recs), len(res['weapons']), len(scr), len(res['paths']), sorted(res['zones']), res['clips'],
         sorted(st), {m: len(c) for m, c in res['model_clips'].items()}))
 
 

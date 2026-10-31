@@ -231,3 +231,14 @@ for experiments: `46e90c=0` (push scale DAT_0046e90c, FUN_00542ab8), `46f4d0=1` 
 object pass off). Script k_push17 (k_push16 to f960, log from f790); its positions equal k_push16's
 with the full `pushstep` set (an earlier run without the `push_out` hook was 0.08-0.1 u off before
 contact: not chased).
+
+### Soldier path walk (TRACE_FIELDSET=path, worker 0159)
+`TRACE_FIELDSET=path` logs a little of the player and camera (matrix, `cam_fwd` / `cam_eye` / `cam_lock`, `cam_a0` =
+CAM+0xa0 aim hit + 0xb0 far point) and per soldier the move state: `a100` (actor state, gait bits), `ai_mode`, `cmat`
+(C+0x00..0x3f), `dir` (C+0x90), `mv` (C+0x1c0..0x21f: flags, move mode, segment clock / duration, speeds, polyline
+index / arc, tension, turn mode), `path` (C+0x300..0x32f: mover, path, node, last), `motion`, `c590`, `mp_head`
+(`TRACE_PATH_LAYERS=1` adds the MP layers). `TRACE_ERECS=46,47` picks soldiers by stage record (object index =
+record + 22); set `TRACE_ENEMIES` to their count. `TRACE_LOG_AT=<hex>` (hook.py) starts the frame log later, for
+scripts over 1024 frames (script frames = (LOG - 0x97000) / 24). Script w159_walk95 (with
+`TRACE_POKE=9540a4=6e,10a2140=6e`: trigger 95 runs script 110) wakes 46 / 47 at f783; notes/enemy-ai-hook.md
+'Path walking'.

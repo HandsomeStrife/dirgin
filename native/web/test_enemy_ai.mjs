@@ -179,7 +179,8 @@ function run(name) {
   const fire = { sim: [], game: [] }, hp = { sim: [], game: [] }, wake = { sim: null, game: null };
   let clockBad = 0, dueBad = 0, modeAllBad = 0, dueAll = 0;
   // motion requests (enemy_ai C.req: a new head layer, enemies.js blend) of #66 / #67: frame:clip:loop
-  const pushes = [[], []], reqSeen = acts.slice(0, 2).map(a => a.C.req);
+  // each request through the MP's same-layer test (AI.mpDrops: FUN_005a91c8 / FUN_005a9398), as enemies.js
+  const pushes = [[], []], reqSeen = acts.slice(0, 2).map(a => a.C.req), tops = acts.slice(0, 2).map(a => ({ clip: a.C.clip, partner: null }));
   // facing (body C+0x20): the sim's heading vs the game's, every frame, closed loop
   const yaw = v => Math.atan2(v[0], v[2]) * 180 / Math.PI;
   const face = [{ err: [], moved: 0, bit30: 0 }, { err: [], moved: 0, bit30: 0 }];
@@ -197,7 +198,10 @@ function run(name) {
       if (g.mode !== a.ai.mode) modeAllBad++;
       if (g.due !== a.ai.due) dueAll++;
       if (k > 1) continue;
-      if (a.C.req !== reqSeen[k]) { reqSeen[k] = a.C.req; pushes[k].push(`${f}:${a.C.clip}:${a.C.loop ? 1 : 0}`); }
+      if (a.C.req !== reqSeen[k]) {
+        reqSeen[k] = a.C.req;
+        if (!AI.mpDrops(a.C.flags, tops[k], a.C.clip, a.C.partner)) { tops[k] = { clip: a.C.clip, partner: a.C.partner }; pushes[k].push(`${f}:${a.C.clip}:${a.C.loop ? 1 : 0}`); }
+      }
       if (wake.game == null && g.mode === 2 && k === 0) wake.game = f;
       if (wake.sim == null && a.ai.mode === 2 && k === 0) wake.sim = f;
       const sim = { mode: a.ai.mode, bstate: a.ai.bstate, interval: a.ai.interval,
@@ -462,11 +466,14 @@ for (const [side, damage, dist, flight] of [[0, true, 30, 3], [40, true, 30], [0
     const a45 = W.addActor({ rec: 45 });
     const st0 = a45.astate, gun0 = a45.C.gun, mot0 = a45.C.motion && a45.C.motion.cls;
     const push = [];
-    let req = a45.C.req;
+    let req = a45.C.req, top = { clip: a45.C.clip, partner: null };
     cross(W, 95);
     for (let i = 0; i < 40; i++) {
       W.tick(1.2, player.pos, player.pos);
-      if (a45.C.req !== req) { req = a45.C.req; push.push([W.S.frame, `${a45.C.clip}:${a45.C.loop ? 1 : 0}`]); }
+      if (a45.C.req !== req) {
+        req = a45.C.req;                                                      // through the MP test (AI.mpDrops), as enemies.js
+        if (!AI.mpDrops(a45.C.flags, top, a45.C.clip, a45.C.partner)) { top = { clip: a45.C.clip, partner: a45.C.partner }; push.push([W.S.frame, `${a45.C.clip}:${a45.C.loop ? 1 : 0}`]); }
+      }
     }
     let want = [[796, 'r_st_a:0'], [804, 'r_st_a:1']];
     const tf = path.join(OUT, 'k_fire_emp15.jsonl');
@@ -831,19 +838,21 @@ else {
   const send = (W, a, cmd, r0, r1 = 0) => { sdata.scripts[9990][2].code[2][1] = cmd; const s = a.script; a.script = 9990; W.runEvent(a, 2, [r0, r1]); a.script = s; };
 
   // 1. records 46 / 47 wake (scripts 127 / 128 event 2, r0 = 1), from the save's state 1 / vars 0:
-  // var 0 -> 1, actor state 2 (0x142(2)), AI mode 0 (0x143(0)), path 5 / 8 (0x131: MISSING, warned),
+  // var 0 -> 1, actor state 2 (0x142(2)), AI mode 0 (0x143(0)), path 5 / 8 (0x131: path_mover.js pathStart),
   // and 127's ops 37 / 39 / 40 (debug print) run without stopping the event. Run once (var 0).
   {
     const { W, logs } = mkW();
+    const paths = [];
     const res = [46, 47].map(k => {
       const a = W.addActor({ rec: k, astate: 1, mode: 0 });
       W.runEvent(a, 2, [1, 0]);
+      paths.push(...W.events.filter(e => e.startsWith(`path ${a.id} `)).map(e => +e.split(' ')[2]));
       const first = [a.vars[0], a.astate, a.ai.mode];
       a.astate = 1; W.runEvent(a, 2, [1, 0]);
       return [...first, a.astate];
     });
     const stopped = logs.filter(m => / op \d+ not translated/.test(m));
-    const paths = logs.filter(m => /cmd 0x131 \(path/.test(m)).map(m => +m.match(/path (\d+)/)[1]);
+    // (an ai.json without stage paths warns instead: re-export)
     ok(res.map(x => x.join()).join(' / ') === '1,2,0,1 / 1,2,0,1' && stopped.length === 0 && paths.join() === '5,8',
        `46 / 47 wake: [var0, state, mode, state after a 2nd wake] ${res.map(x => x.join()).join(' / ')} (1,2,0,1 / 1,2,0,1); ` +
        `VM stops ${stopped.length} (0); path cmds ${paths} (5,8)`);

@@ -22,6 +22,9 @@ import struct
 
 HOOK, CTRL, FIELDS, SCRIPT, LOG, LOG_END = 0x96000, 0x96800, 0x96900, 0x97000, 0x9D000, 0x100000
 SCRIPT_STRIDE = 24
+# TRACE_LOG_AT=<hex> (worker 0159): start the frame log later, so longer scripts fit (script frames =
+# (LOG - SCRIPT) / 24; the log keeps LOG..LOG_END). Default 0x9D000 = 1024 script frames.
+LOG = int(__import__("os").environ.get("TRACE_LOG_AT", "%x" % LOG), 16)
 PAD_COPY = 18
 CALL_SITE, PAD_READ = 0x257EBC, 0x443B50
 FREE_LO, FREE_HI = 0x96000, 0x100000

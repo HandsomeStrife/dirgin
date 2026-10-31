@@ -22,7 +22,7 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import { createEnemyAI } from './enemy_ai.js';
+import { createEnemyAI, mpDrops } from './enemy_ai.js';
 import { cylinderHit, partTest, boxCorners, modelPose, boneRows, cone } from './enemy_hit.js';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -297,13 +297,21 @@ for (const [k, model, stand, size, deathClip] of [[28, 'e048', 'r_st_a', [5, 18]
       const a = ai.addActor({ rec: k, mode: 0, pos: [0, 0, 0], face: [0, 0, 1], ...init });
       if (gun === 1) a.C.gun = 1;
       ai.playerShot([0, -6, -60], [0, -6, 60], straight);
-      const ev = [], clips = [], bits = [];
+      const ev = [], clips = [], bits = [], push = [];
+      let req = a.C.req, top = { clip: a.C.clip, partner: null };
       for (let i = 0; i < 300; i++) {
         if (gun === 0) a.C.gun = 0; if (gun === 1) a.C.gun = 1;
         ev.push(...ai.tick(1.2, [0, 0, -200], [0, 0, -200])); clips.push(a.C.clip);
+        // MP layer pushes: each request through the same-layer test (mpDrops), as enemies.js
+        if (a.C.req !== req) {
+          req = a.C.req;
+          const d = mpDrops(a.C.flags, top, a.C.clip, a.C.partner);
+          if (!d) top = { clip: a.C.clip, partner: a.C.partner };
+          push.push(`${i}:${a.C.clip}${d ? '(dropped)' : ''}`);
+        }
         bits.push({ f564: a.C.f564 >>> 0, f1c0: a.C.f1c0, cls: a.C.motion ? a.C.motion.cls : -1, bstate: a.ai.bstate, mode: a.ai.mode });
       }
-      return { a, ev, clips, bits };
+      return { a, ev, clips, bits, push };
     };
     const r = run(7, 0, P), id = r.a.id, mine = r.ev.filter(e => e.startsWith(`clip ${id} `));
     const flinched = r.clips.indexOf('stld0');
@@ -325,6 +333,28 @@ for (const [k, model, stand, size, deathClip] of [[28, 'e048', 'r_st_a', [5, 18]
     const n = run(45, 0, P0), ne = n.ev.filter(e => e.startsWith(`clip ${n.a.id} `)), nf = ne.lastIndexOf(`clip ${n.a.id} r_stlld0`);
     const after = nf >= 0 && ne.indexOf(`clip ${n.a.id} r_gst`, nf) > nf;
     ok(n.a.hp > 0 && after, `e027 #67 gun held clear: flinch end asks row 1 r_gst (events ${ne.join(', ')})`);
+    // FUN_005a91c8: the flinch end's plain r_gst (FUN_00598950, flags 0x83) is pushed; two frames later
+    // motion 3's first update asks plain r_gst again, which finds it on the top layer and is dropped, so
+    // the recovery blend runs out instead of restarting (the page blended ~2/11 then snapped)
+    {
+      const i0 = n.push.findIndex(x => x.endsWith(':r_stlld0'));
+      const tail = i0 >= 0 ? n.push.slice(i0, i0 + 3).map(x => x.replace(/^\d+:/, '')) : [];
+      ok(tail.join(' ') === 'r_stlld0 r_gst r_gst(dropped)', `e027 #67 gun held clear: flinch -> r_gst pushed once, motion 3's r_gst dropped (${n.push.join(' ')})`);
+    }
+    // gun out (C+0x590 bit 24 held): the flinch end asks plain row 0x40 (r_st_a), then FUN_00341b20 returns 6
+    // (standing posture); motion 6's first update asks the aimed set 0x40-0x42, whose partner differs from
+    // the plain layer's 0, so it is pushed (FUN_005a9398; as k_fire_emp15 #67 f796 / f804). Rests on the
+    // aimed-partner GUESS (enemy_ai.js request): at aim zone 0 the game makes a plain request and would
+    // drop it (one r_st_a); zones are not decoded.
+    {
+      const o = run(45, 1, P0), cls = [];
+      for (const b of o.bits) if (cls.at(-1) !== b.cls) cls.push(b.cls);
+      const i0 = o.push.findIndex(x => x.endsWith(':r_stlld0'));
+      const tail = i0 >= 0 ? o.push.slice(i0, i0 + 3).map(x => x.replace(/^\d+:/, '')) : [];
+      const fi = cls.indexOf(0x1e);
+      ok(fi >= 0 && cls[fi + 1] === 6 && tail.join(' ') === 'r_stlld0 r_st_a r_st_a',
+         `e027 #67 gun out: flinch -> motion ${fi >= 0 ? (cls[fi + 1] ?? -1).toString(16) : '?'} (6), pushes ${tail.join(' ')} (r_stlld0 r_st_a r_st_a)`);
+    }
     // the flinch class's enter 0x5988b8 / leave 0x5988f0: C+0x564 0x8000|0x4000|0x10000 while the flinch
     // runs (T: k_hits12 f870 #67 0x4001c000), cleared with C+0x1c0 bit 0x20 at its end; the brain sits in
     // state 1 meanwhile and leaves it afterwards (re-runs state 0)
@@ -490,4 +520,56 @@ for (const file of traces) {
     }
   }
 }
+
+// Hits on the path walk (cmd 0x131, path_mover.js; no trace shoots a walker: hand cases on the decoded code).
+// #46 (record 46) wakes on path 5 (script 127 event 2); after 30 frames a pellet along his move direction hits him.
+//  - flinch (FUN_00561570): moving (mover 1) -> no push-back slide, C+0x1c0 |= 0x20, so FUN_0034ea18 skips the
+//    move while the flinch plays (path_mover bodyFrame); the leave 0x5988f0 clears it and the walk goes on
+//    (motion 3 -> 8, r_grn again)
+//  - death (FUN_00560fc8): FUN_003533e0 -> FUN_00352a60 stops the path mover (move mode 0), then the death slide
+if (!data.paths) console.log('SKIP walk hits: ai.json has no stage paths (re-export: export_web_triggers.py)');
+else {
+  const walkHit = (hp, walk = 30) => {
+    const ai = soldierAI();
+    const a = ai.addActor({ rec: 46, astate: 1, f118: 0 });
+    ai.runEvent(a, 2, [1, 0]);
+    for (let i = 0; i < walk; i++) ai.tick(1.2, [0, 0, -200], [0, 0, -200]);
+    if (hp != null) a.hp = hp;
+    const p = a.pos, d = a.face, o = [p[0] - 60 * d[0], p[1] - 9, p[2] - 60 * d[2]];
+    ai.playerShot(o, [o[0] + 120 * d[0], o[1], o[2] + 120 * d[2]], straight);
+    const fr = [];
+    for (let i = 0; i < 160; i++) {
+      ai.tick(1.2, [0, 0, -200], [0, 0, -200]);
+      fr.push({ pos: a.pos.slice(), cls: a.C.motion ? a.C.motion.cls : -1, frz: !!(a.C.f1c0 & 0x20), clip: a.C.clip, mm: a.C.mm, mover: a.C.mover, hp: a.hp,
+                loco: !!a.C.loco, b18: a.C.f564 & 0x18 });
+    }
+    return { a, fr };
+  };
+  const mv = (x, y) => Math.hypot(x.pos[0] - y.pos[0], x.pos[1] - y.pos[1], x.pos[2] - y.pos[2]);
+  {
+    const { a, fr } = walkHit(null);
+    const i0 = fr.findIndex(x => x.cls === 0x1e), i1 = fr.findIndex((x, i) => i > i0 && x.cls !== 0x1e);
+    const during = i0 >= 0 ? fr.slice(i0 + 1, i1 < 0 ? undefined : i1) : [];
+    const still = during.length > 5 && during.every((x, i) => x.frz && mv(x, i ? during[i - 1] : fr[i0]) === 0);
+    // motion 8's leave FUN_00594f38 (FUN_00341780 on the flinch): the table is gone (C+0x658 = 0, C+0x564 bits 8 / 0x10)
+    const unTab = i0 >= 0 && fr[i0].loco === false && fr[i0].b18 === 0 && fr[i0 - 1]?.loco === true;
+    const after = i1 > 0 ? fr.slice(i1) : [];
+    const runs = after.some(x => x.clip === 'r_grn') && after.length > 1 && mv(after.at(-1), after[0]) > 20 && after.every(x => x.mover === 1 || x.mm === 0);
+    ok(a.hp > 0 && still && runs && unTab,
+       `#46 hit on his walk: table uninstalled at the flinch ${unTab}; flinch over ${during.length} frames with C+0x1c0 bit 0x20 and no move (${still}); then motion ${i1 > 0 ? fr[i1].cls.toString(16) : '?'}, ` +
+       `r_grn again, ${after.length ? mv(after.at(-1), after[0]).toFixed(1) : '?'} u walked`);
+  }
+  {
+    // shot at frame 22: the pellet lands early in a segment (they last ~12 frames; one ending at the hit would hide
+    // a missing stop, since the move mode drops to 0 at each segment end)
+    const { a, fr } = walkHit(1, 22);
+    const k = fr.findIndex(x => x.hp <= 0), tail = fr.slice(k + 40);
+    // move mode 0 from the death frame on (a running segment would otherwise go on to its end), still after the slide
+    const stops = k >= 0 && tail.length > 10 && fr.slice(k).every(x => x.mm === 0 && x.mover !== 1) && tail.every(x => mv(x, tail[0]) === 0);
+    const level = k >= 0 && fr.slice(k).every(x => x.pos[1] === fr[k].pos[1]);
+    ok(stops && level, `#46 killed on his walk (frame +${k}): move mode from then ${[...new Set(fr.slice(Math.max(k, 0)).map(x => x.mm))]} (0), mover ${tail.length ? tail[0].mover : '?'}, ` +
+       `still after the slide ${stops}, height kept ${level} (the path would climb / drop)`);
+  }
+}
+
 done();

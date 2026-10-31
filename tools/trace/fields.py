@@ -45,7 +45,9 @@ def resolve_bases(mem):
     RET = u32(mem, RETICLE)                       # reticle sprite object (FUN_003b0440)
     BM = u32(mem, MP + 0x3F8)                     # bone matrices (FUN_005a87a0 -> FUN_005b2d58)
     bases = dict(P=P, C=C, CAM=CAM, MP=MP, MP2=MP2, HUD=HUD, RET=RET, BM=BM)
-    if FIELDSET == "enemy":
+    if FIELDSET == "path":
+        bases.update(find_enemies(mem))
+    elif FIELDSET == "enemy":
         bases.update(find_enemies(mem))
         # game-state bit set: FUN_00326068(n) -> FUN_0036b610(DAT_0046e294, n) tests word n>>5
         # of *(*DAT_0046e294 + 4). Bit 6 set = AI scheduler paused (FUN_00365008 via FUN_00325b40).
@@ -62,6 +64,9 @@ ENEMY_VT = 0x58E1F8    # enemy actor class vtable, set by the constructor FUN_00
 ENEMY_MAX = int(__import__("os").environ.get("TRACE_ENEMIES", 7))   # active e027s in the sea-of-flames save (notes/enemy-research.md); TRACE_ENEMIES=2 traces #66 / #67 only (longer logs)
 
 
+ERECS = [int(x) for x in __import__("os").environ.get("TRACE_ERECS", "").split(",") if x]
+
+
 def find_enemies(mem):
     """Active enemy actors at load: object table *(M+0x1164)[0..255] (FUN_0053e040), class
     vtable ENEMY_VT, with a body (+0xe8), status (+0x17c, FUN_0055a370) and AI (+0x184), i.e.
@@ -74,6 +79,8 @@ def find_enemies(mem):
     for i in range(256):
         o = u32(mem, tab + 4 * i)
         if not o or u32(mem, o + 0x18) != ENEMY_VT:
+            continue
+        if ERECS and i - 22 not in ERECS:      # TRACE_ERECS: stage records (object index = record + 22)
             continue
         C, ST, AI = u32(mem, o + 0xE8), u32(mem, o + 0x17C), u32(mem, o + 0x184)
         if not (C and ST and AI) or not u32(mem, o + 0x28) & 1:
@@ -329,8 +336,43 @@ if __import__("os").environ.get("TRACE_PUSHSTEP"):
         ("body", "C", 0x3B0, "bytes:192", "D", "physics body C+0x3b0..+0x46f (FUN_003590c8)"),
     ]
 
+# Opt-in set for soldier path walking (TRACE_FIELDSET=path, worker 0159; cmd 0x131 -> FUN_0055a6d8 ->
+# FUN_0034edf0(C, 1), per frame FUN_0034ea18 -> FUN_0034f8c0 / FUN_0034fad0 and FUN_0034c388 move mode 9).
+# TRACE_ERECS="46,47" picks the soldiers by stage record (object index = record + 22). Kept small so a
+# long walk fits in the log: a little of the player and camera (to aim the wake shot), then per soldier the
+# move state. C+0x1c0 block: +0x1c0 / +0x1c4 flags, +0x1c8 move mode, +0x1cc segment time, +0x1d0 duration,
+# +0x1d4 constant speed, +0x1d8 ground speed, +0x1dc segment length, +0x1e0.. profile, +0x200 / +0x204
+# polyline index / count, +0x208 arc position, +0x20c arc length, +0x210 tension, +0x214 turn mode, +0x218.
+# C+0x300 block: +0x300 mover, +0x310 path, +0x314 node, +0x318 last node, +0x31c segment length,
+# +0x320 length walked, +0x324, +0x328 path length, +0x32c.
+PATH_FIELDS = [f for f in FIELDS if f[0] in ("step", "pad_held", "matrix")] + [
+    ("cam_fwd", "CAM", 0x80, "vec4", "L", "CAM+0x80 = camera forward (FUN_0032ace0)"),
+    ("cam_eye", "CAM", 0x90, "vec4", "L", "CAM+0x90 = camera eye (FUN_0032ace0)"),
+    ("cam_lock", "CAM", 0x1E4, "bytes:8", "D", "CAM+0x1e4 = locked actor id (FUN_00328968)"),
+    ("cam_a0", "CAM", 0xA0, "bytes:32", "D", "CAM+0xa0 aim point (ray hit), +0xb0 far point (FUN_00329778)"),
+]
+for _k in range(ENEMY_MAX):
+    _A, _C, _I, _M = "E%d" % _k, "EC%d" % _k, "EA%d" % _k, "EM%d" % _k
+    _p = "e%d_" % _k
+    PATH_FIELDS += [
+        (_p + "a100", _A, 0x100, "bytes:8", "D", "actor +0x100 u64: +0x104 byte actor state (FUN_0055b8e0), bits 40-41 gait (FUN_00565bd0)"),
+        (_p + "ai_mode", _I, 0xD0, "u32", "D", "AI +0xd0 brain mode"),
+        (_p + "cmat", _C, 0x0, "bytes:64", "D", "C+0x00 matrix rows (row 2 facing, row 3 = C+0x30 position; FUN_0034c388)"),
+        (_p + "dir", _C, 0x90, "vec4", "D", "C+0x90 move direction (FUN_0034c388 mode 9: FUN_0025fdf0 tangent, normalised)"),
+        (_p + "mv", _C, 0x1C0, "bytes:96", "D", "C+0x1c0..0x21f move state (see PATH_FIELDS)"),
+        (_p + "path", _C, 0x300, "bytes:48", "D", "C+0x300..0x32f path mover (FUN_0034edf0 / FUN_0034fad0)"),
+        (_p + "motion", _C, 0x570, "name8", "D", "C+0x570 current clip (FUN_003449a0)"),
+        (_p + "c590", _C, 0x590, "bytes:8", "D", "C+0x590 posture bits 16-19 (FUN_003419e0), bit 24 gun out"),
+        (_p + "mp_head", _M, 0x440, "bytes:16", "D", "MP+0x440 flags, +0x448 head layer, +0x449 count"),
+    ]
+if __import__("os").environ.get("TRACE_PATH_LAYERS"):
+    for _k in range(ENEMY_MAX):
+        PATH_FIELDS += [("e%d_mp_layers" % _k, "EM%d" % _k, 0x200, "layers", "L", "8 layers x 0x30 at MP+0x200")]
+
 FIELDSET = __import__("os").environ.get("TRACE_FIELDSET")
-if FIELDSET == "enemy":
+if FIELDSET == "path":
+    FIELDS = PATH_FIELDS
+elif FIELDSET == "enemy":
     FIELDS = ENEMY_FIELDS
 elif __import__("os").environ.get("TRACE_FIELDSET") == "jump":
     FIELDS = JUMP_FIELDS
