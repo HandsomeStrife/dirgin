@@ -64,6 +64,7 @@ const DAT_0046E4C0 = 0.2;                          // its ease rate per tick (FU
 const DAT_0046E4D4 = 1.5;                          // camera ray start, back along the forward axis in view 1 (FUN_0032ace0)
 export const STEP = 1.1999999284744263;           // DAT_004eeb24: ticks per frame (f32 of 1 x 1.2)
 export const DT = 0.019999999552965164;           // DAT_004eeb28 = STEP x 0.016666668 (s)
+export const BODY_FLAGS = 0x236;                  // body+0xac (C+0x45c) in z128: bits 1 2 4 5 9 (T: k_push17 FUN_0034c388 log)
 export const ACTION_TICK = 1 / 60;                // actions/*.js are timed in 60 Hz ticks
 
 const f32 = Math.fround;
@@ -146,7 +147,12 @@ export class PlayerController {
   // opts.pos/heading: spawn feet and heading. walkSpeed/runSpeed/accel/turnRate/snapDown/
   // gravity/maxFall/killDepth from the old controller are ignored (the game's values above).
   constructor(col, { pos, heading = 0, radius = 3.5, height = 19, scale = 1 } = {}) {
-    this.col = col;
+    // Vincent's physics body flags body+0xac = 0x236 (T: k_push17, every frame). Bit 9 (0x200): FUN_00357d48
+    // (0x357d48 l.396) takes a neighbour polygon flagged 0x80 as a wall, so he walks the mesh as a block80
+    // body (collision.js option). His own view of the shared mesh, so other users keep theirs.
+    // T: k_push17 f806-f830, the game's step from the game's position: 0.5 u off without it (the railing
+    // at z -1104.8) and the f827 stop missed; <= 4e-4 u with it.
+    this.col = col && (BODY_FLAGS & 0x200) && !col.block80 ? Object.create(col, { block80: { value: true } }) : col;
     this.opts = { radius, height };
     this.gravity = GAME.gravity / 3600;           // mode-0xc gravity, u per 60 Hz tick^2 (actions read it)
     this.scale = scale;                           // character scale (root motion -> world)
@@ -452,8 +458,8 @@ export class PlayerController {
     const m = Math.min(1.0, mods < 0.01 ? 0 : mods);
     let cap = f32(f32(GAME.maxSpeed * f32(0.016666668)) * m);   // fVar19 (x DAT_0046ef24 = 0.3 firing; not here)
     // FUN_0034a968: v = body+0x40 (horizontal velocity, units per tick). It is last frame's
-    // C+0xc0 x C+0xcc except where FUN_003590c8 left it alone (body states 1 / 3, a frozen frame)
-    // or the state-3 crossing zeroed it.
+    // C+0xc0 x C+0xcc except where FUN_003590c8 left it alone (body states 1 / 3, a frozen frame),
+    // the state-3 crossing zeroed it, or a push rewrote it (pushIn: FUN_00357d48 after FUN_0035a440).
     let vx = this.body.vel.x, vz = this.body.vel.z;
     let L = Math.hypot(vx, vz);
     if (cap < L) { vx = vx / L * cap; vz = vz / L * cap; }
@@ -535,6 +541,30 @@ export class PlayerController {
   // clear (velocity body+0x40 = body+0x30 at once, no accel or turn limit), bit 12 clear,
   // bits 7 / 14 clear (position = the walker's result). States 0 (ground), 2 (air) and
   // 3 (the slide down a 0x10 polygon after landing on it).
+  // FUN_00357d48 start (0x357dd4: body flags bit 1 or 2; 0x236 has both) -> FUN_0035a440(body, out, in):
+  // out = in + its correction. The correction's wall / object contact terms are not translated (audit row
+  // "Physics-body step"; k_push17 logs them as zero on the railing and at the f827 stop). Its last term
+  // (0x35bdb0) is the actor push-out: with body flag bit 4 (0x10, set in 0x236) and |body+0x80| > 0,
+  // correction += body+0x80 (= C+0x430, copied from actor +0x130 by FUN_00343160; this.push from
+  // enemy_ai.js pushOut, set by play.js before the step), and FUN_0035a440 returns 1. With contacts the
+  // push is first run through FUN_00260e28 (not translated: no contacts here). Then FUN_00357d48
+  // (0x357e38..): body flag bit 9 (0x200, set) and body+0x180 = 0 (no platform on the page): |out| capped
+  // at 10; body+0x40 (and +0x30) = out if |out| <= |body+0x40| or |body+0x40| < 0.001, else out scaled
+  // to |body+0x40|. T: k_push17 f800-f960, out - in - push <= 1e-4 (log rounding), standing included
+  // (in = 0, out = push). Lengths are xyz (vmul + vaddbc); the walk gets x / z (navMove takes no vertical
+  // displacement), as before.
+  pushIn(mx, my, mz) {
+    const q = this.push;
+    if (!q || !(q[0] * q[0] + q[1] * q[1] + q[2] * q[2] > 0)) return [mx, mz];
+    let o = [f32(mx + q[0]), f32(my + q[1]), f32(mz + q[2])];
+    let ol = Math.hypot(o[0], o[1], o[2]);
+    if (ol > 10) { o = o.map(c => f32(c / ol * 10)); ol = 10; }
+    const B = this.body, vl = Math.hypot(B.vel.x, B.vel.y, B.vel.z);
+    if (ol <= vl || Math.abs(vl) < 0.001) B.vel = { x: o[0], y: o[1], z: o[2] };
+    else B.vel = { x: f32(o[0] / ol * vl), y: f32(o[1] / ol * vl), z: f32(o[2] / ol * vl) };
+    return [o[0], o[2]];
+  }
+
   integrate(v) {
     const B = this.body, col = this.col;
     const p = this.pos;
@@ -545,20 +575,9 @@ export class PlayerController {
       return;
     }
     if (B.state === 0) {
-      // move = body+0x40 x step -> FUN_00357d48 (collision.js navMove), plus this frame's actor push-out
-      // (FUN_00542ab8 -> actor +0x130 -> C+0x430 by FUN_00343160; enemy_ai.js pushOut; this.push, set by
-      // play.js before the step).
-      // GUESS: where the push enters the step (not decoded; the reader of C+0x430 / +0x130 in the move is
-      // not found, five attempts, notes/fidelity-audit.md "Where the push enters Vincent's step"). Worker
-      // 0155's fit to k_push16: walk w + (push . w_hat) w_hat, so the push only lengthens / shortens the
-      // walk along its own direction and does nothing while he stands (f909-f1019: held in place under a
-      // 0.58 u push); then slid like the walk.
-      let mx = v.x * STEP, mz = v.z * STEP;
-      const q = this.push, wl = Math.hypot(mx, mz);
-      if (q && wl > 0) {
-        const k = (q[0] * mx + q[2] * mz) / (wl * wl);
-        mx += k * mx; mz += k * mz;
-      }
+      // case 0: move = body+0x40 x step -> FUN_00357d48 (collision.js navMove), which first adds the
+      // actor push-out (pushIn: FUN_0035a440)
+      const [mx, mz] = this.pushIn(v.x * STEP, v.y * STEP, v.z * STEP);
       const r = col.navMove(B.poly, p.x, p.y, p.z, mx, mz, false);
       this.hitWall = r[4];
       B.poly = r[3];
@@ -585,7 +604,8 @@ export class PlayerController {
       const s = bv.x * ux + bv.y * 0 + bv.z * uz;
       const h = f32(f32(f32(B.v0 + f32(g * B.t)) * DT) + f32(f32(g * f32(DT * 0.5)) * DT));
       const k = (n[1] * h) / (n[0] * n[0] + n[2] * n[2]);
-      const mx = f32((ux * s - n[0] * k) * 1.01), my = f32(h * 1.01), mz = f32((uz * s - n[2] * k) * 1.01);
+      const my = f32(h * 1.01);
+      const [mx, mz] = this.pushIn(f32((ux * s - n[0] * k) * 1.01), my, f32((uz * s - n[2] * k) * 1.01));
       const r = col.navMove(B.poly, p.x, B.gy, p.z, mx, mz, false, { state3: { dy: my } });
       this.hitWall = r[4];
       B.poly = r[3];
@@ -604,7 +624,8 @@ export class PlayerController {
     // FUN_00357d48 walks the ground point body+0x10 (airborne: collision.js body.air, the
     // ground point's rise capped by the vertical speed (v0 + g t) x DAT_004eeb28)
     const vdt = f32(f32(B.v0 + f32(GAME.gravity * B.t)) * DT);
-    const r = col.navMove(B.poly, p.x, B.gy, p.z, v.x * STEP, v.z * STEP, true, { air: { bodyY: y, vdt } });
+    const [ax, az] = this.pushIn(v.x * STEP, v.y * STEP, v.z * STEP);
+    const r = col.navMove(B.poly, p.x, B.gy, p.z, ax, az, true, { air: { bodyY: y, vdt } });
     this.hitWall = r[4];
     B.poly = r[3];
     const groundY = B.gy = r[1];                  // body+0x10.y

@@ -1,0 +1,47 @@
+{
+"name": "k_push17",
+"frames": 960,
+"log_from": 790,
+"doc": "worker 0158: k_push16 to f960 (call log needs <= 1000 frames), log from f790. TRACE_FIELDSET=enemy TRACE_ENEMIES=2 TRACE_PUSH=1 TRACE_PUSHSTEP=1 TRACE_CALLLOG=pushstep TRACE_CALLLOG_FRAMES=800:960. Goal: which call puts the push into Vincent's step, and what stops him at f827.",
+"events": [
+{
+"from": 10,
+"to": 230,
+"lx": 0.6,
+"ly": -1.0
+},
+{
+"from": 240,
+"to": 244,
+"buttons": [
+"cross"
+]
+},
+{
+"from": 280,
+"to": 284,
+"buttons": [
+"cross"
+]
+},
+{
+"from": 300,
+"to": 470,
+"lx": 0.6,
+"ly": -1.0
+},
+{
+"from": 490,
+"to": 494,
+"buttons": [
+"cross"
+]
+},
+{
+"from": 500,
+"to": 900,
+"lx": 0.6,
+"ly": -1.0
+}
+]
+}

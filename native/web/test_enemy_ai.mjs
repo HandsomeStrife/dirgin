@@ -814,5 +814,110 @@ else {
   }
 }
 
+// Worker 0157: VM ops 37 / 39 / 40, cmds 0x142 / 0x14c / 0x14d / 0x131, manager events 7 / 8.
+{
+  const player = { pos: [-1395, -99, -1110], hp: 780, id: 0x16, f118: 0, s64: 0 };
+  // hand-written scripts (registers r0..r3 = the event's args): 9990 ev 2 sends cmd r2 to itself;
+  // 9991 ev 2 sends 0x108 / 0x109 (r1) to object r0; 9992 ev 3 / ev 4 set var 1 / var 2 (cmd 0x104)
+  const sdata = { ...data, scripts: { ...data.scripts,
+    9990: { 2: { locals: 0, code: [[32, 0], [4, -2], [38, 0], [2, 0], [17, 0]] } },
+    9991: { 2: { locals: 0, code: [[32, 0], [24, 0], [38, 0x108], [2, 0], [17, 0]] },
+            5: { locals: 0, code: [[32, 0], [24, 0], [38, 0x109], [2, 0], [17, 0]] } },
+    // 9993 ev 2: push 5, ops 37 / 39 / 40 (push a data ref, pop it, nothing), then var 0 = the value left on top (5)
+    9993: { 2: { locals: 0, code: [[32, 0], [4, 5], [37, 0], [39, 0], [40, 0], [52, 0], [26, 1], [4, 0], [26, 0], [4, -2], [38, 0x104], [2, 0], [17, 0]] } },
+    9992: { 3: { locals: 0, code: [[32, 0], [4, 1], [52, 0], [26, 0], [4, 1], [26, 1], [4, -2], [38, 0x104], [2, 0], [17, 0]] },
+            4: { locals: 0, code: [[32, 0], [4, 2], [52, 0], [26, 0], [4, 1], [26, 1], [4, -2], [38, 0x104], [2, 0], [17, 0]] } } } };
+  const mkW = () => { const logs = []; return { logs, W: AI.createEnemyAI({ data: sdata, player, rand: () => 0.5, quiet: true, log: m => logs.push(m) }) }; };
+  const send = (W, a, cmd, r0, r1 = 0) => { sdata.scripts[9990][2].code[2][1] = cmd; const s = a.script; a.script = 9990; W.runEvent(a, 2, [r0, r1]); a.script = s; };
+
+  // 1. records 46 / 47 wake (scripts 127 / 128 event 2, r0 = 1), from the save's state 1 / vars 0:
+  // var 0 -> 1, actor state 2 (0x142(2)), AI mode 0 (0x143(0)), path 5 / 8 (0x131: MISSING, warned),
+  // and 127's ops 37 / 39 / 40 (debug print) run without stopping the event. Run once (var 0).
+  {
+    const { W, logs } = mkW();
+    const res = [46, 47].map(k => {
+      const a = W.addActor({ rec: k, astate: 1, mode: 0 });
+      W.runEvent(a, 2, [1, 0]);
+      const first = [a.vars[0], a.astate, a.ai.mode];
+      a.astate = 1; W.runEvent(a, 2, [1, 0]);
+      return [...first, a.astate];
+    });
+    const stopped = logs.filter(m => / op \d+ not translated/.test(m));
+    const paths = logs.filter(m => /cmd 0x131 \(path/.test(m)).map(m => +m.match(/path (\d+)/)[1]);
+    ok(res.map(x => x.join()).join(' / ') === '1,2,0,1 / 1,2,0,1' && stopped.length === 0 && paths.join() === '5,8',
+       `46 / 47 wake: [var0, state, mode, state after a 2nd wake] ${res.map(x => x.join()).join(' / ')} (1,2,0,1 / 1,2,0,1); ` +
+       `VM stops ${stopped.length} (0); path cmds ${paths} (5,8)`);
+  }
+  // 1b. op 39 pops the reference op 37 pushed (FUN_0036fe98), op 40 leaves the stack alone
+  {
+    const { W } = mkW();
+    const a = W.addActor({ rec: 44, astate: 1, mode: 0 }); a.script = 9993;
+    W.runEvent(a, 2, []);
+    ok(a.vars[0] === 5, `ops 37 / 39 / 40: the value under the popped data ref -> var 0 = ${a.vars[0]} (5)`);
+  }
+  // 2. cmd 0x142 (FUN_005661e8, MIPS 0x566818): states 0xf-0x11 keep r0 = 2 / 3 unless r1; r0 >= 0x100 -> 2;
+  // a dead actor only with r1
+  {
+    const { W } = mkW();
+    const a = W.addActor({ rec: 44, astate: 1, mode: 0 });
+    const t = (st, r0, r1, hp = 100) => { a.astate = st; a.hp = hp; send(W, a, 0x142, r0, r1); return a.astate; };
+    const got = [t(0x10, 2, 0), t(0x10, 3, 0), t(0x10, 2, 1), t(0x11, 5, 0), t(0xe, 2, 0), t(1, 0x100, 0), t(1, 3, 0, 0), t(1, 3, 1, 0)];
+    const want = [0x10, 0x10, 2, 5, 2, 2, 1, 3];
+    ok(got.join() === want.join(), `cmd 0x142 rules: ${got.map(x => '0x' + x.toString(16))} (${want.map(x => '0x' + x.toString(16))})`);
+  }
+  // 3. cmd 0x14c / 0x14d: +0x118 bit r0 set / clear, r0 >= 0x20 ignored; an inactive record keeps it into activation
+  {
+    const { W } = mkW();
+    const a = W.addActor({ rec: 44, astate: 1, mode: 0, f118: 2 });
+    const seq = [];
+    send(W, a, 0x14c, 28); seq.push(a.f118);
+    send(W, a, 0x14c, 32); seq.push(a.f118);
+    send(W, a, 0x14d, 1); seq.push(a.f118);
+    const rec = W.objects.get(49 + 22);
+    send(W, rec, 0x14c, 26);
+    W.setActive(rec, 1);
+    const act = W.objects.get(49 + 22);
+    const want = [0x10000002, 0x10000002, 0x10000000];
+    ok(seq.join() === want.join() && act.kind === 'actor' && act.f118 === 0x4000000,
+       `cmd 0x14c / 0x14d: ${seq.map(x => '0x' + x.toString(16))} (${want.map(x => '0x' + x.toString(16))}); record 49 set while inactive -> actor 0x${act.f118.toString(16)} (0x4000000)`);
+  }
+  // 4. cmd 0x108 -> manager event 7 -> event 3 at the end of the frame (FUN_0053fde8 case 8), +0x28 bit
+  // 0x100000 set by the activation and cleared there. Record 45 (script 109 ev 3: 0x14c(28)) gets 0x10000000.
+  // 0x109 -> manager event 8 -> event 4.
+  {
+    const { W } = mkW();
+    const ctl = { kind: 'trigger', id: 'ctl', script: 9991, vars: new Int16Array(8), flags28: 0 };
+    W.runEvent(ctl, 2, [45 + 22]);
+    const a = W.objects.get(45 + 22);
+    const before = [a.kind, a.flags28 & 0x100000, a.f118 & 0x10000000];
+    const ev = W.tick(1.0, null, null);
+    const after = [a.flags28 & 0x100000, a.f118 >>> 0];
+    ok(before.join() === 'actor,1048576,0' && ev.includes('event 67 script 109 ev 3 r 0,0,0,0') && after.join() === `0,${0x10000000}`,
+       `0x108 on record 45: before the frame [kind, 0x100000, bit 28] ${before} (actor,1048576,0); event 3 at the frame end ` +
+       `${ev.includes('event 67 script 109 ev 3 r 0,0,0,0')}; after [0x100000, +0x118] ${after} (0,268435456)`);
+    // event 3 / 4 order on a record with a hand-written script: activate, frame, deactivate, frame
+    const { W: W2 } = mkW();
+    const o = W2.objects.get(48 + 22); o.script = 9992;
+    W2.runEvent(ctl, 2, [48 + 22]);
+    const a2 = W2.objects.get(48 + 22); a2.script = 9992;
+    const v0 = [a2.vars[1], a2.vars[2]];
+    W2.tick(1.0, null, null);
+    const v1 = [a2.vars[1], a2.vars[2]];
+    W2.runEvent(ctl, 5, [48 + 22]);
+    const r2 = W2.objects.get(48 + 22);
+    const v2 = [r2.vars[2]];
+    W2.tick(1.0, null, null);
+    ok(v0.join() === '0,0' && v1.join() === '1,0' && v2.join() === '0' && r2.vars[2] === 1 && r2.kind === 'record',
+       `manager events: activation -> event 3 after the frame (var1 ${v0[0]} -> ${v1[0]}); deactivation -> event 4 after the frame (var2 ${v2[0]} -> ${r2.vars[2]})`);
+    // a record that refuses activation (dead record 41, FUN_00559748) gets no event 7, so no event 3
+    const W3 = AI.createEnemyAI({ data: sdata, player, rand: () => 0.5, quiet: true, log: () => {}, deadRecs: [41] });
+    const d = W3.objects.get(41 + 22); d.script = 9992;
+    W3.runEvent(ctl, 2, [41 + 22]);
+    W3.tick(1.0, null, null);
+    const d1 = W3.objects.get(41 + 22);
+    ok(d1.kind === 'record' && d1.vars[1] === 0, `0x108 to dead record 41: no event 3 (kind ${d1.kind}, var1 ${d1.vars[1]}: record, 0)`);
+  }
+}
+
 console.log((fail ? `${fail} FAILED` : 'all ok') + (gaps ? ` (${gaps} known gaps)` : ''));
 process.exit(fail ? 1 : 0);

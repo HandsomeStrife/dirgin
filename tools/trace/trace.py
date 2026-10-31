@@ -84,6 +84,12 @@ def run(script_path, out_dir, state, scratch, timeout_s):
         log_end = hook.LOG_END
         hook.LOG_END = log_end - calllog.CLOG_BYTES
     rec = hook.patch_memory(ee, frames, table, log_from)
+    # TRACE_POKE="addr=word,addr=word" (hex): static EE writes before the state loads (experiments:
+    # zero a constant, NOP an instruction). Each old word is printed so the run can be described.
+    for item in filter(None, os.environ.get("TRACE_POKE", "").split(",")):
+        a_, w_ = (int(x, 16) for x in item.split("="))
+        print("poke %#x: %#010x -> %#010x" % (a_, struct.unpack_from("<I", ee, a_)[0], w_))
+        struct.pack_into("<I", ee, a_, w_)
     if clog:
         hook.LOG_END = log_end
         lo, hi = (int(x) for x in os.environ.get("TRACE_CALLLOG_FRAMES", "0:100000").split(":"))

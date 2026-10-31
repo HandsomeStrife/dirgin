@@ -219,3 +219,15 @@ With `TRACE_FIELDSET=enemy`, `TRACE_LOCK=1` adds the camera's lock state (`cam_1
 and doesn't fit next to these. Runs need the service's scratch dir as TRACE_SCRATCH (the one in
 ~/.config/systemd/user/pcsx2trace.service). Scripts: k_lock13 (lock, swing off, re-lock), k_lock14
 (locked shot kills #66, reticle rests on the corpse).
+
+### Push into the step (TRACE_PUSHSTEP=1, TRACE_CALLLOG=pushstep, TRACE_POKE; worker 0158)
+With `TRACE_FIELDSET=enemy`, `TRACE_PUSHSTEP=1` adds `move_dir`, `want_dir_speed`, `ground_speed` and the
+physics body's first 0xc0 bytes (`body`, C+0x3b0). Call-log set `pushstep`: FUN_0034c388's FUN_00358fb8
+(`set_step`: the step in, body+0x30 / +0x80 / +0xa8) and FUN_003590c8 (`body_step`: body pos / +0x30 /
++0x40 / +0x80 after), FUN_003590c8's FUN_00357d48 calls (`walk_move`) and FUN_00357d48's FUN_0035a440
+(`push_out`: out, in, body+0x80, body+0xb0). A call tagged frame k moves record k-1 to record k.
+`TRACE_POKE="addr=word,..."` (hex) writes EE words into the state before it loads (prints the old word),
+for experiments: `46e90c=0` (push scale DAT_0046e90c, FUN_00542ab8), `46f4d0=1` (FUN_0035a440's
+object pass off). Script k_push17 (k_push16 to f960, log from f790); its positions equal k_push16's
+with the full `pushstep` set (an earlier run without the `push_out` hook was 0.08-0.1 u off before
+contact: not chased).

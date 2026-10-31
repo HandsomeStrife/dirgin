@@ -155,6 +155,20 @@ SETS["spread"] = [SETS["bullet"][0],
     dict(id=23, kind="site", where=(0x25A058, 0x25A240, 0x40B5C0), name="rand", copy=[]),  # f0
 ]
 
+# worker 0158: the physics-body step of mode 0xc (FUN_0034c388 -> FUN_00358fb8 / FUN_003590c8 ->
+# FUN_00357d48). a0 = body (C+0x3b0): +0 pos, +0x30 step, +0x40 velocity, +0x80 (= C+0x430), +0xa8.
+SETS["pushstep"] = [
+    dict(id=30, kind="site", where=(0x34C388, 0x34D400, 0x358FB8), name="set_step",
+         copy=[cp("a1", 0, 4), cp("a0", 0x30, 4), cp("a0", 0x80, 4), cp("a0", 0xA8, 2)]),
+    dict(id=31, kind="site", where=(0x34C388, 0x34D400, 0x3590C8), name="body_step",
+         copy=[cp("a0", 0, 4), cp("a0", 0x30, 4), cp("a0", 0x40, 4), cp("a0", 0x80, 4)]),
+    dict(id=32, kind="site", where=(0x3590C8, 0x359D68, 0x357D48), name="walk_move",
+         copy=[cp("a1", 0, 4), cp("a0", 0, 4), cp("a0", 0x110, 1)]),
+    # FUN_0035a440(body, out, in): out = in + correction (wall / object contacts, then + body+0x80)
+    dict(id=33, kind="site", where=(0x357D48, 0x358FB8, 0x35A440), name="push_out",
+         copy=[cp("a1", 0, 4), cp("a2", 0, 4), cp("a0", 0x80, 4), cp("a0", 0xB0, 4)]),
+]
+
 
 def patch(mem, setname, frame_lo, frame_hi, log_end):
     """Install the hooks of SETS[setname]. Returns (clog_start, clog_end, hooks)."""

@@ -309,6 +309,10 @@ export function createEnemyAI(opts) {
   const objects = new Map();    // object id -> actor or trigger object
   const actors = [];
   const bullets = [];
+  // Manager event queue (manager +0x1268 head / +0x126c tail, FUN_0053fbe8 appends {type, object id}),
+  // drained in order by FUN_0053fde8 at the end of the manager frame FUN_0053b500 (switch on type + 1).
+  const mgrQueue = [];
+  const postManager = (type, id) => { mgrQueue.push({ type, id }); };
   const mailbox = [];           // 0x101 messages posted this frame, delivered next frame (GUESS: FUN_0053e9e0 consumer not decoded)
   const events = [];            // per-frame record of what happened (tests / page debug)
 
@@ -343,7 +347,7 @@ export function createEnemyAI(opts) {
   // and reactivation (FUN_00559748 does not reset it).
   data.records.forEach((rec, k) => {
     const id = k + ID_BASE;
-    if (!objects.has(id)) objects.set(id, { kind: 'record', id, rec: k, script: rec.script, vars: new Int16Array(8), flags28: 0, ai: null, hp: deadRecs.has(k) ? 0 : rec.hp ?? 100 });
+    if (!objects.has(id)) objects.set(id, { kind: 'record', id, rec: k, script: rec.script, vars: new Int16Array(8), flags28: 0, f118: 0, ai: null, hp: deadRecs.has(k) ? 0 : rec.hp ?? 100 });
   });
 
   // FUN_00564228 -> FUN_00340ac0(C, n): the record's stance (ai.json records[k].stance, exported by
@@ -380,7 +384,8 @@ export function createEnemyAI(opts) {
       pos: init.pos || rec.pos.slice(), face: init.face || rec.face.slice(),
       vars: prev && prev.kind === 'record' ? prev.vars : new Int16Array(8),
       flags28: 1,                                // +0x28 bit 0 = active (FUN_00559748 tests it)
-      f118: init.f118 ?? 0, target: init.target ?? null, aim120: null,
+      // +0x118: the record object's (cmd 0x14c / 0x14d reach an inactive record too; same object in the game)
+      f118: init.f118 ?? (prev && prev.kind === 'record' ? prev.f118 | 0 : 0), target: init.target ?? null, aim120: null,
       // status +0x20 HP: the record object's (set at placement setup, kept across deactivation)
       astate: init.astate ?? 0, hp: init.hp ?? (prev && prev.kind === 'record' ? prev.hp : rec.hp ?? 100), s64: 0, f19c: null,
       lvl: rec.lvl ?? 0,                         // status +0x11 (FUN_00314ea8)
@@ -462,7 +467,16 @@ export function createEnemyAI(opts) {
         case 29: if (!pop()) pc = imm; break;                  // jz
         case 30: if (pop()) pc = imm; break;                   // jnz
         case 33: case 34: case 35: loc[imm] = 0; break;        // clear local (int / float / string)
+        // op 37 FUN_00370af0: push a pointer into the function's data block (data + imm x 8, type 3).
+        // ai.json has no data blocks, so the page pushes the reference itself (only cmd 0x141, not
+        // translated, takes one as an argument).
+        case 37: st.push({ ref: imm }); break;
         case 38: { const tgt = pop(); st.push(send(o, tgt, imm, r)); break; }   // FUN_00370b40
+        // op 39 FUN_00370cb8: pop (FUN_0036fe98), then FUN_00326298(7) = DAT_0046e298 bit 7, result
+        // unused: a debug print compiled out. op 40 FUN_00370ce0: FUN_00326298(7) only. No effect.
+        // (Script 127 event 2: ops 37 / 39 / 40 print its data string "path_Sol31".)
+        case 39: pop(); break;
+        case 40: break;
         case 52: r = [0, 0, 0, 0]; break;                      // clear regs
         default:
           warnOnce(`enemy_ai: script ${o.script} ev ${ev}: op ${op} not translated; event stopped`);
@@ -494,15 +508,41 @@ export function createEnemyAI(opts) {
           mailbox.push({ to: r[0], n: r[1], from: t.id });
         return 0;
       case 0x108:                                              // FUN_0054cd70: +0x144(1, 0) (actors FUN_00559748)
-        // then manager event 7 (FUN_0053fbe8) if active: not translated (its consumer is not decoded)
         setActive(t, 1);
+        // then manager event 7 (FUN_0053fbe8) if now active -> script event 3 (FUN_0053fde8 case 8)
+        // L: the page's triggers track activity in .active, not +0x28 bit 0 (whether the trigger class's
+        // +0x144 sets that bit is not read), so a trigger never gets event 7 / event 3 here; see
+        // notes/fidelity-audit.md "Manager events 7 / 8".
+        if (objects.get(t.id).flags28 & 1) postManager(7, t.id);
         return 0;
-      case 0x109: case 0x130:                                  // +0x144(0, 0); manager event 8 not translated
+      case 0x109: case 0x130:                                  // +0x144(0, 0), then manager event 8 -> script event 4
         setActive(t, 0);
+        postManager(8, t.id);
         return 0;
       case 0x104: if (r[0] < 8) { t.vars[r[0]] = r[1]; t.flags28 |= 0x4000; } return 0;
       case 0x105: return t.vars[r[0]];
       case 0x143: if (t.kind === 'actor') cmd143(t, r); return 0;
+      case 0x142:                                              // FUN_005661e8 case 0x142
+        if (t.kind === 'actor') cmd142(t, r);
+        else warnOnce(`enemy_ai: cmd 0x142 to inactive record ${t.rec} (FUN_0055b8e0 without a body) not translated`);
+        return 0;
+      // FUN_005661e8 case 0x14c / 0x14d: set / clear actor +0x118 bit r0 (r0 < 0x20). Script 109 (record 45)
+      // event 3 sets bit 28 (0x10000000: never pushed by FUN_00542ab8).
+      case 0x14c: case 0x14d:
+        if (!(t.kind === 'actor' || (t.kind === 'record' && buildsActor(data.records[t.rec])))) {
+          warnOnce(`enemy_ai: object cmd 0x${cmd.toString(16)} to a non-actor not translated (skipped)`); return 0;
+        }
+        if ((r[0] >>> 0) < 0x20) t.f118 = (cmd === 0x14c ? t.f118 | (1 << r[0]) : t.f118 & ~(1 << r[0])) >>> 0;
+        return 0;
+      // FUN_005661e8 case 0x131: unless FUN_00566198 and r1 == 0, FUN_0055a6d8(a, r0, 0, -1): put the body
+      // on stage path r0 (section 9, FUN_00311120; FUN_00352cb8: C+0x310 path, +0x314 node 0, +0x318 last
+      // node) and start mover 1 (FUN_0034edf0(C, 1): speed C+0x210 = path +0xc; per frame FUN_0034fad0
+      // -> FUN_0034f4a0), turn mode 5 / 6 (FUN_0034e960). Path +8 bit 3: mover 0xe instead.
+      // MISSING: no stage paths on the page and no mover 1, so the soldier stands (notes/enemy-ai-hook.md).
+      case 0x131:
+        if (t.kind === 'actor' && !(gone(t) && r[1] === 0))
+          warnOnce(`enemy_ai: cmd 0x131 (path ${r[0]}, FUN_0055a6d8 path mover 1) not translated: the soldier stands`);
+        return 0;
       case 0x193: if (t.kind === 'actor' && t.ai) setTarget(t.ai, P); return 0;   // FUN_005661e8 0x193 (FUN_0053bb08 = the player)
       // 0x113 (FUN_0054cd70): object +0x36 = r0 and a delayed message to itself through
       // FUN_0053e9e0, whose delivery is not decoded. GUESS: it and other commands are skipped
@@ -530,9 +570,10 @@ export function createEnemyAI(opts) {
       if (buildsActor(rec)) {
         // FUN_0055b8e0(a, 2, 1, 0): actor state 2 for a plain placement (addActor without astate)
         a = addActor({ rec: t.rec, mode });
+        a.flags28 |= 0x100000;                               // FUN_00559748; cleared by manager event 7
       } else {
         // other models: no AI actor (AI_TYPES); marked active only, enemies.js draws them idle
-        t.flags28 |= 1;
+        t.flags28 |= 1 | 0x100000;
         warnOnce(`enemy_ai: record ${t.rec} (${rec.model}) activated without an AI (types with an actor: ${[...AI_TYPES].join(', ')})`);
       }
       events.push(`activate rec ${t.rec}`);
@@ -555,23 +596,34 @@ export function createEnemyAI(opts) {
         const j = S.q.indexOf(t.ai); if (j >= 0) S.q.splice(j, 1);           // FUN_003659d8 unlink
         stopFire(t.ai);                                                     // FUN_0035e6f8 -> FUN_00360820
       }
-      objects.set(t.id, { kind: 'record', id: t.id, rec: t.rec, script: t.script, vars: t.vars, flags28: 0, ai: null, hp: t.hp });
+      objects.set(t.id, { kind: 'record', id: t.id, rec: t.rec, script: t.script, vars: t.vars, flags28: 0, f118: t.f118 | 0, ai: null, hp: t.hp });
     }
     events.push(`deactivate rec ${t.rec}`);
     onDeactivate(rec);
   }
 
   // FUN_005661e8 case 0x143: AI mode r0
+  // FUN_00566198: status dead (FUN_00316cf8) and status +0xc bit 1 clear (FUN_00315738(s, 1)).
+  // GUESS: status +0xc bit 1 is never set on the page (not exported).
+  const gone = a => a.hp === 0;
   function cmd143(a, r) {
     if (!a.ai) return;
-    const deadNoFlag = a.hp === 0;          // FUN_00566198 (status dead, FUN_00315738(s,1) GUESS false)
-    if (deadNoFlag && r[1] === 0) return;
+    if (gone(a) && r[1] === 0) return;
     if (!target(a.ai)) {
       // FUN_005632f0 / FUN_00563318 not decoded (GUESS false) -> FUN_0035fe08 (candidate: GUESS, see candidate)
       pickTarget(a.ai);
     }
     if (r[0] === 8) warnOnce('enemy_ai: mode 8 (FUN_0035f2e0) not translated');
     else setMode(a.ai, r[0]);
+  }
+
+  // FUN_005661e8 case 0x142 (MIPS 0x566818): skipped when FUN_00566198 and r1 == 0, or when the actor
+  // state is 0xf-0x11 with r0 2 / 3 and r1 == 0; r0 >= 0x100 -> 2; then FUN_0055b8e0(a, r0, 0, 0).
+  function cmd142(a, r) {
+    if (gone(a) && r[1] === 0) return;
+    const s = r[0] >>> 0;
+    if (((a.astate - 0xf) >>> 0) < 3 && ((s - 2) >>> 0) < 2 && r[1] === 0) return;
+    setActorState(a, s < 0x100 ? s : 2, 0);
   }
 
   // ------------------------------------------------ AI helpers
@@ -2253,7 +2305,26 @@ export function createEnemyAI(opts) {
     for (const m of mail) { const o = objects.get(m.to); if (o) runEvent(o, 2, [m.n, 0, m.from, 0]); }
     // 5. trigger volumes (the player's move this frame)
     if (playerOld && playerNew) for (const o of triggers) triggerCheck(o, playerNew, playerOld);
+    // 6. manager events, FUN_0053fde8 (the last call of FUN_0053b500). L: the page's steps 1-5 are not
+    // in the game's exact order, but they all run before this.
+    drainManager();
     return events.slice();
+  }
+
+  // FUN_0053fde8: up to 0x1000 entries; one posted while draining is handled in the same pass. An entry
+  // whose object is gone (FUN_0053e040) is dropped. Types translated: 7 (case 8: script event 3 with
+  // zero args (0x4ef400, BSS), then +0x28 &= ~0x100000) and 8 (case 9: script event 4; then, if it is
+  // the manager's +0x10ac object, FUN_0053be88(0): the page never sets +0x10ac, L). The other types (3-6
+  // from cmds 0x12c-0x12f, ...) carry no consumer on the page yet: MISSING, warned.
+  function drainManager() {
+    for (let n = 0; mgrQueue.length && n < 0x1000; n++) {
+      const e = mgrQueue.shift();
+      const o = objects.get(e.id);
+      if (!o) continue;
+      if (e.type === 7) { runEvent(o, 3); objects.get(e.id).flags28 &= ~0x100000; }
+      else if (e.type === 8) runEvent(o, 4);
+      else warnOnce(`enemy_ai: manager event ${e.type} (FUN_0053fde8 case ${e.type + 1}) not translated`);
+    }
   }
 
   // boneWorld: (actor) => (bone) => world rows of that bone (the MP's last posed skeleton), set by the

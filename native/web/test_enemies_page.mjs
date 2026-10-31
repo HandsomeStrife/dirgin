@@ -3,7 +3,8 @@
 //   1. at the save the save's seven live soldiers are drawn, records 44-49 and 66 (T: k_enemy_engage8
 //      f760), each at its placement and driven by its AI actor in the save's actor state;
 //   1b. walking Vincent (W, steered with A / D) into #66: the push-out keeps them apart (enemy_ai pushOut);
-//   1c. then idle beside him: he is not moved by the push;
+//   1c. then idle beside him on open floor: the push (FUN_0035a440 adds it every frame) eases him clear
+//       of #66 and then stops (no slide);
 //   2. walking east across trigger 56 (x -1228 on the start deck) makes enemies.js draw two new
 //      bodies, records 50 / 51 (script 91 event 0xd: cmd 0x108 on both; notes/enemy-activation.md §2);
 //   3. the save's dead records (41-43) refuse activation (FUN_00559748), so no body appears;
@@ -72,13 +73,37 @@ try {
   const SAVE_STATE = { 46: 1, 47: 1, 48: 2, 49: 2, 66: 1 };
   for (const s of save) ok(s.inRoot && s.err !== null && s.err < 0.2 && s.astate === SAVE_STATE[s.k],
     `record ${s.k}: drawn ${s.err?.toFixed(2)} u from its placement, AI actor state ${s.astate} (save ${SAVE_STATE[s.k]})`);
+  // the save's +0x118 and script vars (+0xa0) of the seven, read from the save state (object table
+  // *(DAT_0046e880+0x1164)[rec + 22]); record 45 (#67) has 0x10000000 (its event 3's cmd 0x14c(28)), so
+  // overlapping him, the push-out moves only Vincent (FUN_00542ab8). Skipped without the save state.
+  {
+    const saveP2s = process.env.SAVE_STATE ?? '/srv/shared/dirge-port/save-states/sea-of-flames.p2s';
+    if (!existsSync(saveP2s)) console.log(`skip save +0x118 check: ${saveP2s} missing`);
+    else {
+      const py = `import sys,struct,json\nsys.path.insert(0,sys.argv[1])\nfrom p2s import read_p2s\nm=read_p2s(sys.argv[2])['eeMemory.bin']\n` +
+        `u=lambda a:struct.unpack_from('<I',m,a)[0]\ntab=u(u(0x46e880)+0x1164)\n` +
+        `print(json.dumps({k:[u(u(tab+4*(k+22))+0x118),list(struct.unpack_from('<8h',m,u(tab+4*(k+22))+0xa0))] for k in ${JSON.stringify(SAVE)}}))`;
+      const want = JSON.parse(execSync(`python3 -I -c "$PY" ${path.resolve(here, '../../tools/trace')} ${saveP2s}`, { env: { ...process.env, PY: py }, encoding: 'utf8' }));
+      const got = await pg.evaluate(SAVE => {
+        const W = window.__play.enemyAI;
+        const out = {};
+        for (const k of SAVE) { const a = W.actors.find(x => x.rec === k); out[k] = [a.f118 >>> 0, [...a.vars]]; }
+        const b = W.actors.find(x => x.rec === 45);
+        const push = W.pushOut([b.pos[0] + 1, b.pos[1], b.pos[2]]);
+        return { out, pushB: b.push.map(Math.abs).reduce((s, x) => s + x, 0), pushV: push.map(Math.abs).reduce((s, x) => s + x, 0) };
+      }, SAVE);
+      const bad = SAVE.filter(k => JSON.stringify(got.out[k]) !== JSON.stringify(want[k]));
+      ok(bad.length === 0, `save +0x118 / vars of ${SAVE}: page = save state (${bad.length ? bad.map(k => `${k}: page ${JSON.stringify(got.out[k])} save ${JSON.stringify(want[k])}`).join('; ') : 'all equal'})`);
+      ok(got.pushV > 0 && got.pushB === 0, `Vincent 1 u from #67: push on Vincent ${got.pushV.toFixed(3)} (> 0), on #67 ${got.pushB} (0: +0x118 bit 0x10000000)`);
+    }
+  }
   ok(await pg.evaluate(() => !!window.__play.enemyAI), 'enemy AI running');
 
   // 1b. Dan: "I can run through the soldiers". Vincent on the ladder-top deck, in line with #66 (record
   // 44) 30 u behind him along the camera's forward (~west; test aid: position write; the walk mesh is clear), then W held
   // (the start camera looks east) for 6 s; then he is put back where he was: the push-out (enemy_ai pushOut = FUN_00542ab8, player.js integrate) keeps the
-  // two cylinders apart (5 + 5; head-on he stops where the push along his walk matches his step: player.js
-  // GUESS, walk + (push . w_hat) w_hat; test_push_out checks it against k_push16).
+  // two cylinders apart (5 + 5; FUN_0035a440 adds the push to his step, player.js pushIn; test_push_out
+  // checks it against k_push16).
   const push = await pg.evaluate(async () => {
     const P = window.__play, c = P.ctrl, rec = await fetch('data/enemies/ai.json').then(r => r.json()).then(a => a.records[44]);
     const home = { ...c.pos };
@@ -102,16 +127,25 @@ try {
   }
   if (held) await pg.keyboard.up(held);
   await pg.keyboard.up('w');
-  // 1c. then idle beside #66, keys up, for 1 s: the game holds Vincent in place under the push (k_push16
-  // f909-f1019: push 0.58 u per frame, moved +-0.03 u); the page must not slide him either
-  const idle0 = await pg.evaluate(async () => { const c = window.__play.ctrl; await new Promise(r => setTimeout(r, 300));
-    return { x: c.pos.x, z: c.pos.z, n: window.__pushT.get().pushed }; });
+  // 1c. then idle beside #66, keys up: FUN_0035a440 adds the push to his step every frame, standing
+  // included (worker 0158), so on open floor it eases him out of the overlap (radii 5 + 5) and then
+  // fades with it; he must end clear of #66 and not keep sliding. (In k_push16 f909-f1019 a 0x80 wall
+  // edge held him in place under the push; there is no wall here.)
+  const dist = () => pg.evaluate(() => { const c = window.__play.ctrl, P = window.__play;
+    const a = P.enemyAI.actors.find(s => s.rec === 44), p = a ? [a.pos.x ?? a.pos[0], a.pos.z ?? a.pos[2]] : null;
+    return { x: c.pos.x, z: c.pos.z, d: p ? Math.hypot(c.pos.x - p[0], c.pos.z - p[1]) : NaN,
+      q: c.push ? Math.hypot(c.push[0], c.push[2]) : 0 }; });
+  const idleA = await dist();
   await pg.waitForTimeout(1000);
-  const idle1 = await pg.evaluate(() => { const c = window.__play.ctrl; return { x: c.pos.x, z: c.pos.z, n: window.__pushT.get().pushed,
-    q: c.push ? Math.hypot(c.push[0], c.push[2]) : 0 }; });
+  const idle0 = await dist();
+  await pg.waitForTimeout(1000);
+  const idle1 = await dist();
   const idleMove = Math.hypot(idle1.x - idle0.x, idle1.z - idle0.z);
-  ok(idle1.n - idle0.n > 20 && idle1.q > 0.01 && idleMove < 0.05,
-     `idle beside #66 for 1 s: pushed on ${idle1.n - idle0.n} frames (push ${idle1.q.toFixed(2)} u), moved ${idleMove.toFixed(3)} u (game: held in place)`);
+  // The push shrinks with the overlap, so the last of it closes slowly: in the last 1 s he may only
+  // move by what is left of the overlap (no slide past contact).
+  ok(idleA.d < 9.5 && idle1.d >= idle0.d && idle0.d > idleA.d && idle1.d <= 10.01 && idle1.q < 0.01
+     && idleMove <= (10 - idle0.d) + 0.01,
+     `idle beside #66: ${idleA.d.toFixed(2)} -> ${idle0.d.toFixed(2)} -> ${idle1.d.toFixed(2)} u apart (eases toward 10, never past), push now ${idle1.q.toFixed(3)} u, moved ${idleMove.toFixed(3)} u in the last 1 s (<= the ${(10 - idle0.d).toFixed(3)} u of overlap left)`);
   const pr = await pg.evaluate(() => { const T = window.__pushT, P = window.__play, c = P.ctrl, r = T.get(); P.enemies.tick = T.tick;
     c.pos = { ...T.home }; c.prev = { ...c.pos }; c.locate(); if (c.onTeleport) c.onTeleport(); return r; });
   ok(push && pr.pushed > 10 && pr.dmin > 4.5, `walking into #66: pushed on ${pr.pushed} frames, closest ${pr.dmin.toFixed(2)} u between the centres (radii 5 + 5; no pass-through), x reached ${pr.xmax.toFixed(1)}`);

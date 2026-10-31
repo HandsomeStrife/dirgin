@@ -321,6 +321,14 @@ if __import__("os").environ.get("TRACE_PUSH"):
             (_p + "push", "E%d" % _k, 0x130, "vec4", "D", "actor +0x130 push vector (FUN_00542ab8)"),
         ]
 
+# Opt-in with TRACE_PUSHSTEP=1 (worker 0158, where the push enters Vincent's step): the move request
+# C+0xc0 (dir, +0xcc speed), C+0x90 and the physics body's first 0xc0 bytes (+0x30 step from
+# FUN_00358fb8, +0x40 velocity, +0x80 = C+0x430, +0xa8 state / +0xac flags; FUN_003590c8).
+if __import__("os").environ.get("TRACE_PUSHSTEP"):
+    ENEMY_FIELDS += [f for f in FIELDS if f[0] in ("move_dir", "want_dir_speed", "ground_speed")] + [
+        ("body", "C", 0x3B0, "bytes:192", "D", "physics body C+0x3b0..+0x46f (FUN_003590c8)"),
+    ]
+
 FIELDSET = __import__("os").environ.get("TRACE_FIELDSET")
 if FIELDSET == "enemy":
     FIELDS = ENEMY_FIELDS

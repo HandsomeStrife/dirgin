@@ -478,3 +478,71 @@ Vincent's C+0x430 / C+0x1c0.
   soldier, and later shots rebuild no brain (test_shot_volumes 7; mutant 0x105 -> 0 caught). No PCSX2 trace
   (#51 must first be woken by trigger 90; not in the save). Open: 46-49 were active at the save, so their
   var 0 may already be 1 there, while the page starts it at 0.
+
+## Wake ops, manager events, #67's no-push bit, the save's soldiers (worker 0157, 2026-10-31)
+
+Dan on e3480ee: "Does this match exactly how the game manages it?" The three enemy-side stand-ins:
+
+- **Ops 37 / 39 / 40 (D).** Handler table 0x4a2f60 (8-byte pointer-to-member entries): 37 = FUN_00370af0
+  pushes (function data + imm x 8, type 3); 39 = FUN_00370cb8 pops (FUN_0036fe98) then FUN_00326298(7);
+  40 = FUN_00370ce0 = FUN_00326298(7). FUN_00326298 only reads DAT_0046e298 bit 7 (MIPS checked), the
+  result is dropped: a debug print compiled out. Script 127 event 2's data block holds "path_Sol31".
+  Translated (runEvent); op 37 pushes `{ ref: imm }` (ai.json has no data blocks; only cmd 0x141, not
+  translated, consumes one: script 108 event 3).
+- **Cmd 0x142 (D)** FUN_005661e8 (MIPS 0x566818): skip when FUN_00566198 (dead, status +0xc bit 1 clear)
+  and r1 == 0, or when actor state 0xf-0x11 (unsigned) and r0 in 2 / 3 and r1 == 0; r0 >= 0x100 -> 2;
+  FUN_0055b8e0(a, r0, 0, 0). enemy_ai `cmd142`.
+- **Cmd 0x131 (D, not ported).** Unless FUN_00566198 and r1 == 0: FUN_0055a6d8(a, r0, 0, -1). With a body:
+  path = FUN_00311120(r0) = stage section 9 (stride 0x20: +0 node count, +4 first node, +8 flags (bit 0
+  loop, bit 3 -> mover 0xe path instead), +0xc speed, +0x10 length). FUN_00352cb8: C+0x310 = path,
+  +0x314 = start node, +0x318 = last node (or -1 when looped). Then turn mode 6 if targeted with
+  C+0x590 bit 24 else 5 (FUN_0034e960), and FUN_0034edf0(C, 1): C+0x210 = path speed, C+0x328 = summed
+  segment length (FUN_003217e0 node +0x18), mover C+0x300 = 1. Per frame FUN_0034f8c0 case 1 =
+  FUN_0034fad0: on arrival (C+0x1c4 bit 2) node++, done at the last node, else FUN_0034f4a0 aims at the
+  next node. Records 46 / 47: path 5 (9 nodes, flags 4, speed 0.4) / path 8 (8 nodes, 0.4). The page has
+  no stage paths and no soldier locomotion (same gap as the action layers), so they stand: warned.
+  Next job if wanted: export section 9, port FUN_0034edf0 case 1 / FUN_0034fad0 / FUN_0034f4a0 / the
+  path branch of FUN_0034c388 and the walk motion, and trace a shot over trigger 77 with
+  TRACE_ENEMIES=7 to check 46 / 47 per frame (no such trace exists: in k_enemy_engage8 46-49 / 66 stay in
+  mode 0, mover 0).
+- **Manager events (D).** FUN_0053fbe8(mgr, type, id) appends to manager +0x1268 / +0x126c; FUN_0053fde8
+  (last call of the manager frame FUN_0053b500) drains it, switch on type + 1. Type 7 (cmd 0x108, if the
+  object is now active) -> script event 3, then +0x28 &= ~0x100000 (FUN_00559748 sets that bit on every
+  activation). Type 8 (0x109 / 0x130) -> script event 4, then FUN_0053be88(0) if the object is manager
+  +0x10ac. This was the "manager event 7, consumer not decoded" gap. enemy_ai `postManager` /
+  `drainManager` (end of tick). Every 0x108 activation on the page now runs event 3 that frame.
+- **#67's +0x118 bit 0x10000000 (D).** Script 109 (record 45) event 3: cmd 0x1a5(1), then cmd 0x14c(28) =
+  FUN_005661e8 case 0x14c (+0x118 |= 1 << r0, r0 < 0x20; 0x14d clears). Also in scripts 132 / 133.
+  Translated; record objects keep +0x118 into their activation.
+- **The save's seven (D values).** Read straight from sea-of-flames.p2s (object table
+  *(DAT_0046e880+0x1164)[rec + 22]): +0x104 = 1 2 1 1 2 2 1 (44-49, 66), +0x118 = 0, 0x10000200, 0, 0, 0x200,
+  0x200, 0, vars +0xa0 all 0, +0x28 = 0x208403 (0x100000 clear: event 3 done). play.js `AWAKE_F118`;
+  the vars default already matched, so the first wake of 46-49 is the game's (not a re-run). What
+  activated 45-49 / 66 before the save: still open after a second attempt (FUN_0053d888 activates a
+  record with event 3 via vt+0x144(1, 1), called from FUN_00518760; not tied to these records).
+- Tests: test_enemy_ai (46 / 47 wake, ops 37 / 39 / 40, 0x142 rules, 0x14c / 0x14d, manager events,
+  0x108 on record 45), test_enemies_page step 1 (page = save for +0x118 / vars; #67 not pushed). 20 mutants,
+  19 killed; survivor = 0x142's own >= 0x100 clamp (equivalent: FUN_0055b8e0's translation clamps too).
+
+## Where the push enters the step, and the f827 stop (worker 0158, 2026-10-31)
+
+- **Decoded at runtime.** FUN_0034c388 mode 0xc passes the step to FUN_00358fb8(body, &step) (Ghidra drops
+  a1) -> body+0x30; FUN_003590c8 case 0: disp = body+0x40 x step -> FUN_00357d48(body, disp), which calls
+  FUN_0035a440(body, out, in) at 0x357e30 when body+0xac bit 1 or 2. Near its end (0x35bdb0) FUN_0035a440
+  does `if (flags bit 4 && |body+0x80| > 0) correction += body+0x80` (with wall / object contacts, through
+  FUN_00260e28 first), then `out = in + correction` and returns 1. body+0x80 = C+0x430 = FUN_00343160's copy
+  of actor +0x130. Ghidra writes it as `pauVar41 + 8` (16-byte units), so the 0x80 / 0x430 offset searches
+  could never hit it. FUN_00357d48 then caps |out| at 10 (bit 0x200, no platform body+0x180) and sets
+  body+0x30 / +0x40 = out (scaled to |body+0x40| when longer). player.js `pushIn`.
+- Runtime evidence (k_push17, call log `pushstep`): out - in - push <= 1e-4 on every frame f800-f960, standing
+  included (in 0 -> out = push 0.58). Poking the push scale DAT_0046e90c = 0 removes the slow-down near #66
+  (up to 5.9 u) but not the stop; FUN_0035a440's object pass off (DAT_0046f4d0 = 1) changes nothing.
+- **The f827 stop is the walk mesh's 0x80 edges.** FUN_00357d48 l.396 makes a 0x80 neighbour a wall when body
+  flag bit 9 (0x200) is set, and Vincent's flags are 0x236. The page walked him as a non-block80 body: 0.5 u off
+  along the railing (z -1104.8) from the game's position with the game's step, and ~3 u past the stop. With
+  block80 the page's step from the game's position is within 0.0008 u on f801-f960.
+- For play.js / test_enemies_page (worker 0157's files): **test 1c ("idle beside #66 ... game: held in place")
+  now fails by design**. Under the decoded rule an idle Vincent overlapping a soldier is pushed until the
+  overlap ends (the page: 0.99 u, then push 0); in k_push16 only the 0x80 wall east of him held him. 1c should
+  expect that (e.g. moved > 0 and the final push ~0, or the centres >= r_i + r_j apart), or idle him against
+  a wall as k_push16 does. No play.js change is needed (ctrl.push is set before ctrl.step as before).

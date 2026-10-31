@@ -3,8 +3,10 @@
 // Vincent runs east along the ladder-top railing into #66 (record 44). For every logged frame f the
 // push the game computed in frame f (record f+1's p_push / e0_push) must equal pushOut over the
 // positions record f starts with (Vincent's matrix row 3, #66's body C+0x30).
-// Also checks the step: Vincent's move in frame f = (walk + the push along the walk) slid by the walk mesh,
-// which is what player.js integrate does with ctrl.push (the GUESS for where the push enters; audit row).
+// Also checks the step: player.js integrate with ctrl.push = FUN_00357d48 -> FUN_0035a440 (move = body+0x40 x
+// step + C+0x430, then the walk mesh, 0x80 edges walls for Vincent's body flag 0x200). With k_push17
+// (worker 0158: k_push16's route to f960 plus FUN_0035a440's in / out / push from the call log,
+// TRACE_CALLLOG=pushstep) the translation is checked frame by frame against the game's own numbers.
 //   node native/web/test_push_out.mjs [enemy_ai.js]
 import { readFileSync, existsSync } from 'node:fs';
 import { pathToFileURL, fileURLToPath } from 'node:url';
@@ -128,12 +130,10 @@ const e0pos = r => f32s(r.e0_face_pos).slice(4, 7);
 
 // the step: player.js's own integrate (state 0), per frame from the game's position at the frame start,
 // with play.js's order (pushOut from the frame-start positions, then the step): ctrl.push = this frame's
-// pushOut, the walk = f807-f808's step (no push yet; the stick is held). The trace's step f809-f826 runs
-// along the railing; the page's step projected on the game's step direction must match it (the GUESS in
-// player.js: walk + (push . w_hat) w_hat, worker 0155's fit) and so must the full position (the old
-// stand-in, push added as a displacement, was 0.81 u off sideways). Standing next to #66 (f909-f1019)
-// the game keeps him in place (+-0.03 u jitter) under a 0.58 u push. Where the push enters the move is
-// not decoded (notes/fidelity-audit.md).
+// pushOut, the walk = f807-f808's step (no push yet; the stick is held; the slid step, k_push16 has no
+// body+0x40). The trace's step f809-f826 runs along the railing; the page's step must match it, along the
+// game's path and in full. Standing next to #66 (f909-f1019) the push (0.58 u) still enters the move
+// (FUN_0035a440: out = 0 + push) and the 0x80 wall east of him holds him (+-0.03 u jitter, page and game).
 {
   let PC = null, Col = null;
   try { ({ PlayerController: PC } = await import(pathToFileURL(path.join(here, 'player.js')).href));
@@ -203,12 +203,62 @@ const e0pos = r => f32s(r.e0_face_pos).slice(4, 7);
       const pRest = dist(ctrl.pos.x, ctrl.pos.z, 1019), gRest = dist(P(1019)[0], P(1019)[2], 1019);
       ok(Math.abs(pMin - gMin) < 0.05 && gMin > 3.9 && gMin < 4.1,
          `k_push16 f809-f1019 closed loop: closest approach page ${pMin.toFixed(3)} / game ${gMin.toFixed(3)} u from #66`);
-      // Known gap (not the push): at f827 the game stops him 6.55 u past #66 with the stick held and the push
-      // pointing along his walk (+0.5 u), then holds him there (+-0.1 u jitter) to f900; the page's walk
-      // mesh has nothing there and he walks ~3 u on. Something not on the page stops him (an object
-      // primitive in FUN_0035a440, not translated? not decoded).
-      const msg = `k_push16 closed loop: rest page ${pRest.toFixed(3)} / game ${gRest.toFixed(3)} u from #66 (game stops him at f827; cause not decoded, not the push)`;
-      if (Math.abs(pRest - gRest) < 0.1) ok(true, msg); else { console.log('gap  ' + msg); if (process.env.STRICT) fail++; }
+      // at f827 the game stops him 6.55 u past #66 with the stick held and holds him there (+-0.1 u jitter)
+      // to f900: a 0x80 walk-mesh edge, a wall for body flag 0x200 (FUN_00357d48; worker 0158: the same stop
+      // with the push scale DAT_0046e90c poked to 0, and with FUN_0035a440's object pass off)
+      ok(Math.abs(pRest - gRest) < 0.05, `k_push16 closed loop: rest page ${pRest.toFixed(3)} / game ${gRest.toFixed(3)} u from #66 (the f827 stop: the 0x80 wall)`);
+    }
+
+    // k_push17 (worker 0158): the call log has, per frame, FUN_0035a440's input (body+0x40 x step), the push
+    // body+0x80 and its output, and FUN_003590c8's body+0x40 after the move. The page from the game's
+    // position at the frame start, fed the game's step and push: FUN_0035a440's output, body+0x40 and the
+    // position after the walk mesh must be the game's (f801-f960: walking, contact, the f827 stop, idle).
+    const p17 = path.join(process.env.TRACE_OUT ?? path.join(root, 'tools/trace/out'), 'k_push17');
+    if (existsSync(p17 + '.jsonl') && existsSync(p17 + '.calls.jsonl')) {
+      const rd = f => readFileSync(f, 'utf8').trim().split('\n').slice(1).map(l => JSON.parse(l.replace(/NaN/g, 'null')));
+      const B17 = new Map(rd(p17 + '.jsonl').map(r => [r.frame, r])), C17 = rd(p17 + '.calls.jsonl');
+      const h2f = h => { const b = Buffer.alloc(4); b.writeUInt32LE(parseInt(h, 16)); return b.readFloatLE(0); };
+      const W3 = c => c.u.slice(0, 3).map(h2f);
+      const po = new Map(C17.filter(c => c.hook === 'push_out').map(c => [c.frame, c]));
+      const bs = new Map(C17.filter(c => c.hook === 'body_step').map(c => [c.frame, c]));
+      let n = 0, np = 0, eOut = 0, eVel = 0, ePos = 0, fPos = -1;
+      for (let k = 801; k <= 960; k++) {                // call frame k moves record k-1 to record k
+        const c = po.get(k), b = bs.get(k);
+        if (!c || !b || !B17.has(k - 1) || !B17.has(k)) continue;
+        const vin = W3(c['a2+0x0']), q = W3(c['a0+0x80']), gout = W3(c['a1+0x0']), gvel = W3(b['a0+0x40']);
+        const s0 = B17.get(k - 1).matrix[3], g = B17.get(k).matrix[3];
+        const ctrl = new PC(col, { pos: { x: s0[0], y: s0[1], z: s0[2] }, heading: 0 });
+        ctrl.locate(); ctrl.pos = { x: s0[0], y: s0[1], z: s0[2] };
+        ctrl.push = q;
+        ctrl.body.vel = { x: vin[0] / STEP, y: vin[1] / STEP, z: vin[2] / STEP };
+        const out = ctrl.pushIn(vin[0], vin[1], vin[2]);
+        eOut = Math.max(eOut, Math.abs(out[0] - gout[0]), Math.abs(out[1] - gout[2]));
+        eVel = Math.max(eVel, Math.abs(ctrl.body.vel.x - gvel[0]), Math.abs(ctrl.body.vel.z - gvel[2]));
+        ctrl.pos = { x: s0[0], y: s0[1], z: s0[2] };
+        ctrl.integrate({ x: vin[0] / STEP, y: vin[1] / STEP, z: vin[2] / STEP });
+        const e = Math.hypot(ctrl.pos.x - g[0], ctrl.pos.z - g[2]);
+        if (e > ePos) { ePos = e; fPos = k; }
+        n++; if (q[0] || q[2]) np++;
+      }
+      ok(n >= 155 && np >= 140 && eOut < 1e-5, `k_push17 f801-f960: pushIn = FUN_0035a440's output (in + C+0x430), ${n} frames (${np} pushed), worst ${eOut.toExponential(2)}`);
+      ok(eVel < 1e-5, `k_push17: body+0x40 after the move (FUN_00357d48's rewrite, scaled to |body+0x40|), worst ${eVel.toExponential(2)}`);
+      ok(ePos < 2e-3, `k_push17: page step from the game's position with the game's step and push, worst ${ePos.toFixed(4)} u at f${fPos} (walk, contact, the f827 stop, idle)`);
+    } else console.log('skip k_push17 checks (tools/trace/scripts/k_push17.json; TRACE_PUSHSTEP=1 TRACE_CALLLOG=pushstep)');
+    // hand cases (FUN_00357d48 after FUN_0035a440 returns 1): |out| capped at 10 (body flag 0x200, no
+    // platform); out shorter than body+0x40 replaces it; no push: untouched
+    {
+      const s0 = P(808);
+      const mk = () => { const c = new PC(col, { pos: { x: s0[0], y: s0[1], z: s0[2] }, heading: 0 }); c.locate(); return c; };
+      let c = mk(); c.push = [30, 0, 0]; c.body.vel = { x: 1, y: 0, z: 0 };
+      let o = c.pushIn(1.2, 0, 0);
+      ok(Math.abs(o[0] - 10) < 1e-5 && Math.abs(c.body.vel.x - 1) < 1e-6, `push 30 u: out ${o[0].toFixed(3)} (cap 10), body+0x40 ${c.body.vel.x.toFixed(3)} (scaled to |1|)`);
+      c = mk(); c.push = [-0.9, 0, 0]; c.body.vel = { x: 1, y: 0, z: 0 };
+      o = c.pushIn(1.2, 0, 0);
+      ok(Math.abs(o[0] - 0.3) < 1e-6 && Math.abs(c.body.vel.x - 0.3) < 1e-6, `push against the walk: out ${o[0].toFixed(3)} (0.3), body+0x40 = out ${c.body.vel.x.toFixed(3)}`);
+      c = mk(); c.push = [0, 0, 0]; c.body.vel = { x: 1, y: 0, z: 0 };
+      o = c.pushIn(1.2, 0, 0);
+      ok(o[0] === 1.2 && c.body.vel.x === 1, `no push: out ${o[0]} (in), body+0x40 ${c.body.vel.x} (kept)`);
+      ok(mk().col.block80 === true && col.block80 === false, `Vincent walks the mesh as a block80 body (body flag 0x200); the shared mesh keeps block80 ${col.block80}`);
     }
   } else if (PC) ok(false, 'data/z128_collision.bin missing: integrate step unchecked');
 }

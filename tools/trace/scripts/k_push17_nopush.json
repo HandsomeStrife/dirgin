@@ -1,0 +1,47 @@
+{
+"name": "k_push17_nopush",
+"frames": 960,
+"log_from": 790,
+"doc": "worker 0158: k_push17 with TRACE_POKE=46e90c=0 (FUN_00542ab8's push scale DAT_0046e90c = 0: no actor +0x130 push). Does Vincent's path change?",
+"events": [
+{
+"from": 10,
+"to": 230,
+"lx": 0.6,
+"ly": -1.0
+},
+{
+"from": 240,
+"to": 244,
+"buttons": [
+"cross"
+]
+},
+{
+"from": 280,
+"to": 284,
+"buttons": [
+"cross"
+]
+},
+{
+"from": 300,
+"to": 470,
+"lx": 0.6,
+"ly": -1.0
+},
+{
+"from": 490,
+"to": 494,
+"buttons": [
+"cross"
+]
+},
+{
+"from": 500,
+"to": 900,
+"lx": 0.6,
+"ly": -1.0
+}
+]
+}

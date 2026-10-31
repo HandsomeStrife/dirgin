@@ -643,11 +643,15 @@ async function main() {
       onDeactivate: rec => { enemies.remove(rec); },
       // GUESS: FUN_005449f0 probe 3 = the page's collision triangle set (probe sets not decoded)
       los: (a, b) => !!(col.segment && col.segment({ x: a[0], y: a[1], z: a[2] }, { x: b[0], y: b[1], z: b[2] })) }) : null;
-    // actor state +0x104 of the save's soldiers (T: k_enemy_engage8 f760: #66 = 1, #67 = 2, #68 / #69 = 1,
-    // #70 / #71 = 2, #88 = 1); they were activated before the save, so FUN_00559748's pick is not rerun
-    // (GUESS: what put them in 1 is not decoded)
+    // The save's soldiers, as stored in sea-of-flames.p2s (object table *(DAT_0046e880+0x1164)[rec + 22]):
+    // actor state +0x104 (also T: k_enemy_engage8 f760) and +0x118. Their script vars +0xa0 are all 0
+    // there (the page's default), and +0x28 = 0x208403 (bit 0x100000 clear: their activation's script
+    // event 3 has run, FUN_0053fde8 case 8), so event 3 is not rerun here. Record 45's 0x10000000 is
+    // that event 3's cmd 0x14c(28) (script 109); 0x200 is not read on the page. GUESS: what activated
+    // them before the save is not decoded (notes/enemy-activation.md §1), so FUN_00559748 is not rerun.
     const AWAKE_STATE = { 44: 1, 45: 2, 46: 1, 47: 1, 48: 2, 49: 2, 66: 1 };
-    if (enemyAI) for (const k of AWAKE) enemyAI.addActor({ rec: k, astate: AWAKE_STATE[k] });
+    const AWAKE_F118 = { 44: 0, 45: 0x10000200, 46: 0, 47: 0, 48: 0x200, 49: 0x200, 66: 0 };
+    if (enemyAI) for (const k of AWAKE) enemyAI.addActor({ rec: k, astate: AWAKE_STATE[k], f118: AWAKE_F118[k] });
   } catch (e) { console.warn('enemy AI off:', e.message); enemyAI = null; }
   // test aids that move him (H, ?ladder=): the cloth restarts from the new pose (cloth.js reset)
   // and the camera resets as at spawn (player.js reset(): FUN_003285d0's snap; GUESS: the
