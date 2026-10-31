@@ -595,24 +595,220 @@ else {
 }
 
 // Brain mode 1 state 8 (FUN_00362998, the non-shooter e030 #7): with a target, gate FUN_00310c40 >= 0x18,
-// bTime >= 0x3d, then a draw: (int)(r x 11) == 0 -> the attack pick FUN_0035ff98 (stand-in: none).
+// bTime >= 0x3d, then a draw: (int)(r x 11) == 0 -> the attack pick FUN_0035ff98 -> FUN_00347bd8 over
+// e030's seven entries (zone set 8). Vincent ~32 u in front: only entry 3 (30-65, yaw +-64, flags 0)
+// passes (0 / 4 / 5 flag 1, 6 flag 8 with G+0x64 48 >= 0x2d, 1 / 2 out of range) -> actor state 0x83,
+// body motion 0x1003 (FUN_00537aa0 0x80 + i -> 0xf80 + st), clip atk_3 (its frame-0 play-clip command),
+// state 9 until the attack ends (entry length 95 frames), then 8 again.
 {
   const rec = data.records[7];
   const pick = draw => {
-    const player = { pos: [rec.pos[0] - 30, rec.pos[1], rec.pos[2]], hp: 780, id: 0x16, f118: 0, s64: 0 };
-    const logs = [];
-    const W = AI.createEnemyAI({ data, player, rand: () => draw, quiet: true, log: m => logs.push(m) });
+    const fw = rec.face, d = 30;
+    const player = { pos: [rec.pos[0] + fw[0] * d, rec.pos[1], rec.pos[2] + fw[2] * d], hp: 780, id: 0x16, f118: 0, s64: 0 };
+    const W = AI.createEnemyAI({ data, player, rand: () => draw, quiet: true });
     const a = W.addActor({ rec: 7, mode: 1 });
-    let wait = null;
-    for (let i = 0; i < 200; i++) {
-      W.tick(1.0, player.pos, player.pos);
-      if (wait == null && logs.some(m => m.includes('FUN_0035ff98'))) wait = (W.S.now - a.ai.btime) << 16 >> 16;   // ticks since btime (FUN_0035eb30)
+    let wait = null, atk = null, end = null, clip = null, mot = null, b9 = false, hits = [];
+    for (let i = 0; i < 400; i++) {
+      const before = (W.S.now - a.ai.btime) << 16 >> 16;
+      const ev = W.tick(1.0, player.pos, player.pos);
+      const e = ev.find(x => x.startsWith(`attack ${a.id} `));
+      if (e && atk == null) { atk = { f: i, i: +e.split(' ')[2], st: a.astate }; wait = before + 1; clip = a.C.clip; mot = a.C.motion?.cls; }
+      if (atk && a.ai.bstate === 9) b9 = true;
+      for (const x of ev) if (x.startsWith(`melee ${a.id} hit`) && end == null) hits.push(i - (atk ? atk.f : 0));
+      if (atk && end == null && ev.includes(`attack end ${a.id}`)) end = { f: i, st: a.astate };
     }
-    return { st: a.ai.bstate, wait, picked: wait != null };
+    return { a, atk, wait, clip, mot, b9, end, hits };
   };
   const hi = pick(0.1), lo = pick(0.05);                                    // 0.1 x 11 = 1.1 -> 1: no pick
-  ok(hi.st === 8 && !hi.picked && lo.st === 8 && lo.picked && lo.wait >= 0x3d && lo.wait < 0x3d + 5,
-     `mode 1 state 8 (e030): draw 0.1 -> no attack pick (${hi.picked}); draw 0.05 -> pick after ${lo.wait} ticks (want [0x3d, 0x3d + 5))`);
+  ok(hi.a.ai.bstate === 8 && !hi.atk, `mode 1 state 8 (e030): draw 0.1 -> no attack (state ${hi.a.ai.bstate})`);
+  ok(lo.atk && lo.atk.i === 3 && lo.atk.st === 0x83 && lo.mot === 0x1003 && lo.clip === 'atk_3' && lo.wait >= 0x3d && lo.wait < 0x3d + 5,
+     `mode 1 state 8 (e030): draw 0.05 -> attack ${lo.atk?.i} (3) after ${lo.wait} ticks (want [0x3d, 0x3d + 5)), actor state 0x${lo.atk?.st?.toString(16)}, motion 0x${lo.mot?.toString(16)}, clip ${lo.clip} (atk_3)`);
+  // entry 3: hit commands at keyframes 13 and 52, length 95. FUN_0059eb18 adds the step before it reads the
+  // timer and its first update runs on the attack frame (the brain runs first in FUN_00323128), so
+  // keyframe k runs k - 1 frames after the attack frame and the motion is done at +94. Mode 1's start set
+  // the gun bit (state 3's enter), so the return state (0x539ea0) is 3.
+  // state 9's return writes AI +0x20 (the scheduler interval) = 6
+  ok(lo.a.ai.interval === 6, `mode 1 state 9 -> 8: AI +0x20 interval ${lo.a.ai.interval} (6)`);
+  ok(lo.b9 && lo.end && lo.end.f - lo.atk.f === 94 && lo.end.st === 3 && lo.hits.join() === '12,51',
+     `e030 attack 3: brain state 9 while attacking (${lo.b9}), hit windows at +${lo.hits.join(', +')} (+12, +51), ends +${lo.end ? lo.end.f - lo.atk.f : '?'} (+94) -> actor state ${lo.end?.st} (3; GUESS stand-in for the leave)`);
+}
+
+// Attack pick geometry (FUN_00347bd8 / FUN_00347af0) on e027's entry (zone set 7: r_atk_0, 1-30, yaw +-10)
+{
+  const rec = data.records[44];
+  const T = data.attacks && data.attacks[rec.zones];
+  ok(T && T.entries.length === 1 && T.entries[0].min === 1 && T.entries[0].max === 30 && T.entries[0].tol === 10 && T.names['0'] === 'r_atk_0',
+     `attack table zone set ${rec.zones}: ${T?.entries.length} entry, ${T?.entries[0]?.min}-${T?.entries[0]?.max} yaw +-${T?.entries[0]?.tol}, clip ${T?.names?.['0']} (1, 1-30, 10, r_atk_0)`);
+  const T8 = data.attacks && data.attacks[data.records[7].zones];
+  ok(T8 && T8.entries.length === 7 && !T8.alt, `attack table e030 (zone set ${data.records[7].zones}): ${T8?.entries.length} entries (7)`);
+  // FUN_00347bd8 directly (world.attackPick): Vincent at distance d, angle ang (rad) off the facing, the
+  // last draw r picks among the passing entries (ok[(int)(n x r)]); AI flag 2 (visible) set.
+  const pickAt = (k, d, ang, r, up = 0) => {
+    const rc = data.records[k], fw = rc.face, c = Math.cos(ang), s = Math.sin(ang);
+    const dir = [fw[0] * c - fw[2] * s, 0, fw[2] * c + fw[0] * s];
+    // feet on his level; the aim point is PLAYER_AIM_H up, so the pick's distance is sqrt(d^2 + 12.4^2)
+    const player = { pos: [rc.pos[0] + dir[0] * d, rc.pos[1] - up, rc.pos[2] + dir[2] * d], hp: 780, id: 0x16, f118: 0, s64: 0 };
+    const W = AI.createEnemyAI({ data, player, rand: () => r, quiet: true });
+    const a = W.addActor({ rec: k, mode: 0 });
+    a.f118 |= 3; a.target = player; a.ai.flags |= 2;
+    return W.attackPick(a);
+  };
+  // e027 (1-30, yaw +-10 = +-14 deg): ahead at 15 -> 0; 30 deg off -> none; 40 u -> none
+  ok(pickAt(44, 15, 0, 0.5) === 0 && pickAt(44, 15, 0.5236, 0.5) === -1 && pickAt(44, 40, 0, 0.5) === -1 && pickAt(44, 15, -0.2, 0.5) === 0,
+     `attack pick e027: ahead 15 u -> ${pickAt(44, 15, 0, 0.5)} (0), 30 deg off -> ${pickAt(44, 15, 0.5236, 0.5)} (-1), 40 u -> ${pickAt(44, 40, 0, 0.5)} (-1), -11 deg -> ${pickAt(44, 15, -0.2, 0.5)} (0)`);
+  // e030 at 52 u ahead (dist 53): entry 0 (50-65) has flag 1 (never), 6 (1-120) flag 8 with G+0x64 48 >= 0x2d
+  // (skipped), 3 (30-65) passes alone -> 3 for any draw; 1 (70-120, pitch -4..4) needs 70.
+  ok(pickAt(7, 52, 0, 0.0) === 3 && pickAt(7, 52, 0, 0.99) === 3 && pickAt(7, 80, 0, 0.0) === 1 && pickAt(7, 80, 0, 0.99) === 1,
+     `attack pick e030: 52 u -> ${pickAt(7, 52, 0, 0.0)} / ${pickAt(7, 52, 0, 0.99)} (3 / 3: 0 flag 1, 6 flag 8 skipped), 80 u -> ${pickAt(7, 80, 0, 0.0)} / ${pickAt(7, 80, 0, 0.99)} (1 / 1)`);
+  // entry 1's pitch window [-4, 4) (x 16/pi): Vincent 47.6 above at 50 u (aim point 60 up: 50 deg, dist 78)
+  // -> pitch 4: out (GUESS sign: up = positive, FUN_00260f54 not decoded); 10 above (22 deg) -> 1: in
+  ok(pickAt(7, 50, 0, 0.0, 47.6) === -1 && pickAt(7, 70, 0, 0.0, 10) === 1,
+     `attack pick e030 pitch: 50 deg up -> ${pickAt(7, 50, 0, 0.0, 47.6)} (-1), 18 deg up at 70 u -> ${pickAt(7, 70, 0, 0.0, 10)} (1)`);
+}
+
+// Brain mode 5 (FUN_003639d0): a soldier switched to mode 5 (most scripts do it when he's hit; here by
+// cmd 0x143's path, setMode) keeps acting: start 0x363988 (interval 10, C+0x1c0 |= 0x5000000), state 0 ->
+// 5 (actor state 3, combat layer 2, action layer 2) -> 6, fires; after 0x79 ticks with < 3 hits taken and
+// < 3 misses, FUN_0035f7c0(ai, 0) with AI +0x98 = 100 (p 1.0) -> 0xc (+0x78 <= 3) -> action layer 6 ->
+// 0xd -> 5 again. Close (d34 < 22): combat layer off, state 10 -> attack pick -> 0xb -> 0xe.
+{
+  const rec = data.records[69];
+  const fw = rec.face;
+  const mk = d => {
+    const player = { pos: [rec.pos[0] + fw[0] * d, rec.pos[1], rec.pos[2] + fw[2] * d], hp: 780, id: 0x16, f118: 0, s64: 0 };
+    const W = AI.createEnemyAI({ data, player, rand: () => 0.5, quiet: true });
+    const a = W.addActor({ rec: 69, mode: 5 });
+    return { W, a, player };
+  };
+  const { W, a, player } = mk(100);
+  const states = new Set(), out = [];
+  let shots = 0, f1c0 = a.C.f1c0, int0 = a.ai.interval, al = new Set(), to7 = null;
+  for (let i = 0; i < 900; i++) {
+    const was = a.ai.bstate, f74 = a.ai.f74;
+    const ev = W.tick(1.0, player.pos, player.pos);
+    states.add(a.ai.bstate); al.add(a.ai.amode);
+    shots += ev.filter(x => x === `shot ${a.id}`).length;
+    if (to7 == null && was === 6 && a.ai.bstate === 7) to7 = { f74, i };
+    out.push(a.ai.bstate);
+  }
+  // the first brain run (frame 0 here: the AI is due at once): state 0 with a live target -> 5 -> 6 in one run
+  ok(out[0] === 6, `mode 5 first run: state 0 -> 5 -> 6 (fall-through) = ${out[0]} (6)`);
+  ok(int0 === 10 && (f1c0 & 0x5000000) === 0x5000000, `mode 5 start (0x363988): interval ${int0} (10), C+0x1c0 0x${f1c0.toString(16)} (bits 0x5000000)`);
+  // Damage off: every bullet ends on nothing (+0x74). The third miss sends state 6 to 7 (FUN_00360940
+  // clears +0x74, FUN_0035f7c0 p 1.0); 7 -> 8 (action layer 3, the approach): with no move (not
+  // translated) and no hit made (+0x78 0) state 8 waits there, still firing (combat layer 2).
+  ok([6, 7, 8].every(x => states.has(x)) && shots >= 10 && a.astate === 3 && al.has(2) && al.has(3) && a.ai.cmode === 2 && to7 && to7.f74 >= 3,
+     `mode 5 at 100 u: brain states {${[...states].map(x => x.toString(16)).join(',')}} (6, 7, 8), 6 -> 7 at f${to7?.i} with +0x74 ${to7?.f74} (>= 3), ${shots} shots in 900 frames (>= 10), actor state ${a.astate} (3), combat layer ${a.ai.cmode}, action layers {${[...al].join(',')}} (2, 3; not translated)`);
+  // close: melee
+  const C2 = mk(15);
+  let atk = null, hitw = null, endf = null;
+  for (let i = 0; i < 200; i++) {
+    const ev = C2.W.tick(1.0, C2.player.pos, C2.player.pos);
+    if (!atk) { const e = ev.find(x => x.startsWith(`attack ${C2.a.id} `)); if (e) atk = { f: i, clip: C2.a.C.clip, st: C2.a.astate, comb: C2.a.ai.cmode }; }
+    if (atk && hitw == null && ev.some(x => x.startsWith(`melee ${C2.a.id} hit`))) hitw = i - atk.f;
+    if (atk && endf == null && ev.includes(`attack end ${C2.a.id}`)) endf = { f: i - atk.f, bst: C2.a.ai.bstate, st: C2.a.astate };
+  }
+  const T = data.attacks[rec.zones];
+  ok(atk && atk.f <= 10 && atk.st === 0x80 && atk.clip === T.names['0'] && atk.comb === 0 && hitw === T.entries[0].kf.find(k => k.cmds.some(c => c[0] === 2)).frame - 1,
+     `mode 5 at 15 u (d34 < 22): attack at f${atk?.f} (the second brain run: state 6 -> 10, then 10 picks), actor state 0x${atk?.st?.toString(16)} (0x80), clip ${atk?.clip} (${T.names['0']}), combat layer ${atk?.comb} (0), hit window +${hitw}`);
+  ok(endf && endf.f === T.entries[0].dur - 1 && endf.st === 3,
+     `mode 5 attack ends +${endf?.f} (entry length ${T.entries[0].dur}), actor state ${endf?.st} (3: gun bit set by state 3's enter)`);
+  ok(C2.player.hp === 780, `melee does not damage Vincent (hit volume FUN_00541310 not decoded): HP ${C2.player.hp}`);
+}
+
+// Brain mode 6 (FUN_00364558): state 0 -> 2 (actor state 3, combat 2, action layer 5); close, the attack
+// gate: bTime > 0x78 and (int)(r x 11) == 0 -> pick -> state 6 -> 0 after the attack (interval 6).
+{
+  const rec = data.records[69], fw = rec.face;
+  const player = { pos: [rec.pos[0] + fw[0] * 15, rec.pos[1], rec.pos[2] + fw[2] * 15], hp: 780, id: 0x16, f118: 0, s64: 0 };
+  const W = AI.createEnemyAI({ data, player, rand: () => 0.05, quiet: true });
+  const a = W.addActor({ rec: 69, mode: 6 });
+  let atk = null, back = null;
+  const st = new Set();
+  for (let i = 0; i < 400; i++) {
+    const ev = W.tick(1.0, player.pos, player.pos);
+    st.add(a.ai.bstate);
+    if (!atk && ev.some(x => x.startsWith(`attack ${a.id} `))) atk = i;
+    if (atk != null && back == null && a.ai.bstate === 0 && a.ai.interval === 6) back = i;
+  }
+  ok(st.has(2) && atk != null && back != null, `mode 6: states {${[...st].join(',')}}, attack at f${atk}, back to state 0 (interval 6) at f${back}`);
+}
+
+// Single-state checks on the translated functions (world.t), each paired with the mutant it kills.
+{
+  const rec = data.records[69], fw = rec.face;
+  const mk = (mode, d = 100, rand = () => 0.5) => {
+    const player = { pos: [rec.pos[0] + fw[0] * d, rec.pos[1], rec.pos[2] + fw[2] * d], hp: 780, id: 0x16, f118: 0, s64: 0 };
+    const W = AI.createEnemyAI({ data, player, rand, quiet: true });
+    const a = W.addActor({ rec: 69, mode });
+    a.f118 |= 3; a.target = player;                                          // a live target (FUN_0035fc98's bits)
+    return { W, a, ai: a.ai, player };
+  };
+  // mode 5 state 0xe: FUN_0035f890 (= FUN_0035f7c0 ^ 1) == 0 -> C+0x1c0 |= 0x10; then FUN_0035f7c0 -> 0x10, else 0xf.
+  // AI +0x98 = 100: p 1 (both draws pass); -100: p 0 (both fail).
+  const e = b98 => { const m = mk(5); m.ai.b98 = b98; m.ai.bstate = 0xe; m.a.C.f1c0 &= ~0x10; if (b98 < 0) m.a.C.f1c0 |= 0x10;
+    m.W.t.brain5(m.ai); return { bit: !!(m.a.C.f1c0 & 0x10), st: m.ai.bstate }; };
+  const ep = e(100), en = e(-100);
+  ok(ep.bit && ep.st === 0x10 && !en.bit && en.st === 0xf,
+     `mode 5 state 0xe: odds pass -> C+0x1c0 bit 0x10 ${ep.bit} (true), next 0x${ep.st.toString(16)} (0x10); odds fail -> ${en.bit} (false), 0x${en.st.toString(16)} (0xf)`);
+  // state 8: 25 <= d34 with a hit made (+0x78) -> 9; closer -> combat layer off, 10
+  const s8 = d34 => { const m = mk(5); m.ai.bstate = 8; m.ai.flags |= 2; m.ai.f78 = 1; m.ai.d34 = d34; m.a.C.f1c0 &= ~0x100000;
+    m.W.t.brain5(m.ai); return m.ai.bstate; };
+  ok(s8(25.0) === 9 && s8(24.99) === 10, `mode 5 state 8: d34 25 -> ${s8(25.0)} (9), 24.99 -> ${s8(24.99)} (10)`);
+  // state 6, target not visible: FUN_00360518 (0 <= rounds <= magazine / 2) -> reload, stays; else after 0x79 -> 7
+  const s6 = rounds => { const m = mk(5); m.ai.bstate = 6; m.ai.flags &= ~2; m.ai.rounds = rounds; m.ai.btime = (m.W.S.now - 0x79) << 16 >> 16;
+    m.W.events.length = 0; m.W.t.brain5(m.ai); return { st: m.ai.bstate, rl: m.W.events.includes(`reload ${m.a.id}`), mag: m.ai.W.mag }; };
+  const mag = mk(5).ai.W.mag, h = s6(mag >> 1), h1 = s6((mag >> 1) + 1);
+  ok(h.rl && h.st === 6 && !h1.rl && h1.st === 7,
+     `mode 5 state 6 unseen: rounds ${mag >> 1} of ${mag} -> reload ${h.rl}, state ${h.st} (true, 6); ${(mag >> 1) + 1} -> reload ${h1.rl}, state ${h1.st} (false, 7)`);
+  // bullet ends: on an object -> +0x78 (FUN_00360900), on nothing -> +0x74 (FUN_00360920)
+  {
+    const m = mk(5);
+    m.W.t.bulletEnd({ from: m.a }, true); const hit = [m.ai.f74, m.ai.f78];
+    m.W.t.bulletEnd({ from: m.a }, false); const miss = [m.ai.f74, m.ai.f78];
+    ok(hit.join() === '0,1' && miss.join() === '1,1', `bullet end counters: hit -> +0x74/+0x78 ${hit} (0,1), then miss -> ${miss} (1,1)`);
+  }
+  // attack scan: FUN_00347bd8's third argument (AI flag 2, visible) gates every entry
+  {
+    const r = data.records[44], f = r.face;
+    const player = { pos: [r.pos[0] + f[0] * 15, r.pos[1], r.pos[2] + f[2] * 15], hp: 780, id: 0x16, f118: 0, s64: 0 };
+    const W = AI.createEnemyAI({ data, player, rand: () => 0.5, quiet: true });
+    const a = W.addActor({ rec: 44, mode: 0 });
+    a.f118 |= 3; a.target = player;
+    a.ai.flags |= 2; const vis = W.attackPick(a);
+    a.ai.flags &= ~2; const hid = W.attackPick(a);
+    ok(vis === 0 && hid === -1, `attack pick e027 ahead 15 u: visible -> ${vis} (0), not visible -> ${hid} (-1)`);
+  }
+  // mode 6 state 0: a dead target (FUN_00316d08) -> FUN_0035fe08 only, stays 0; a live one -> 2
+  const m6 = hp => { const m = mk(6); m.player.hp = hp; m.ai.bstate = 0; m.W.t.brain6(m.ai); return m.ai.bstate; };
+  ok(m6(0) === 0 && m6(780) === 2, `mode 6 state 0: dead target -> ${m6(0)} (0), live -> ${m6(780)} (2)`);
+  // mode 6 states 2-5 re-pick every update (FUN_0035fe80 / FUN_0035fec0 / FUN_0035fc98): no target -> the candidate
+  {
+    const m = mk(6); m.ai.bstate = 2; m.a.f118 &= ~2; m.a.target = null;
+    m.W.t.brain6(m.ai);
+    ok(m.W.t.target(m.ai) === m.player, `mode 6 state 2 with no target: re-pick -> ${m.W.t.target(m.ai) === m.player ? 'the player' : 'none'} (the player; candidate GUESS)`);
+  }
+  // actor states 6 / 0x1b enters (FUN_00538218 / FUN_005382e0) clear C+0x590 bit 24
+  {
+    const m = mk(0), g = [];
+    for (const st of [6, 0x1b]) { m.W.t.setActorState(m.a, 3); g.push(m.a.C.gun); m.W.t.setActorState(m.a, st); g.push(m.a.C.gun); }
+    ok(g.join() === '1,0,1,0', `gun bit: 3 -> ${g[0]}, 6 -> ${g[1]}, 3 -> ${g[2]}, 0x1b -> ${g[3]} (1,0,1,0)`);
+  }
+  // attack state 0x80 + i entered from 5 / 6 / 0x1b: FUN_00538420 / FUN_00537d58 -> FUN_00537aa0 -> 0x1000 + i;
+  // the attack motion then ends the attack (a kept motion would leave attacking() set for good)
+  {
+    const sm = mk(0).W.t.stateMotion;
+    const ms = [5, 6, 0x1b].map(fr => sm(fr, 0x83));
+    ok(ms.every(x => x === 0x1003), `state motion 5 / 6 / 0x1b -> 0x83: ${ms.map(x => '0x' + x.toString(16))} (0x1003)`);
+    const m = mk(5, 15);
+    m.ai.mode = 0; m.ai.brain = null;                                       // no brain: only the attack runs
+    m.W.t.setActorState(m.a, 5);
+    m.W.t.setActorState(m.a, 0x80);
+    let end = null;
+    for (let i = 0; i < 400 && end == null; i++) if (m.W.tick(1.0, m.player.pos, m.player.pos).includes(`attack end ${m.a.id}`)) end = i;
+    ok(m.a.C.motion && end != null && !(m.a.astate >= 0x80 && m.a.astate <= 0xbf),
+       `attack from crouch (state 5): ends at f${end}, actor state 0x${m.a.astate.toString(16)} (not 0x80-0xbf)`);
+  }
 }
 
 console.log((fail ? `${fail} FAILED` : 'all ok') + (gaps ? ` (${gaps} known gaps)` : ''));

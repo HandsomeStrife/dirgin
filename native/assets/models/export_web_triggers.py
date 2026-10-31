@@ -120,8 +120,49 @@ def records(d):
         out.append(dict(rec=k, model=model, stance=stance_of(model, weapon >= 0, wcls),
                         script=struct.unpack_from('<h', d, o + 4)[0],
                         mode=struct.unpack_from('<i', d, o + 8)[0],
-                        pos=f32s(d, o + 0xc, 3), face=f32s(d, o + 0x1c, 3), weapon=weapon, hp=hp, lvl=lvl, zones=zi))
+                        pos=f32s(d, o + 0xc, 3), face=f32s(d, o + 0x1c, 3), weapon=weapon, hp=hp, lvl=lvl, zones=zi,
+                        # +0x4c / +0x4d -> AI +0x98 / +0x99 (signed bytes, FUN_00559748): the odds FUN_0035f7c0 /
+                        # FUN_0035f8b0 draw against
+                        b98=struct.unpack_from('b', d, o + 0x4c)[0], b99=struct.unpack_from('b', d, o + 0x4d)[0]))
     return out
+
+
+def attacks(d, i):
+    """The attack table of section-19 entry i: C+0x7e8 = zone header +0x34 (FUN_00340760), set at stage
+    load by FUN_0030fc68 (file version >= 0x16) = header + u32 header +0x18, relocated by FUN_0030fd08:
+    T +0x10 entries (16 B), +0x14 keyframes (8 B), +0x18 commands (8 B), +0x1c names (8 B) are offsets
+    from T; +0x2c = the entries again when the keyframe offset < s16 T+0 + count x 16 (the old 8-byte
+    form, FUN_00347978), which FUN_00347bd8 refuses (no attack).
+    Entry: +0 s16 length (frames), +2 / +4 s16 first keyframe / keyframe count, +6 u16 flags, +8 / +0xa
+    s16 distance min / max, +0xc u8 yaw, +0xd s8 yaw tolerance, +0xe u16 pitch nibbles (FUN_00347af0).
+    Keyframe: +0 s16 frame, +2 / +4 s16 first command / count. Command: 4 x s16 (FUN_003481e0: op,
+    then args). names: the +0x1c entries the play-clip commands (op 0, arg 2) name."""
+    sec = SE.sections(d)
+    ver = (d[3] - 0x30) * 100 + (d[4] - 0x30) * 10 + d[5] - 0x30 if d[:3] == b'bzd' else -1
+    o19, n19, _ = sec[0x13]
+    if i < 0 or ver < 0xe or i >= n19:
+        return None
+    h = sec[0x14][0] + SE.u32(d, o19 + 4 * i)
+    T = h + SE.u32(d, h + 0x18)
+    s16 = lambda o: struct.unpack_from('<h', d, o)[0]
+    n = s16(T + 2)
+    E, K, CM, NM = (T + SE.u32(d, T + x) for x in (0x10, 0x14, 0x18, 0x1c))
+    alt = SE.u32(d, T + 0x14) < s16(T) + n * 0x10
+    entries, names = [], {}
+    for k in range(n):
+        e = E + 16 * k
+        dur, ks, kn, fl, mn, mx = struct.unpack_from('<hhhHhh', d, e)
+        kfs = []
+        for j in range(kn):
+            fr, cs, cn = struct.unpack_from('<hhh', d, K + 8 * (ks + j))
+            cmds = [list(struct.unpack_from('<4h', d, CM + 8 * (cs + c))) for c in range(cn)]
+            for c in cmds:
+                if c[0] == 0:
+                    names[str(c[2])] = d[NM + 8 * c[2]:NM + 8 * c[2] + 8].split(b'\0')[0].decode('latin-1')
+            kfs.append(dict(frame=fr, cmds=cmds))
+        entries.append(dict(dur=dur, kf=kfs, flags=fl, min=mn, max=mx, yaw=d[e + 0xc],
+                            tol=struct.unpack_from('b', d, e + 0xd)[0], pitch=struct.unpack_from('<H', d, e + 0xe)[0]))
+    return dict(alt=alt, entries=entries, names=names)
 
 
 def stance_of(model, armed, wcls, params=True):
@@ -275,7 +316,7 @@ def clip_frames():
     return res
 
 
-def model_clips(recs, st):
+def model_clips(recs, st, atk):
     """{model: {clip: frames}} for the AI_MOTIONS rows of every (model, stance) pair the records use,
     from the model's own motion files (export_web_enemy.clip_file: only disc.py INPUTS). A row whose
     clip no listed file holds is left out (printed)."""
@@ -292,6 +333,21 @@ def model_clips(recs, st):
                 f = E.clip_file(model, c)
             except SystemExit:
                 print('WARN %s stance %#x motion %#x: no listed motion file holds %s' % (model, stance, m, c))
+                continue
+            cbuf, CP = E.V.find_clip(f, c)
+            res[c] = int(E.AR.clip_frames(cbuf, CP))
+    # the attack clips (the play-clip commands of the model's attack tables, ai.json attacks)
+    for r in recs:
+        if r['model'] not in AI_TYPES or r['zones'] < 0 or not atk.get(str(r['zones'])):
+            continue
+        res = out.setdefault(r['model'], {})
+        for c in atk[str(r['zones'])]['names'].values():
+            if not c or c in res:
+                continue
+            try:
+                f = E.clip_file(r['model'], c)
+            except SystemExit:
+                print('WARN %s attack clip %s: no listed motion file holds it' % (r['model'], c))
                 continue
             cbuf, CP = E.V.find_clip(f, c)
             res[c] = int(E.AR.clip_frames(cbuf, CP))
@@ -319,10 +375,11 @@ def main():
     boxes = {m: hitboxes(m) for m in BOX_TYPES if any(r['model'] == m for r in recs)}
     st = stances(os.path.join(os.path.dirname(os.path.abspath(stage)), STANCE_FILE),
                  {r['stance'] for r in recs if r['stance'] is not None})
+    atk = {str(r['zones']): attacks(d, r['zones']) for r in recs if r['zones'] >= 0 and r['model'] in AI_TYPES}
     os.makedirs(out, exist_ok=True)
     res = dict(format='enemy-ai-2', stage=os.path.basename(stage), triggers=trig, records=recs,
                weapons=weapons(d), scripts=scr, clips=clip_frames(), hitboxes=boxes,
-               zones=zone_sets(d, recs, boxes), stances=st, model_clips=model_clips(recs, st),
+               zones=zone_sets(d, recs, boxes), stances=st, model_clips=model_clips(recs, st, atk), attacks=atk,
                sizes={str(r['zones']): zone_size(d, r['zones']) for r in recs if r['zones'] >= 0},
                lock_bones={str(r['zones']): lock_bone(d, r['zones']) for r in recs if r['zones'] >= 0})
     path = os.path.join(out, 'ai.json')

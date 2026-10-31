@@ -15,7 +15,9 @@
 //      (HP 1) alive, with the lock he dies (actor state 7, AI mode 0, death clip held);
 //   6. an e048 (record 24, w class 2: stance 0x1e) gets a body and an AI actor, drawn in its stance's
 //      clip (m_gst) and posed for the part test (enemies.js partPose); after 5, so it doesn't shift #66;
-//   7. no console errors or page errors.
+//   7. record 51 (Dan's report): mode 1, the fire clip's blend-out against k_fire_emp15;
+//   8. record 69 hit (script event 8 -> AI mode 5) keeps firing; with Vincent close he attempts the melee
+//      attack (m_atk drawn); no console errors or page errors.
 //   node native/web/test_enemies_page.mjs          (needs data/enemies + playwright; else SKIP, exit 0)
 // Serves native/web with python3 http.server on a free port. three.js comes from the CDN (play.html importmap).
 import { existsSync, readFileSync } from 'node:fs';
@@ -282,6 +284,41 @@ try {
          `weight game ${want.map(g => g.w.toFixed(3)).join(' ')} page ${fade.map(l => l.w?.toFixed(3)).join(' ')}${bad >= 0 ? ` (first diff at ${bad})` : bad === -2 ? ' (length differs)' : ''}`);
     }
   }
+  // 8. A hit soldier keeps acting: record 69 (e027, stance 0x1e, script 24) activated; his damage event 8
+  // (what enemyHP runs on a hit) sets AI mode 5 (cmd 0x143 r0 5). Mode 5 (FUN_003639d0) turns the combat
+  // layer on: he goes on firing (m_st_f drawn) from where he stands (the move layers are not translated).
+  // Then Vincent stands 12 u in front of him: d34 < 22 -> state 10 -> the attack pick -> actor state 0x80,
+  // the body draws m_atk (the attack table's play-clip command); Vincent's HP is unchanged (the hit
+  // volume, FUN_00541310, is not decoded).
+  const g69 = await pg.evaluate(async () => {
+    const P = window.__play, ai = P.enemyAI, obj = k => ai.objects.get(k + 22);
+    const rec = await fetch('data/enemies/ai.json').then(r => r.json()).then(a => a.records[69]);
+    const c = P.ctrl, wait = async (f, ms) => { const t = performance.now(); while (!f() && performance.now() - t < ms) await new Promise(r => setTimeout(r, 50)); return f(); };
+    // Vincent 80 u in front of him, on his level (test aid: position write, as in step 5)
+    const put = d => { c.pos = { x: rec.pos[0] + rec.face[0] * d, y: rec.pos[1], z: rec.pos[2] + rec.face[2] * d }; c.prev = { ...c.pos }; c.locate(); if (c.onTeleport) c.onTeleport(); };
+    put(80);
+    ai.setActive(obj(69), 1);
+    if (!await wait(() => P.enemies.actors.some(a => a.rec === 69), 15000)) return null;
+    const a = ai.actors.find(x => x.rec === 69), body = P.enemies.actors.find(x => x.rec === 69);
+    ai.runEvent(a, 8, [10, 0, 0, 0]);
+    const mode = a.ai.mode;
+    const seen = new Set(), clips = new Set(), log = [], tick = P.enemies.tick;
+    P.enemies.tick = x => { tick(x); seen.add(a.ai.bstate); if (body.head) clips.add(body.head.clip); };
+    const fired = await wait(() => clips.has('m_st_f') && seen.size >= 2, 20000);
+    const after = { fired, states: [...seen], cmode: a.ai.cmode, astate: a.astate };
+    clips.clear();
+    const hp0 = P.php.hp;
+    put(12);
+    const melee = await wait(() => clips.has('m_atk'), 20000);
+    const atk = { melee, astate: a.astate, hp0, hp: P.php.hp };
+    P.enemies.tick = tick;
+    ai.setActive(obj(69), 0);
+    return { mode, after, atk };
+  });
+  ok(g69 && g69.mode === 5 && g69.after.fired && g69.after.cmode === 2 && g69.after.astate === 3,
+     `record 69 hit (event 8): AI mode ${g69?.mode} (5), keeps firing: m_st_f drawn ${g69?.after.fired}, brain states ${JSON.stringify(g69?.after.states)}, combat layer ${g69?.after.cmode}, actor state ${g69?.after.astate}`);
+  ok(g69 && g69.atk.melee && g69.atk.hp === g69.atk.hp0,
+     `record 69 with Vincent 12 u in front: melee attempt, body draws m_atk (${g69?.atk.melee}), Vincent HP ${g69?.atk.hp0} -> ${g69?.atk.hp} (no hit: hit volume not decoded)`);
   ok(errs.length === 0, `no console errors${errs.length ? ': ' + errs.slice(0, 3).join(' | ') : ''}`);
 } finally {
   await browser.close();

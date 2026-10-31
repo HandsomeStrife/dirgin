@@ -233,6 +233,44 @@ for (const [k, model, stand, size, deathClip] of [[28, 'e048', 'r_st_a', [5, 18]
   for (let i = 0; i < 30; i++) ai.tick(1.2, [0, 0, -200], [0, 0, -200]);
   ok(gun0 === 0 && woke === 1 && a.hp === 0 && a.astate === 7 && a.C.gun === 0,
      `e027 #67: gun bit ${gun0} at activation, ${woke} in actor state 3, ${a.C.gun} after the death (state ${a.astate}, HP ${a.hp})`);
+  // the death motion 0x36's enter (FUN_0059ce58) sets C+0x564 0x4000 | 0x8000 (T: k_hits12 f871 #67 0x4000c000)
+  ok(a.C.motion && a.C.motion.cls === 0x36 && (a.C.f564 & 0xc000) === 0xc000,
+     `e027 #67 dead: motion 0x${a.C.motion?.cls?.toString(16)} (0x36), C+0x564 0x${(a.C.f564 >>> 0).toString(16)} (bits 0xc000 set, as k_hits12 f871)`);
+}
+// A non-lethal hit on record 69 (e027, script 24): hitEnemy -> FUN_0055c7f8 -> script event 8, which sets
+// AI mode 5 (cmd 0x143 r0 5; most soldiers' scripts do this). The mode-5 brain (FUN_003639d0) then turns
+// the combat layer on and he keeps firing at Vincent (100 u off, in his weapon's range W+0x18 x 10).
+{
+  const php = { pos: [0, 0, -100], hp: 780, id: 0x16, f118: 0, s64: 0 };
+  const ai = createEnemyAI({ data, player: php, quiet: true, log: () => {} });
+  ai.boneWorld = a => b => boneRows(P0.R[b], P0.S[b], P0.P[b], a.pos, a.face);
+  const a = ai.addActor({ rec: 69, mode: 0, pos: [0, 0, 0], face: [0, 0, -1] });
+  const hp0 = a.hp;
+  ai.playerShot([0, -9, -60], [0, -9, 60], { ...straight, damage: 1 });
+  let shots = 0;
+  for (let i = 0; i < 600; i++) shots += ai.tick(1.0, php.pos, php.pos).filter(x => x === `shot ${a.id}`).length;
+  ok(a.hp < hp0 && a.hp > 0 && a.ai.mode === 5 && a.ai.cmode === 2 && shots >= 3 && a.astate === 3,
+     `e027 record 69 hit (HP ${hp0} -> ${a.hp}): script event 8 -> AI mode ${a.ai.mode} (5), combat layer ${a.ai.cmode} (2), ${shots} shots in 600 frames (>= 3), actor state ${a.astate} (3)`);
+}
+// A hit during his melee attack: record 69 in mode 5 with Vincent 15 u in front attacks (actor state
+// 0x80, motion 0x1000); Vincent's bullet flinches him (motion 0x1e replaces the attack motion), which
+// (GUESS 'Attack end') ends the attack state with the flinch kept; once the flinch ends the brain runs on.
+{
+  const php = { pos: [0, 0, -15], hp: 780, id: 0x16, f118: 0, s64: 0 };
+  const ai = createEnemyAI({ data, player: php, quiet: true, log: () => {} });
+  ai.boneWorld = a => b => boneRows(P0.R[b], P0.S[b], P0.P[b], a.pos, a.face);
+  const a = ai.addActor({ rec: 69, mode: 5, pos: [0, 0, 0], face: [0, 0, -1] });
+  let atk = false;
+  for (let i = 0; i < 10 && !atk; i++) { ai.tick(1.0, php.pos, php.pos); atk = a.astate === 0x80; }
+  ai.playerShot([2, -9, -60], [2, -9, 60], { ...straight, damage: 1 });
+  let fl = null, after = null;
+  for (let i = 0; i < 200; i++) {
+    ai.tick(1.0, php.pos, php.pos);
+    if (fl == null && a.C.motion && a.C.motion.cls === 0x1e) fl = { st: a.astate };
+    if (fl && after == null && !(a.C.motion && a.C.motion.cls === 0x1e)) after = i;
+  }
+  ok(atk && fl && fl.st !== 0x80 && after != null && a.astate !== 0x80 && a.ai.bstate !== 0xb,
+     `record 69 shot mid-attack: attacking ${atk}, flinch with actor state ${fl?.st} (not 0x80), flinch over at +${after}, brain state ${a.ai.bstate.toString(16)} (not stuck in 0xb), actor state ${a.astate.toString(16)}`);
 }
 // e030 is shorter (height 12): a pellet 15 u up crosses the e027 / e048 cylinder (18) but not the e030's
 {

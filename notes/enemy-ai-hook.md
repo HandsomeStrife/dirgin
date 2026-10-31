@@ -349,3 +349,53 @@ decoded) would also wake them; the page still never runs event 0x12.
   here vs '< 27' in stagger()'s comment.
 - No mode-1 trace exists (the tracer can't follow actors activated mid-run): the mode-1 timing test checks
   the decoded waits (0x79 / 0x1f rounded up to the 5-tick brain run), not game frames.
+
+## Modes 5 / 6, melee (worker 0152, 2026-10-31)
+
+**Brain mode 5** (class 0x4a2770, FUN_003638f8): start 0x363988 (ELF; not a Ghidra function): AI +0x20
+interval 10, C+0x1c0 |= 0x1000000 | 0x4000000 (mode 3's 0x361648: the same with 5; mode 6's 0x364548:
+interval 5). Update FUN_003639d0, translated in `brain5` (states 0-0x12). Summary: 0 -> 5 (actor state 3,
+combat layer 2, action layer 2, +0x74 / +0x70 cleared) -> 6: visible and d34 < 22 -> 10 (attack pick ->
+0xb -> 0xe); < 3 hits taken: < 3 misses -> after 0x79 ticks FUN_0035f7c0(ai, 0) -> 0xc (action 6) / 7
+(+0x78 > 3) / 0xe; >= 3 misses -> 7 / 0xe; >= 3 hits -> 0xc. 7 -> 8 (action 3 = approach) waits for
+C+0x1c0 0x100000 (move ended) or d34 < 25. FUN_0035f7c0 / FUN_0035f8b0 = odds from AI +0x98 / +0x99 =
+section-1 record +0x4c / +0x4d (now exported: records[].b98 / b99; z128 soldiers 100 / 0 -> p 1.0).
+AI +0x74 / +0x78 = the AI's bullets that ended on nothing / on something (FUN_00554ea8 -> FUN_00568e20 /
+FUN_00568df8). **Mode 6** FUN_00364558 in `brain6`. Records 69 / 70 (scripts 24 / 25) set mode 5 in events
+2, 3, 8 (hit) and 0x13.
+
+**Action layers** (FUN_0035f540 -> FUN_0035f590, vtables 0x4a2a28 (1) .. 0x4a2908 (7), 0x4a28d8 (0xb);
+update vt+0x1c: 2 FUN_00366390, 3 FUN_003667b0, 5 FUN_003670e8, 6 FUN_003672d8, 7 FUN_00367508) are
+**not ported**: they ask for paths on the stage's node graph (FUN_00563970 / FUN_00563d20 node of an
+object, FUN_0033e118 node record (+0xe area byte), FUN_00368120, request FUN_0055a628 with a 16-byte
+struct / FUN_0055a590) or approach directly (FUN_00353110(20, 1000, C, target) + mover 3). That graph and
+the mover are the next decode for enemy movement. Mode 3 (FUN_00361690) is mostly these calls.
+
+**Melee.** Attack table T = zone header + u32 header +0x18 (FUN_0030fc68, version >= 0x16), relocated by
+FUN_0030fd08: +2 count, +0x10 entries (16 B: +0 length, +2 / +4 keyframes, +6 flags, +8 / +0xa distance,
++0xc yaw, +0xd tolerance, +0xe pitch nibbles), +0x14 keyframes (frame, first command, count), +0x18
+commands (4 x s16), +0x1c names (8 B: clips and sounds), +0x24 hit volumes (64 B), +0x28 projectile
+records (16 B). Pick FUN_00347bd8 (see the audit row). Start FUN_0055baa8 -> actor state 0x80 + i (class
+0x80 for 0x80-0xbf, FUN_00537490) -> body motion 0x1000 + i (FUN_00537aa0 table 0x589e70: 0x537bf4 =
+st + 0xf80) = factory 0x5a6c28's vtable 0x5a4270: enter FUN_0059e830, update FUN_0059eb18 (timer += step;
+keyframes whose frame <= (int)timer run their commands FUN_00348138 -> FUN_003481e0; done once all ran
+and timer >= length), leave FUN_0059e938. Commands go on to the owner through FUN_00341988(C, 4, cmd) ->
+the actor's handler (jump table 0x58de60 [4] -> 0x56a1c8, per-op table 0x58de90): op 0 / 1 -> actor
+state 1 when not attacking; op 2 -> FUN_00569dc0 (melee hit volume: FUN_00541310 builds an attack object
+from the 64-byte record, placed on a bone FUN_0054a768 / FUN_0054a7d0, damage +0xc2 scaled by status
++0x56); op 3 -> FUN_00311600 (section-24 record: e030's projectile); 6 -> 0x56a2c4, 7 -> 0x56a2b0, 0xc ->
+0x56a320 (not read). e027 zone sets 6 / 7: m_atk / r_atk_0 (1-40 / 1-30, hit at keyframe 9 / 13, length
+66); e048 3 / 4: r_atk / m_atk; e030 set 8: 7 entries (atk_0..3, jp0..2, b_stp, st_btl). **Not found:**
+who leaves the attack state (class vt+0x1c = 0x539ea0 gives the state; its caller is not in the decomp:
+GUESS stand-in). **Next:** the attack object class of FUN_00541278 / FUN_00541310 (its update and overlap
+test against Vincent) for melee damage behind ?enemydmg=1.
+
+**Worker 0153 fixes (review of 0152).** Mode 5 state 0xe: C+0x1c0 |= 0x10 when FUN_0035f890 (=
+FUN_0035f7c0 ^ 1) returns 0, i.e. when the odds pass (was inverted). AI +0x20 is the scheduler interval
+in every write (mode 1 state 9, mode 6 state 6, the starts). Actor states 6 / 0x1b (vtables 0x58ae00 /
+0x58add0): enters FUN_00538218 / FUN_005382e0 = FUN_00565bd0(a, 0), FUN_00565d78(a, 0) (gun bit clear),
++0x118 |= 0x200; leaves 0x538260 / 0x538328 clear +0x118 bit 0x200; vt+0x24 FUN_00538278 / FUN_00538340
+(same state 0, 8 / 0x1f 0x20, 9 0x22, 0x20 / 0x21 0x59, else FUN_00537d58). State 5's other rows go
+FUN_00538420 -> FUN_00537aa0, so 0x80 + i from 5 / 6 / 0x1b is motion 0x1000 + i. Mode 6 states 2-5
+re-pick unconditionally (FUN_0035fe80 -> FUN_005608e8, FUN_0035fec0, FUN_0035fc98): translated with the
+candidate GUESS (the player); FUN_0035fec0's two-target switch (FUN_0054aa50 -> FUN_0054a9d0) warns.
