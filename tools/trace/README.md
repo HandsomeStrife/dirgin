@@ -201,6 +201,11 @@ are only taken in `TRACE_CALLLOG_FRAMES=lo:hi` and are written to `<name>.calls.
 the top 0x30000 bytes of the frame-log area, and scripts must be ≤ 1000 frames. Used for
 notes/enemy-research.md §11 (scripts k_bullet1 / k_bullet2).
 
+### Enemy motion-player fields (TRACE_EMP=1, worker 0149)
+With `TRACE_FIELDSET=enemy`, `TRACE_EMP=1` adds per soldier `mp_head` (MP+0x440..0x44f: +0x448 head layer,
++0x449 count, +0x44a blend-out layer) and `mp_layers` (8 x 0x30 at MP+0x200, decoded as for the player),
+MP = C+0x7c8. With `TRACE_ENEMIES=2` a record is 1448 bytes. Script: k_fire_emp15 (engage8 to f830).
+
 ### Lock-on fields (TRACE_LOCK=1, worker 0141)
 With `TRACE_FIELDSET=enemy`, `TRACE_LOCK=1` adds the camera's lock state (`cam_170` = CAM+0x170..0x22f,
 `cam_a0` = CAM+0xa0..0xff), `p_8`, `p_272`, `p_vel`, `p_st64`, `hud_60`, `ret_1b0` and per soldier `a38`,

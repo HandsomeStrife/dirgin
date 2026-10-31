@@ -212,8 +212,9 @@ echo "ok"
 
 step "enemy e027 (z128 soldier): skinned glb per variant + r_gst idle -> data/enemies"
 # clips: r_gst idle, r_gst_lk, r_st_a / r_st_f (enemy_ai.js), r_stlld0 / r_stlaf0 / r_stbf0 (hit / death, notes/enemy-research.md §10);
-# the m_* rows of stance 0x1e (class-2 weapons, FUN_00564228) for the same motions (ai.json model_clips lists them)
-run enemy_e027 $PY export_web_enemy.py export --model e027 --out "$DATA/enemies" --clips r_gst,r_gst_lk,r_st_a,r_st_f,r_stlld0,r_stlaf0,r_stbf0,m_gst,m_st_a,m_st_f,m_stlld0,m_stlaf0,m_stbf0
+# the m_* rows of stance 0x1e (class-2 weapons, FUN_00564228) for the same motions (ai.json model_clips lists them);
+# r_sq_a / r_sq_f / m_sq_*: crouched aim / fire (brain mode 1's posture change, motions 0x78 / 0x7b)
+run enemy_e027 $PY export_web_enemy.py export --model e027 --out "$DATA/enemies" --clips r_gst,r_gst_lk,r_st_a,r_st_f,r_stlld0,r_stlaf0,r_stbf0,m_gst,m_st_a,m_st_f,m_stlld0,m_stlaf0,m_stbf0,r_sq_a,r_sq_f,m_sq_a,m_sq_f
 [ -s "$DATA/enemies/e027.glb" ] || fail "data/enemies/e027.glb missing after the enemy export (log: $LOGS/enemy_e027.log)"
 grep '^wrote' "$LOGS/enemy_e027.log" | sed "s#$REPO/##" | cut -c1-160
 echo "ok"
@@ -221,7 +222,7 @@ echo "ok"
 step "z128's other enemy types (stage section 1: e048, e030, e036, e023, e024, e001) -> data/enemies"
 # Same decode as e027; one idle clip each (GUESS which idle the game starts: enemies.js IDLE, notes/enemy-model.md),
 # e048 / e030: the clips of the motions enemy_ai.js requests (their stance rows, ai.json model_clips)
-E048_CLIPS=r_gst,r_gst_lk,r_st_a,r_st_f,r_stlld0,r_stlaf0,r_stbf0,m_gst,m_gst_lk,m_st_a,m_st_f,m_stlld0,m_stlaf0,m_stbf0
+E048_CLIPS=r_gst,r_gst_lk,r_st_a,r_st_f,r_stlld0,r_stlaf0,r_stbf0,m_gst,m_gst_lk,m_st_a,m_st_f,m_stlld0,m_stlaf0,m_stbf0,r_sq_a,r_sq_f,m_sq_a,m_sq_f
 for mc in e048:$E048_CLIPS e030:st_a,look,stld0,stbf0 e036:m_gst e023:idle e024:idle e001:n_st; do
   m=${mc%%:*}
   run enemy_$m $PY export_web_enemy.py export --model $m --out "$DATA/enemies" --clips ${mc#*:}

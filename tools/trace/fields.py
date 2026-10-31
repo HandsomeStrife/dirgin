@@ -78,14 +78,15 @@ def find_enemies(mem):
         C, ST, AI = u32(mem, o + 0xE8), u32(mem, o + 0x17C), u32(mem, o + 0x184)
         if not (C and ST and AI) or not u32(mem, o + 0x28) & 1:
             continue
-        out.update({"E%d" % n: o, "EC%d" % n: C, "ES%d" % n: ST, "EA%d" % n: AI, "EI%d" % n: i})
+        out.update({"E%d" % n: o, "EC%d" % n: C, "ES%d" % n: ST, "EA%d" % n: AI, "EI%d" % n: i,
+                    "EM%d" % n: u32(mem, C + 0x7C8)})     # motion player, as the player's MP (C+0x7c8)
         n += 1
         if n == ENEMY_MAX:
             break
     if n == 0:
         raise RuntimeError("no active enemy actors in this state")
     for k in range(n, ENEMY_MAX):     # pad with the first enemy so the record layout is fixed
-        for p in ("E", "EC", "ES", "EA", "EI"):
+        for p in ("E", "EC", "ES", "EA", "EI", "EM"):
             out["%s%d" % (p, k)] = out["%s0" % p]
     return out
 
@@ -288,6 +289,16 @@ if __import__("os").environ.get("TRACE_LOCK"):
             (_p + "par", "E%d" % _k, 0x8, "u32", "L", "actor +8 parent (FUN_00329778 adds 0.5 x C+0x410 only when set)"),
             (_p + "c764", "EC%d" % _k, 0x764, "u32", "D", "C+0x765 byte = lock bone (FUN_00340760 <- status +0xa8 +0x14; FUN_00563720)"),
             (_p + "vel", "EC%d" % _k, 0x410, "vec4", "D", "C+0x410 velocity per tick (FUN_0034ea18)"),
+        ]
+
+# Opt-in with TRACE_EMP=1 (worker 0149, enemy fire / blend clips): each enemy's motion player
+# head and layer stack (MP = C+0x7c8, same layout as the player's mp_head / mp_layers).
+if __import__("os").environ.get("TRACE_EMP"):
+    for _k in range(ENEMY_MAX):
+        _p = "e%d_" % _k
+        ENEMY_FIELDS += [
+            (_p + "mp_head", "EM%d" % _k, 0x440, "bytes:16", "D", "MP+0x440 flags, +0x448 head layer, +0x449 layer count (FUN_005a91c8)"),
+            (_p + "mp_layers", "EM%d" % _k, 0x200, "layers", "L", "8 layers x 0x30 at MP+0x200 (as mp_layers)"),
         ]
 
 FIELDSET = __import__("os").environ.get("TRACE_FIELDSET")

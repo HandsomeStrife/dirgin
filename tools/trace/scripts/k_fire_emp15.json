@@ -1,0 +1,64 @@
+{
+"name": "k_fire_emp15",
+"frames": 830,
+"log_from": 778,
+"doc": "worker 0149: k_enemy_engage8 cut at 830 (no shots of ours), TRACE_FIELDSET=enemy TRACE_ENEMIES=2 TRACE_EMP=1: #66 / #67 motion-player layers around #66's f786 shot (fire clip r_st_f, blend back to r_st_a).",
+"events": [
+{
+"from": 10,
+"to": 230,
+"lx": 0.6,
+"ly": -1.0
+},
+{
+"from": 240,
+"to": 244,
+"buttons": [
+"cross"
+]
+},
+{
+"from": 280,
+"to": 284,
+"buttons": [
+"cross"
+]
+},
+{
+"from": 300,
+"to": 470,
+"lx": 0.6,
+"ly": -1.0
+},
+{
+"from": 490,
+"to": 494,
+"buttons": [
+"cross"
+]
+},
+{
+"from": 500,
+"to": 787,
+"lx": 0.6,
+"ly": -1.0
+},
+{
+"from": 795,
+"to": 799,
+"buttons": [
+"r1"
+]
+},
+{
+"from": 805,
+"to": 813,
+"rx": -1.0
+},
+{
+"from": 815,
+"to": 825,
+"ry": 1.0
+}
+]
+}

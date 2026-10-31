@@ -46,8 +46,9 @@ SEC24_STRIDE = 0x104
 AI_CLIPS = ('r_gst', 'r_gst_lk', 'r_st_a', 'r_st_f', 'r_stlld0', 'r_stlaf0', 'r_stbf0')
 # motion ids enemy_ai.js requests (FUN_0055b8e0 / FUN_00345818 index C+0x7fc rows): 0 / 2 idle (GUESS
 # which one the brain starts), 1 the flinch's end without the gun out (FUN_00598950), 0x40 aim (r_st_a for stance 0x1f), 0x57 fire (r_st_f), 0x28 / 0x2b /
-# 0x2c the flinch / death rows the k_hits12 trace shows (r_stlld0 / r_stbf0 / r_stlaf0)
-AI_MOTIONS = (0x00, 0x01, 0x02, 0x40, 0x57, 0x28, 0x2b, 0x2c)
+# 0x2c the flinch / death rows the k_hits12 trace shows (r_stlld0 / r_stbf0 / r_stlaf0), 0x78 crouched aim
+# (motions 0x18 / 0x16 / 0xf: FUN_005978e8 / FUN_005971d8 / FUN_00597c60) and 0x7b crouched fire (0xf)
+AI_MOTIONS = (0x00, 0x01, 0x02, 0x40, 0x57, 0x28, 0x2b, 0x2c, 0x78, 0x7b)
 STANCE_FILE = '06800009.bin'      # z128's 'bmd' file (stage 0x0680, k 9)
 
 

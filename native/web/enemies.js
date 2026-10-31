@@ -58,6 +58,10 @@ const CLIP = 'r_gst';            // GUESS: the idle the brain requests at activa
 const IDLE = { e027: CLIP, e048: 'r_gst', e030: 'st_a', e036: 'm_gst', e023: 'idle', e024: 'idle', e001: 'n_st' };
 const ALL = typeof location !== 'undefined' && new URLSearchParams(location.search).get('enemies') === 'all';
 const RATE = 0.5;                // MP+0x40c of every idle e027 in the save state (= FUN_003456c0 rate 1.0, as Vincent's)
+// A request's blend length = C+0x591 + 1 at the request (enemy_ai C.blendLen, FUN_00344608; C+0x591 is
+// loaded by FUN_00340bb8 per motion class, 10 = C+0x6c0's default from FUN_0033ff18 as player.js
+// GAME.blendFrames). T: k_fire_emp15 layer +0x1d = 11. BLEND_DEFAULT: an AI without C.blendLen.
+const BLEND_DEFAULT = 10;
 const VARIANT = 0;               // GUESS: LOD byte obj+0x44b (who sets it not decoded; notes/enemy-model.md); 0 = MODEL.glb
 // GUESS: MP+0x450 (set by script, FUN_00342240). Read from the save state's idle soldiers
 // (records 44-49, 66: 122 for six, 128 for 66), not from 41 / 42 (shot dead before the save).
@@ -289,14 +293,26 @@ export async function setupEnemies({ root, litPatch, light, extra = [] }) {
     return b => boneRows([R[b].x, R[b].y, R[b].z, R[b].w], [S[3 * b], S[3 * b + 1], S[3 * b + 2]],
                          [P[3 * b], P[3 * b + 1], P[3 * b + 2]], pos, face);
   }
+  // FUN_005aa2a8 on one layer: frame += rate x weight/128 x step (weight byte 128); a looped layer
+  // resets to 0 at n, any other holds n - 1 (player.js advLayer)
+  function advance(a, L) {
+    L.frame = Math.fround(L.frame + Math.fround(Math.fround(RATE * 1.0) * STEP));
+    const n = a.side.clips[L.clip].frames;
+    if (L.loop) { if (n <= L.frame) L.frame = 0; }
+    else if (n - 1 <= L.frame) L.frame = n - 1;
+  }
   return {
     actors, deadRecs, add, remove, partPose,
     // the drawn actor that draws first (FUN_005a7978 list head side); play.js sets Vincent's body
     set mpHead(o) { base = o; },
-    // one game frame: draw pose = this frame's clip frame, then FUN_005aa2a8's advance.
-    // ai (enemy_ai.js world, optional): the clip each AI-driven soldier's body asked for
-    // (C+0x570); a new clip starts at frame 0. GUESS: no blend between clips (flags 0x82 / 0x83
-    // of FUN_00345818 not translated), every clip loops at its frame count.
+    // one game frame: draw pose = this frame's clip frame(s), then FUN_005aa2a8's advance.
+    // ai (enemy_ai.js world, optional): each motion request of an AI-driven soldier (C.req, C.clip,
+    // C.loop) pushes a head layer and the old head becomes the blend-out layer (MP+0x448 head / +0x44a
+    // blend-out index): the new head's weight MP+0x408 = (len - rem) / len, len = C+0x591 + 1 (11),
+    // rem -= step per frame; the head and, while blending, the blend-out layer advance. When rem
+    // reaches 0 the blend-out layer is dropped. T: k_fire_emp15 (#66 / #67 MP layers, blend_len
+    // 9.8 -> 0 by 1.2, the lower layers frozen) and Vincent's SpeedAnimator (same code, player.js).
+    // A looped layer (+0x1e bit 0, flags 0x83) wraps at n; the others hold n - 1.
     tick(ai) {
       // the part test (enemy_ai playerBulletHit -> FUN_005ad118) reads each soldier's MP skeleton:
       // the pose drawn last (FUN_005a87a0 from MP+0x180), placed as the body is drawn
@@ -306,14 +322,33 @@ export async function setupEnemies({ root, litPatch, light, extra = [] }) {
         // body matrix: the AI's body C+0x20 facing (enemy_ai turnBody, FUN_0034de50) and C+0x30
         // position, drawn as at setup (play.js bodyYaw: rotation.y = atan2(face.x, face.z) + pi)
         if (s) { a.body.position.set(...s.pos); a.body.rotation.y = Math.atan2(s.face[0], s.face[2]) + Math.PI; }
-        const want = s && a.lp.clips[s.C.clip] && a.side.clips[s.C.clip] ? s.C.clip : a.clip;
-        if (want !== a.clip) { a.clip = want; a.frame = 0; }
-        a.pose.poseLocal(a.clip, a.frame, null, 0, 1);
+        const has = c => !!(a.lp.clips[c] && a.side.clips[c]);
+        if (!a.head) a.head = { clip: a.clip, frame: a.frame, loop: true };
+        // first frame under the AI: its body's clip as it stands (no request yet, no blend)
+        if (s && a.req === undefined) {
+          a.req = s.C.req;
+          if (has(s.C.clip) && s.C.clip !== a.head.clip) a.head = { clip: s.C.clip, frame: 0, loop: s.C.loop !== false };
+        }
+        if (s && s.C.req !== a.req) {
+          a.req = s.C.req;
+          if (has(s.C.clip)) {
+            a.out = a.head;
+            a.head = { clip: s.C.clip, frame: 0, loop: s.C.loop !== false };
+            const len = (s.C.blendLen ?? BLEND_DEFAULT) + 1;
+            a.blend = { len, rem: len };
+          }
+        }
+        const b = a.blend, blending = a.out && b && b.rem > 0;
+        if (!blending) a.out = null;
+        const w = blending ? (b.len - b.rem) / b.len : 1;                    // MP+0x408
+        a.weight = w;                                                          // drawn this frame (tests)
+        a.pose.poseLocal(a.head.clip, a.head.frame, a.out ? a.out.clip : null, a.out ? a.out.frame : 0, w);
+        a.clip = a.head.clip; a.frame = a.head.frame;
         a.posed = { pos: a.body.position.toArray(), heading: a.body.rotation.y - Math.PI };
         // GUESS (other types): e027's RATE (MP+0x40c 0.5) for every type
-        a.frame = Math.fround(a.frame + Math.fround(Math.fround(RATE * 1.0) * STEP));
-        // the death motion's clip holds its last frame (enemy_ai C.hold; notes §10.5: r_stlaf0 held)
-        if (a.side.clips[a.clip].frames <= a.frame) a.frame = s && s.C.hold ? a.side.clips[a.clip].frames - 1 : 0;
+        advance(a, a.head);
+        if (blending) { advance(a, a.out); b.rem = Math.fround(b.rem - STEP); if (b.rem <= 0) b.rem = 0; }
+        a.frame = a.head.frame;
       }
     },
   };

@@ -18,7 +18,7 @@
 //   7. no console errors or page errors.
 //   node native/web/test_enemies_page.mjs          (needs data/enemies + playwright; else SKIP, exit 0)
 // Serves native/web with python3 http.server on a free port. three.js comes from the CDN (play.html importmap).
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { spawn, execSync } from 'node:child_process';
@@ -200,7 +200,7 @@ try {
     const fire = again[again.length - 1] || { id: null, side: 0 };
     P.aim.press('r1'); await wait(1500);                                    // fire, the reticle off him
 
-    return { poseErr, aimErr, lockId, lockErr, heldId, heldErr, offErr, dropAt: (steps.find(x => x.id !== 66) || {}).i, fireId: fire.id, fireSide: fire.side, fireI, upDrop, shotsNoLock, hpNoLock, stateNoLock, hp0, hp: a.hp, astate: a.astate, mode: a.ai.mode, clip: a.C.clip, drawn: body.clip, hold: a.C.hold };
+    return { poseErr, aimErr, lockId, lockErr, heldId, heldErr, offErr, dropAt: (steps.find(x => x.id !== 66) || {}).i, fireId: fire.id, fireSide: fire.side, fireI, upDrop, shotsNoLock, hpNoLock, stateNoLock, hp0, hp: a.hp, astate: a.astate, mode: a.ai.mode, clip: a.C.clip, drawn: body.clip, hold: a.C.hold, drawnLoop: body.head ? body.head.loop : null, drawnFrame: body.frame, drawnN: body.side.clips[body.clip]?.frames };
   });
   ok(sh.poseErr < 1e-3, `part-test pose = the drawn joints (max ${sh.poseErr.toExponential(1)})`);
   ok(sh.aimErr < 0.01, `reticle ray on #66's chest (angle error ${sh.aimErr.toFixed(4)} rad)`);
@@ -210,7 +210,8 @@ try {
      `keep test, yaw increasing (no shot): held for ${sh.upDrop.held} x 0.01 rad (ray ${sh.upDrop.side.toFixed(2)} u beside him), then dropped to ${JSON.stringify(sh.upDrop.ids)}`);
   ok(sh.shotsNoLock > 0 && sh.hp0 === 1 && sh.hpNoLock === 1 && sh.stateNoLock !== 7, `the same shot (step ${sh.fireI}, ${sh.shotsNoLock} fired) with the lock off (auto-lock option off): #66 survives (HP ${sh.hpNoLock}, actor state ${sh.stateNoLock})`);
   ok(sh.fireId === 66 && sh.hp0 === 1 && sh.hp === 0 && sh.astate === 7 && sh.mode === 0, `R1 with the reticle ${sh.fireSide.toFixed(2)} u off #66 (auto-aim, lock #${sh.fireId}): HP ${sh.hp0} -> ${sh.hp}, actor state ${sh.astate}, AI mode ${sh.mode}`);
-  ok(sh.drawn === sh.clip && /^r_st(laf|bf)0$/.test(sh.clip) && sh.hold, `#66 draws his death clip ${sh.drawn} (held)`);
+  ok(sh.drawn === sh.clip && /^r_st(laf|bf)0$/.test(sh.clip) && sh.hold && sh.drawnLoop === false && sh.drawnFrame === sh.drawnN - 1,
+     `#66 draws his death clip ${sh.drawn} (held: head layer loop ${sh.drawnLoop}, frame ${sh.drawnFrame} of ${sh.drawnN})`);
   // 6. an e048 (record 24). After step 5: activating it earlier shifts #66's clip phase (frames
   // spent waiting for its model), which moves bone 3 off the lock check's limit.
   const e48 = await pg.evaluate(async () => {
@@ -226,6 +227,61 @@ try {
   });
   ok(e48 && e48.model === 'e048' && e48.ai && e48.drawn === 'm_gst' && e48.clip === 'm_gst' && e48.posed,
      `record 24 (e048): body drawn in its stance clip, AI actor, posed for the part test (${JSON.stringify(e48)})`);
+  // 7. Dan's report 20261031T000852Z-9974: the alley guard, record 51 (e027, stance 0x1e). Activated and
+  // sent message 2 (trigger 90's wake), script 142 puts him in brain mode 1 (FUN_00362998); he fires
+  // (m_st_f). The body plays the game's motion-player blend (enemies.js; k_fire_emp15): each request is
+  // a new head layer, the old head blends out over 11 clip ticks (rem -= STEP), so after the fire
+  // request the next request (m_st_a, class 6) leaves m_st_f as the blend-out layer, fading out.
+  const g51 = await pg.evaluate(async () => {
+    const P = window.__play, ai = P.enemyAI, obj = k => ai.objects.get(k + 22);
+    // stand where Dan's report has Vincent (test aid: position write, as in step 5)
+    const c = P.ctrl;
+    c.pos = { x: -786.83, y: -159.97, z: -630.22 }; c.prev = { ...c.pos }; c.locate(); if (c.onTeleport) c.onTeleport();
+    ai.setActive(obj(51), 1);
+    const t1 = performance.now();
+    while (!P.enemies.actors.some(a => a.rec === 51) && performance.now() - t1 < 15000) await new Promise(r => setTimeout(r, 100));
+    const body = P.enemies.actors.find(a => a.rec === 51);
+    if (!body) return null;
+    const log = [], tick = P.enemies.tick;
+    P.enemies.tick = x => { tick(x); log.push({ head: body.head && body.head.clip, out: body.out ? body.out.clip : null, rem: body.blend ? body.blend.rem : null, len: body.blend ? body.blend.len : null, w: body.weight, outF: body.out ? body.out.frame : null }); };
+    ai.runEvent(obj(51), 2, [2, 0, 't90', 0]);
+    const s51 = ai.actors.find(a => a.rec === 51);
+    const t2 = performance.now();
+    while (!log.some(l => l.out === 'm_st_f') && performance.now() - t2 < 20000) await new Promise(r => setTimeout(r, 100));
+    await new Promise(r => setTimeout(r, 600));
+    P.enemies.tick = tick;
+    const mode = s51 ? s51.ai.mode : null;
+    ai.setActive(obj(51), 0);
+    return { mode, log };
+  });
+  {
+    const L = g51 ? g51.log : [];
+    const i = L.findIndex(l => l.out === 'm_st_f');
+    const fade = [];                                                          // the frames m_st_f is the blend-out layer
+    for (let j = i; i >= 0 && j < L.length && L[j].out === 'm_st_f'; j++) fade.push(L[j]);
+    const fired = L.some(l => l.head === 'm_st_f');
+    ok(g51 && g51.mode === 1 && fired && i >= 0 && L[i].head === 'm_st_a' && fade.length >= 8 && fade[fade.length - 1].outF > fade[0].outF,
+       `record 51 (mode ${g51 && g51.mode}): fire clip m_st_f drawn, then blends out under m_st_a over ${fade.length} frames, its frame advancing ${fade[0]?.outF?.toFixed(1)} -> ${fade[fade.length - 1]?.outF?.toFixed(1)}`);
+    // The game's fade (k_fire_emp15 #66: r_st_f is the blend-out layer f788-797): the new head's countdown
+    // +0x24 and length +0x1d each frame. The page's countdown after each frame must match, and the weight
+    // it drew that frame (MP+0x408) = (len - the countdown before the frame) / len.
+    const tf = path.join(here, '../../tools/trace/out/k_fire_emp15.jsonl');
+    if (!existsSync(tf)) ok(false, 'k_fire_emp15.jsonl missing (tools/trace/out; TRACE_EMP=1 run): blend weights unchecked');
+    else {
+      const R = readFileSync(tf, 'utf8').trim().split('\n').slice(1).map(l => JSON.parse(l));
+      const game = [];
+      for (const r of R) {
+        const h = r.e0_mp_head, hd = parseInt(h.slice(16, 18), 16), bo = parseInt(h.slice(20, 22), 16);
+        if (bo !== 0xff && r.e0_mp_layers[bo]?.clip === 'r_st_f') game.push({ rem: r.e0_mp_layers[hd].blend_len, len: r.e0_mp_layers[hd].blend_frames });
+      }
+      const len = game[0]?.len;
+      const want = game.map((g, j) => ({ rem: g.rem, w: (len - (j ? game[j - 1].rem : len)) / len }));
+      const bad = want.length !== fade.length ? -2 : want.findIndex((g, j) => Math.abs(fade[j].rem - g.rem) > 1e-4 || Math.abs(fade[j].w - g.w) > 1e-6 || fade[j].len !== len);
+      ok(game.length >= 8 && bad === -1,
+         `record 51 blend vs k_fire_emp15 (len ${len}): countdown game ${want.map(g => g.rem.toFixed(1)).join(' ')} page ${fade.map(l => l.rem?.toFixed(1)).join(' ')}; ` +
+         `weight game ${want.map(g => g.w.toFixed(3)).join(' ')} page ${fade.map(l => l.w?.toFixed(3)).join(' ')}${bad >= 0 ? ` (first diff at ${bad})` : bad === -2 ? ' (length differs)' : ''}`);
+    }
+  }
   ok(errs.length === 0, `no console errors${errs.length ? ': ' + errs.slice(0, 3).join(' | ') : ''}`);
 } finally {
   await browser.close();

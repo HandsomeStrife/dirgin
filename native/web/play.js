@@ -641,7 +641,10 @@ async function main() {
       onDeactivate: rec => { enemies.remove(rec); },
       // GUESS: FUN_005449f0 probe 3 = the page's collision triangle set (probe sets not decoded)
       los: (a, b) => !!(col.segment && col.segment({ x: a[0], y: a[1], z: a[2] }, { x: b[0], y: b[1], z: b[2] })) }) : null;
-    if (enemyAI) for (const k of AWAKE) enemyAI.addActor({ rec: k });
+    // actor state +0x104 of the save's soldiers (T: k_enemy_engage8 f760: #66 = 1, #67 = 2); they were
+    // activated before the save, so FUN_00559748's pick is not rerun (GUESS: what put #66 in 1 is not decoded)
+    const AWAKE_STATE = { 44: 1, 45: 2 };
+    if (enemyAI) for (const k of AWAKE) enemyAI.addActor({ rec: k, astate: AWAKE_STATE[k] });
   } catch (e) { console.warn('enemy AI off:', e.message); enemyAI = null; }
   // test aids that move him (H, ?ladder=): the cloth restarts from the new pose (cloth.js reset)
   // and the camera resets as at spawn (player.js reset(): FUN_003285d0's snap; GUESS: the

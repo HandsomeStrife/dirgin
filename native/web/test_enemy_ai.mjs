@@ -178,6 +178,8 @@ function run(name) {
   const mism = {}, first = {};
   const fire = { sim: [], game: [] }, hp = { sim: [], game: [] }, wake = { sim: null, game: null };
   let clockBad = 0, dueBad = 0, modeAllBad = 0, dueAll = 0;
+  // motion requests (enemy_ai C.req: a new head layer, enemies.js blend) of #66 / #67: frame:clip:loop
+  const pushes = [[], []], reqSeen = acts.slice(0, 2).map(a => a.C.req);
   // facing (body C+0x20): the sim's heading vs the game's, every frame, closed loop
   const yaw = v => Math.atan2(v[0], v[2]) * 180 / Math.PI;
   const face = [{ err: [], moved: 0, bit30: 0 }, { err: [], moved: 0, bit30: 0 }];
@@ -195,6 +197,7 @@ function run(name) {
       if (g.mode !== a.ai.mode) modeAllBad++;
       if (g.due !== a.ai.due) dueAll++;
       if (k > 1) continue;
+      if (a.C.req !== reqSeen[k]) { reqSeen[k] = a.C.req; pushes[k].push(`${f}:${a.C.clip}:${a.C.loop ? 1 : 0}`); }
       if (wake.game == null && g.mode === 2 && k === 0) wake.game = f;
       if (wake.sim == null && a.ai.mode === 2 && k === 0) wake.sim = f;
       const sim = { mode: a.ai.mode, bstate: a.ai.bstate, interval: a.ai.interval,
@@ -256,7 +259,30 @@ function run(name) {
     gap(extra.length === 0, `${name}: sim hits the game does not have: [${extra}] (#67's f875 shot misses in the game; hit test BULLET_R GUESS)`);
   }
   console.log(`${name}: game fire frames (r_st_f starts) ${fire.game.join(' ')}`);
+  // k_fire_emp15 replays this script's inputs to f830 with #66 / #67's motion-player layers
+  // (TRACE_EMP=1): every head-layer push (MP+0x448 changes) with its clip and loop flag (+0x1e bit 0)
   if (logs.length) console.log(`${name}: log ${[...new Set(logs)].slice(0, 8).join(' | ')}`);
+  if (name === 'k_enemy_engage8') checkPushes(pushes, 830);
+}
+
+// Head-layer pushes of the game (k_fire_emp15: e0 = #66, e1 = #67) vs the sim's motion requests,
+// frames < `to` (frame = record index, the same convention as the fields above).
+function checkPushes(pushes, to) {
+  const file = path.join(OUT, 'k_fire_emp15.jsonl');
+  if (!existsSync(file)) { console.log('skip motion-request pushes: k_fire_emp15.jsonl missing (TRACE_EMP=1 run)'); return; }
+  const R = readFileSync(file, 'utf8').trim().split('\n').slice(1).map(l => JSON.parse(l));
+  for (let k = 0; k < 2; k++) {
+    const game = [];
+    for (let i = 1; i < R.length; i++) {
+      const h0 = parseInt(R[i - 1][`e${k}_mp_head`].slice(16, 18), 16), h = parseInt(R[i][`e${k}_mp_head`].slice(16, 18), 16);
+      if (h === h0) continue;
+      const L = R[i][`e${k}_mp_layers`][h];
+      game.push(`${R[i].frame}:${L.clip}:${L.lflags & 1}`);
+    }
+    const lo = R[1].frame;
+    const sim = pushes[k].filter(x => { const f = +x.split(':')[0]; return f >= lo && f < to; });
+    ok(game.length > 0 && game.join(' ') === sim.join(' '), `k_fire_emp15 #${66 + k}: motion pushes (frame:clip:loop) game [${game.join(' ')}] sim [${sim.join(' ')}]`);
+  }
 }
 
 for (const n of TRACES) run(n);
@@ -269,7 +295,9 @@ for (const [side, damage, dist, flight] of [[0, true, 30, 3], [40, true, 30], [0
   const rec = data.records[44];
   const player = { pos: [rec.pos[0] - dist, rec.pos[1], rec.pos[2]], hp: 780, id: 0x16, f118: 0, s64: 0 };
   const W = AI.createEnemyAI({ data, player, rand: () => 0.5, damage, quiet: true });
-  const a = W.addActor({ rec: 44, mode: 2, hp: 1 });
+  // #66's save-state actor state 1 (play.js AWAKE_STATE): 1 -> 3 = motion 6, the first shot spawns its bullet
+  // (from the activation state 2, motion 5 holds C+0x564 0x4000 and the first shot has none)
+  const a = W.addActor({ rec: 44, mode: 2, hp: 1, astate: 1 });
   let shotAt = null, hitAt = null;
   for (let i = 0; i < 40; i++) {
     const ev = W.tick(1.2, player.pos, player.pos);
@@ -410,6 +438,52 @@ for (const [side, damage, dist, flight] of [[0, true, 30, 3], [40, true, 30], [0
     cross(W, 95);
     ok(a44.ai.mode === 2 && a45.ai.mode === 2 && got.length === 0, `trigger 95: 44 / 45 AI mode ${a44.ai.mode} / ${a45.ai.mode} (2 / 2), no activations (${got.length})`);
   }
+
+  // FUN_005641c0 with act 0 (the brains' FUN_0055b8e0(a, st, 0, 0)): the same motion as now is not
+  // restarted, any class. #66 in state 1 already in motion 6 (its row requested): 1 -> 3 = motion 6
+  // (FUN_00537aa0) keeps that motion and asks for no clip.
+  {
+    const { W, player } = mk();
+    const a44 = W.addActor({ rec: 44, astate: 1 });
+    a44.C.motion = { cls: 6, phase: 0, timer: 0, done: 0, t: 0, next74: 0xe, started: true };
+    const m0 = a44.C.motion, req0 = a44.C.req;
+    cross(W, 95);
+    let j = 0;
+    while (a44.astate !== 3 && j++ < 40) W.tick(1.2, player.pos, player.pos);
+    ok(a44.astate === 3 && a44.C.motion === m0 && a44.C.req === req0,
+       `actor state 1 -> 3 in motion 6: motion kept (${a44.C.motion === m0}), no new clip request (${a44.C.req - req0})`);
+  }
+
+  // Activation without a given state (FUN_00559748 -> FUN_0055b8e0(a, 2, 1, 0)): actor state 2, and on
+  // the wake 2 -> 3 = motion 5 (raise the gun): r_st_a without loop, then looped once its timer > 8.
+  // T: k_fire_emp15 #67 (state 2 in the save) pushes r_st_a:0 at f796, r_st_a:1 at f804 (step 1.2).
+  {
+    const { W, player } = mk();
+    const a45 = W.addActor({ rec: 45 });
+    const st0 = a45.astate, gun0 = a45.C.gun, mot0 = a45.C.motion && a45.C.motion.cls;
+    const push = [];
+    let req = a45.C.req;
+    cross(W, 95);
+    for (let i = 0; i < 40; i++) {
+      W.tick(1.2, player.pos, player.pos);
+      if (a45.C.req !== req) { req = a45.C.req; push.push([W.S.frame, `${a45.C.clip}:${a45.C.loop ? 1 : 0}`]); }
+    }
+    let want = [[796, 'r_st_a:0'], [804, 'r_st_a:1']];
+    const tf = path.join(OUT, 'k_fire_emp15.jsonl');
+    if (existsSync(tf)) {
+      const R = readFileSync(tf, 'utf8').trim().split('\n').slice(1).map(l => JSON.parse(l));
+      want = [];
+      for (let i = 1; i < R.length && want.length < 2; i++) {
+        const h0 = R[i - 1].e1_mp_head.slice(16, 18), h = R[i].e1_mp_head.slice(16, 18);
+        if (h !== h0) { const L = R[i].e1_mp_layers[parseInt(h, 16)]; want.push([R[i].frame, `${L.clip}:${L.lflags & 1}`]); }
+      }
+    }
+    const got2 = push.slice(0, 2);
+    ok(st0 === 2 && gun0 === 0 && mot0 === 3 && got2.length === 2 && got2.map(x => x[1]).join(' ') === want.map(x => x[1]).join(' ')
+       && got2[1][0] - got2[0][0] === want[1][0] - want[0][0],
+       `activated #67 (no astate): state ${st0} (2), gun ${gun0}, motion ${mot0} (3); wake pushes ${got2.map(x => x[1] + '@+' + (x[0] - got2[0][0])).join(' ')} ` +
+       `(k_fire_emp15 #67: ${want.map(x => x[1] + '@+' + (x[0] - want[0][0])).join(' ')})`);
+  }
 }
 
 // Other types (notes/enemy-ai-hook.md "Other types"). Every placement is the actor class 0x58e1f8; what
@@ -452,6 +526,93 @@ else {
   for (const m of ['e027', 'e048', 'e030', 'e036', 'e023', 'e024', 'e001']) W.setActive(W.objects.get(pick(m) + 22), 1);
   ok(JSON.stringify(got) === JSON.stringify([['e027', true], ['e048', true], ['e030', true], ['e036', false], ['e023', false], ['e024', false], ['e001', false]]),
      `activation per type: ${got.map(([m, a]) => m + (a ? ' actor' : ' -')).join(', ')} (actor for e027 / e048 / e030)`);
+}
+
+// Brain mode 1 (FUN_00362998, start FUN_003628f8): Dan's report 20261031T000852Z-9974, the alley guard
+// record 51 (e027, stance 0x1e). Trigger 56 activates 50 / 51 in mode 0; trigger 90 (Vincent walking
+// north up the alley) sends them message 2: script 141 sets #50 mode 2, script 142 sets #51 mode 1.
+// Mode 1 = the mode-2 shooter + a posture change in state 4 (C+0x808 bit 3): >= 0x79 ticks since the
+// last change and a draw < 0.2 -> actor state 5 (FUN_00565bd0(a, 1): crouched, height 0.6 x), body
+// motion 0x18 (m_sq_a, C+0x564 0x4000 while it runs) -> 0x16, combat off for 0x1f ticks; the next
+// shot is class 0xf (m_sq_f, row 0x7b); the next change stands him up (state 3, motion 0x19 -> 6).
+{
+  const r51 = data.records[51];
+  const walk = (W, player, from, to, n) => {
+    for (let i = 1; i <= n; i++) {
+      const o = from.map((x, j) => x + (to[j] - x) * (i - 1) / n), p = from.map((x, j) => x + (to[j] - x) * i / n);
+      player.pos = p; W.tick(1.0, o, p);
+    }
+  };
+  const run = (draw, frames) => {
+    const player = { pos: [-1227.6, -95, -1120], hp: 780, id: 0x16, f118: 0, s64: 0 };
+    const W = AI.createEnemyAI({ data, player, rand: () => draw, quiet: true, deadRecs: [41, 42, 43] });
+    walk(W, player, [-1227.6, -95, -1120], [-1227.6, -95, -1080], 10);              // trigger 56
+    walk(W, player, [-786.6, -160, -760], [-786.6, -160, -630], 40);                 // trigger 90
+    const a = W.actors.find(x => x.rec === 51);
+    const seen = [];
+    for (let i = 0; i < frames && a; i++) {
+      const e = W.tick(1.0, player.pos, player.pos);
+      seen.push({ f: W.S.frame, now: W.S.now, bst: a.ai.bstate, btime: a.ai.btime, e, astate: a.astate, stance: a.stance, h: a.size.h, f564: a.C.f564,
+                  mot: a.C.motion && a.C.motion.cls, clip: a.C.clip, comb: a.ai.cmode });
+    }
+    return { W, a, seen };
+  };
+  if (!r51 || r51.stance !== 0x1e || !data.model_clips?.e027?.m_sq_a) ok(false, 'ai.json: record 51 / m_sq_a missing (rebuild data/enemies)');
+  else {
+    const H = data.sizes[r51.zones].h, shotOf = (R, s) => s.e.includes(`shot ${R.a.id}`);
+    const A = run(0.5, 300);
+    const shots = A.a ? A.seen.filter(s => shotOf(A, s)).length : 0;
+    ok(A.a && A.a.ai.mode === 1 && A.a.astate === 3 && shots >= 15,
+       `mode 1: record 51 wakes on trigger 90 (mode ${A.a?.ai.mode}, actor state ${A.a?.astate}) and fires (${shots} shots in 300 frames, weapon ${r51.weapon} interval ${data.weapons[r51.weapon].interval})`);
+    ok(A.seen.length && A.seen.every(s => s.astate === 3 && s.stance === 0), 'mode 1, draws 0.5: never crouches (FUN_0040b5c0 < 0.2 never true)');
+    const B = run(0.1, 400);
+    const i5 = B.seen.findIndex(s => s.astate === 5), c = B.seen[i5];
+    ok(i5 >= 0 && c.stance === 1 && Math.abs(c.h - Math.fround(H * 0.6)) < 1e-4 && c.comb === 0 && !!(c.f564 & 0x4000) && c.mot === 0x18 && c.clip === 'm_sq_a',
+       `mode 1, draws 0.1: crouches at f${c?.f}: stance ${c?.stance}, height ${c?.h?.toFixed(2)} (0.6 x ${H}), combat layer ${c?.comb}, C+0x564 0x4000 ${!!(c?.f564 & 0x4000)}, motion 0x${c?.mot?.toString(16)}, clip ${c?.clip}`);
+    const quiet = i5 >= 0 && B.seen.slice(i5, i5 + 0x1f - 5).every(s => !shotOf(B, s));
+    const after16 = i5 >= 0 ? B.seen.slice(i5).find(s => s.mot === 0x16) : null;
+    // FUN_005978e8: timer 0 on the first update, + step after each, ends when > 20: 21 frames at step 1.0
+    ok(quiet && after16 && !(after16.f564 & 0x4000) && after16.f - c.f === 21, `mode 1: no shot while the combat layer is off; motion 0x18 -> 0x16 at f${after16?.f} (+${after16 ? after16.f - c.f : '?'}, want +21; 0x4000 cleared)`);
+    const sq = i5 >= 0 ? B.seen.slice(i5).find(s => shotOf(B, s)) : null;
+    ok(sq && sq.clip === 'm_sq_f' && sq.mot === 0xf, `mode 1: first crouched shot f${sq?.f}: class 0x${sq?.mot?.toString(16)} (0xf), clip ${sq?.clip} (m_sq_f)`);
+    const u = i5 >= 0 ? B.seen.slice(i5).find(s => s.astate === 3) : null;
+    ok(u && u.stance === 0 && u.mot === 0x19 && u.clip === 'm_st_a' && Math.abs(u.h - H) < 1e-4,
+       `mode 1: stands up again at f${u?.f}: motion 0x${u?.mot?.toString(16)} (0x19), clip ${u?.clip}, height ${u?.h}`);
+    // FUN_00362998 timing (no mode-1 trace: the tracer can't follow actors activated mid-run, so this
+    // checks the decoded constants, not game frames). The brain runs every 5 ticks (interval, start
+    // FUN_003628f8); a posture change happens on the first run with bTime >= 0x79 after state 4's
+    // btime (case 3), state 5 ends on the first run with bTime >= 0x1f after the change.
+    // Each wait = the constant rounded up to the next run: [k, k + 5).
+    // Wait = ticks from the btime in force the frame before (state 4's entry, or the change) to the change.
+    const at = (from, pred) => B.seen.findIndex((s, n) => n >= from && pred(s));
+    const jc = at(1, s => s.astate === 5), j3 = at(jc, s => s.bst !== 5), ju = at(j3, s => s.astate === 3);
+    const d = y => (y > 0 ? (B.seen[y].now - B.seen[y - 1].btime) << 16 >> 16 : NaN);
+    const inRun = (v, k) => v >= k && v < k + 5;
+    ok(inRun(d(jc), 0x79) && inRun(d(j3), 0x1f) && inRun(d(ju), 0x79),
+       `mode 1 timing: crouch f${B.seen[jc]?.f} (+${d(jc)} ticks since state 4's btime, want [0x79, 0x79 + 5)); ` +
+       `brain state 5 -> 3 at f${B.seen[j3]?.f} (+${d(j3)} since the crouch, want [0x1f, 0x1f + 5)); stand f${B.seen[ju]?.f} (+${d(ju)}, want [0x79, 0x79 + 5))`);
+  }
+}
+
+// Brain mode 1 state 8 (FUN_00362998, the non-shooter e030 #7): with a target, gate FUN_00310c40 >= 0x18,
+// bTime >= 0x3d, then a draw: (int)(r x 11) == 0 -> the attack pick FUN_0035ff98 (stand-in: none).
+{
+  const rec = data.records[7];
+  const pick = draw => {
+    const player = { pos: [rec.pos[0] - 30, rec.pos[1], rec.pos[2]], hp: 780, id: 0x16, f118: 0, s64: 0 };
+    const logs = [];
+    const W = AI.createEnemyAI({ data, player, rand: () => draw, quiet: true, log: m => logs.push(m) });
+    const a = W.addActor({ rec: 7, mode: 1 });
+    let wait = null;
+    for (let i = 0; i < 200; i++) {
+      W.tick(1.0, player.pos, player.pos);
+      if (wait == null && logs.some(m => m.includes('FUN_0035ff98'))) wait = (W.S.now - a.ai.btime) << 16 >> 16;   // ticks since btime (FUN_0035eb30)
+    }
+    return { st: a.ai.bstate, wait, picked: wait != null };
+  };
+  const hi = pick(0.1), lo = pick(0.05);                                    // 0.1 x 11 = 1.1 -> 1: no pick
+  ok(hi.st === 8 && !hi.picked && lo.st === 8 && lo.picked && lo.wait >= 0x3d && lo.wait < 0x3d + 5,
+     `mode 1 state 8 (e030): draw 0.1 -> no attack pick (${hi.picked}); draw 0.05 -> pick after ${lo.wait} ticks (want [0x3d, 0x3d + 5))`);
 }
 
 console.log((fail ? `${fail} FAILED` : 'all ok') + (gaps ? ` (${gaps} known gaps)` : ''));

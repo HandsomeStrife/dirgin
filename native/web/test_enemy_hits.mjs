@@ -252,33 +252,56 @@ for (const [k, model, stand, size, deathClip] of [[28, 'e048', 'r_st_a', [5, 18]
   if (!existsSync(sideP) || !existsSync(binP)) console.log('SKIP e030 flinch end: data/enemies/e030.* missing');
   else {
     const P = modelPose(json(sideP).local_pose, f32(binP), 'st_a', 0);
-    const run = (k, gun, pose) => {
+    const run = (k, gun, pose, init = {}) => {
       const php = { pos: [0, 0, -200], hp: 780, id: 0x16, f118: 0, s64: 0 };
       const ai = createEnemyAI({ data, player: php, quiet: true, log: () => {} });
       ai.boneWorld = a => b => boneRows(pose.R[b], pose.S[b], pose.P[b], a.pos, a.face);
-      const a = ai.addActor({ rec: k, mode: 0, pos: [0, 0, 0], face: [0, 0, 1] });
+      const a = ai.addActor({ rec: k, mode: 0, pos: [0, 0, 0], face: [0, 0, 1], ...init });
       if (gun === 1) a.C.gun = 1;
       ai.playerShot([0, -6, -60], [0, -6, 60], straight);
-      const ev = [], clips = [];
-      for (let i = 0; i < 300; i++) { if (gun === 0) a.C.gun = 0; if (gun === 1) a.C.gun = 1; ev.push(...ai.tick(1.2, [0, 0, -200], [0, 0, -200])); clips.push(a.C.clip); }
-      return { a, ev, clips };
+      const ev = [], clips = [], bits = [];
+      for (let i = 0; i < 300; i++) {
+        if (gun === 0) a.C.gun = 0; if (gun === 1) a.C.gun = 1;
+        ev.push(...ai.tick(1.2, [0, 0, -200], [0, 0, -200])); clips.push(a.C.clip);
+        bits.push({ f564: a.C.f564 >>> 0, f1c0: a.C.f1c0, cls: a.C.motion ? a.C.motion.cls : -1, bstate: a.ai.bstate, mode: a.ai.mode });
+      }
+      return { a, ev, clips, bits };
     };
     const r = run(7, 0, P), id = r.a.id, mine = r.ev.filter(e => e.startsWith(`clip ${id} `));
     const flinched = r.clips.indexOf('stld0');
     ok(r.a.hp > 0 && flinched >= 0 && r.a.C.clip === 'st_a' && r.clips.slice(flinched).includes('st_a') && !r.ev.includes(`clip ${id} null`),
        `e030 #7: non-lethal hit (HP ${r.a.hp}) -> flinch stld0 -> back to row 1 ${r.a.C.clip} (st_a); clip events ${mine.join(', ')}`);
-    // unpinned: the hit wakes #67, actor state 3 sets the bit (its enter FUN_005380a0), so the flinch's end asks row 0x40, never row 1
+    // unpinned: the hit wakes #67 from state 2 (gun bit clear). The flinch's busy bit (enter 0x5988b8)
+    // holds the brain in state 1, so state 3's enter (FUN_005380a0, sets the bit) runs only after the
+    // flinch: its end asks row 1 (r_gst), then state 3 raises the gun (motion 5 -> r_st_a). No trace
+    // covers this case (k_hits12's #67 is already in state 3 when hit).
     const g = run(45, null, P0), ge = g.ev.filter(e => e.startsWith(`clip ${g.a.id} `)), gf = ge.indexOf(`clip ${g.a.id} r_stlld0`);
-    ok(g.a.hp > 0 && gf >= 0 && g.a.C.gun === 1 && ge.indexOf(`clip ${g.a.id} r_gst`, gf) < 0 && g.a.C.clip === 'r_st_a',
-       `e027 #67 woken (gun bit ${g.a.C.gun}): flinch -> row 0x40, no r_gst after it (events ${ge.join(', ')})`);
+    ok(g.a.hp > 0 && gf >= 0 && ge[gf + 1] === `clip ${g.a.id} r_gst` && g.a.C.gun === 1 && g.a.C.clip === 'r_st_a',
+       `e027 #67 woken (gun bit ${g.a.C.gun}): flinch -> row 1 r_gst, then state 3 -> r_st_a (events ${ge.join(', ')})`);
     // an empty row (e030 has no 0x40): with the bit forced on, no 'clip <id> null' event and the clip is kept
     const e = run(7, 1, P);
     ok(!e.ev.some(x => x.endsWith(' null')) && e.a.C.clip === 'stld0', `e030 #7 bit forced on: row 0x40 empty -> no null clip event, keeps ${e.a.C.clip}`);
-    // the hit wakes #67 (actor state 3 sets the bit); held clear here: the clip after the flinch is row 1
+    // gun bit held clear: the clip after the flinch is row 1. #67 starts in its real state (2); the
+    // flinch's enter 0x5988b8 sets C+0x564 bit 0x8000 (busy), which holds the brain in state 1, so the
+    // wake's 2 -> 3 (motion 5) waits for the flinch's end.
     const n = run(45, 0, P0), ne = n.ev.filter(e => e.startsWith(`clip ${n.a.id} `)), nf = ne.lastIndexOf(`clip ${n.a.id} r_stlld0`);
-    // (the brain's state-3 request r_st_a lands while the flinch still runs; the flinch's end then asks row 1)
     const after = nf >= 0 && ne.indexOf(`clip ${n.a.id} r_gst`, nf) > nf;
     ok(n.a.hp > 0 && after, `e027 #67 gun held clear: flinch end asks row 1 r_gst (events ${ne.join(', ')})`);
+    // the flinch class's enter 0x5988b8 / leave 0x5988f0: C+0x564 0x8000|0x4000|0x10000 while the flinch
+    // runs (T: k_hits12 f870 #67 0x4001c000), cleared with C+0x1c0 bit 0x20 at its end; the brain sits in
+    // state 1 meanwhile and leaves it afterwards (re-runs state 0)
+    {
+      const B = 0x1c000, fl = n.bits.map(b => b.cls === 0x1e), i0 = fl.indexOf(true), i1 = fl.indexOf(false, i0);
+      const during = i0 >= 0 ? n.bits.slice(i0, i1 < 0 ? undefined : i1) : [];
+      const setAll = during.length > 0 && during.every(b => (b.f564 & B) === B);
+      const held = during.some(b => b.bstate === 1);
+      const after = i1 > i0 ? n.bits.slice(i1) : [];
+      const cleared = after.length > 0 && after.every(b => b.cls === 0x1e || (b.f564 & 0x8000) === 0) && (after[0].f564 & B) === 0 && !(after[0].f1c0 & 0x20);
+      const left1 = after.some(b => b.bstate !== 1);
+      ok(setAll && held && cleared && left1,
+         `e027 #67 flinch bits: set over ${during.length} ticks (0x${during.length ? during[0].f564.toString(16) : '?'}), brain held in 1 ${held}, ` +
+         `cleared at the end (0x${after.length ? after[0].f564.toString(16) : '?'}, 1c0 0x${after.length ? after[0].f1c0.toString(16) : '?'}), brain leaves 1 ${left1} (-> ${after.length ? after[after.length - 1].bstate : '?'})`);
+    }
   }
 }
 

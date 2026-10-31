@@ -287,3 +287,65 @@ it clear, the brain's state 3 sets it, death (7) clears it. FUN_0055f9d0's clear
 FUN_0055f338 kind 7: FUN_0056b4e0 from overlay code 0xbeb5d0.., event script FUN_005661e8, FUN_00570c10): left out.
 e030 (no row 0x40, never in state 3) goes back to row 1 = st_a. e030's C+0x568 0x200 (FUN_00564228) is read only by FUN_00341a48:
 C+0x1c0 |= 0x20000 when C+0x590 bits 16-19 < 2 (a body flag, not the flinch).
+
+## Mode 1, crouch, fire blend (worker 0149, 2026-10-31)
+
+**Dan's report 20261031T000852Z-9974** ("guard doesn't move or acknowledge Vincent"): the alley guard is
+**record 51** (e027, stance 0x1e m_*, weapon 7, script 142), 40 u north of Vincent. Trigger 56 activated
+50 / 51 in mode 0; trigger 90 (Vincent walking north up the alley) sends them message 2, and script 142
+sets #51 **AI mode 1** (#50: mode 2; the corpse at his feet is likely #50, shot). Mode 1 had an empty
+update on the page: a **port gap**, not the game. Trigger 76 (flags 0x20, event 0x12, condition not
+decoded) would also wake them; the page still never runs event 0x12.
+
+- **Brain mode 1** (class 0x4a2588: start FUN_003628f8, update FUN_00362998) translated: mode 2's
+  shooter plus a posture change in state 4 (stance flag C+0x808 bit 3; e027 / e048 0x872b): once 0x79
+  ticks have passed since the last change, each run draws FUN_0040b5c0; < 0.2 -> actor state 5 (crouch)
+  or 3 (stand), combat layer off, 0x1f ticks later combat on again. No target -> state 6 / 7 (mode 2's 5 / 6).
+  States 8 / 9 = the non-shooter attack (e030): warn, not translated.
+- **Actor state -> body motion** (FUN_0055b8e0: old state's class vt+0x24(new) -> FUN_005641c0): 3 -> 5
+  motion 0x18, 5 -> 3 motion 0x19, 2 -> 3 motion 5 (FUN_00538120 / FUN_005385f8 / FUN_00538340 ->
+  FUN_00537d58). Classes from the factory 0x5a6c28's compare tree (FUN_00592918 is not a Ghidra
+  function; walked from the ELF): 5 FUN_005945e8 (update FUN_005946a0), 6 FUN_00594898 (FUN_00594978),
+  0xf vt 0x5a6300 (FUN_00597c60), 0x16 FUN_00597108 (FUN_005971d8), 0x18 FUN_005977e8 (FUN_005978e8),
+  0x19 vt 0x5a5df0 (FUN_00597ae8). Update = vt+0x24, enter vt+0x14, leave vt+0x1c.
+- **Crouch** (actor state 5 enter FUN_00538598 -> FUN_00565bd0(a, 1)): stance 1, height +0x174 = 0.6 x
+  +0x170 (FUN_00563fc0). Clips m_sq_a / m_sq_f (rows 0x78 / 0x7b) now exported for e027 / e048.
+- **Fire clip** (Dan's point 2): the clips were right (row 0x57 = r_st_f / m_st_f) but the page cut
+  clips hard. New trace **k_fire_emp15** (engage8's inputs to f830, `TRACE_FIELDSET=enemy TRACE_ENEMIES=2
+  TRACE_EMP=1`: each enemy's MP head + layers): every request pushes a head layer, the old head blends
+  out over 11 clip ticks (+0x24: 9.8 -> 0 by 1.2) and only the head and blend-out layer advance. #66
+  pushes r_st_a (loop) f785, r_st_f (no loop, partner r_st_fd) f786, r_st_a (loop) f788: so r_st_f
+  plays as the blend-out layer at full weight, fading over ~9 frames (frame 1.8 -> 7.2). enemies.js now
+  does exactly that (head + blend-out, as Vincent's SpeedAnimator). test_enemy_ai checks both soldiers'
+  pushes (frame, clip, loop) against the trace; test_enemies_page step 7 checks #51's fade on the page.
+  **Missing:** the up / down partner rows (r_st_fu / r_st_fd, picked by the aim pitch C+0x680 in
+  FUN_00345818): not exported; the middle row plays.
+- **Melee** (Dan's point 3), decoded, **not ported**: the attack pick FUN_0035ff98 -> FUN_00347bd8 scans
+  the attack table C+0x7e8 (= zone header +0x34, FUN_00340760; +2 count, entries FUN_00347978, flags
+  +6, conditions FUN_00347af0 from FUN_003479c0) and starts actor state 0x80 + i (FUN_0055baa8). Gate
+  FUN_00310c40 = G+0x64 = 48 in the save (>= 0x18). Save RAM: e027 / e048 have 1 attack, e030 7.
+  Shooters (C+0x808 bit 0) never reach the pick in brain modes 1 / 2; modes 3 (FUN_00361690), 5
+  (FUN_003639d0 state 10) and 6 (FUN_00364558) call it without that check. Next: the 0x80+ actor state
+  classes (FUN_00537628) -> attack motions, hit window and damage to Vincent; mode 5 (most soldiers'
+  hit reaction, e.g. records 69 / 70 on wake) and mode 3 (e030s) are also untranslated, so those still
+  stand. Survey (scripts' 0x143 per wake n / hit): 13 records activate in mode 1, ~30 branches set
+  mode 1, ~40 mode 2, ~35 mode 5, ~32 mode 3 (mostly e030), 1 mode 6.
+
+## Review fixes (worker 0150, 2026-10-31)
+
+- **State -> motion tables** read from the ELF (FUN_00537628 classes' vt+0x24): states 0 / 1 use
+  FUN_00537aa0 (jump table 0x589e70: new 2 -> motion 3, 3 -> 6, 5 -> 0x16); 2 FUN_00537d58; 3 FUN_00538120;
+  5 FUN_005385f8. #66's 1 -> 3 = motion 6 (the old r_st_a GUESS is gone; k_fire_emp15 pushes still match).
+  FUN_005641c0's same-motion no-restart holds for every class when FUN_0055b8e0's param_3 is 0 (the brains);
+  activation passes 1 (old class = state 0's, always restarts).
+- **Activation** (FUN_00559748 plain placement): FUN_0055b8e0(a, 2, 1, 0) -> state 2, motion 3 (class 3 not
+  ported). The page's 44 / 45 start in the save's states 1 / 2 (play.js AWAKE_STATE, T engage8 f760), so #67's
+  wake is 2 -> 3 = motion 5 (r_st_a:0, then r_st_a:1 8 frames later, as the trace).
+- **Blend length** per request: FUN_00344608 uses C+0x591 (0 with C+0x564 bit 2); FUN_00340bb8 loads it
+  (motions 0x18 / 0x19: 10; 6 / 0x16 phase 0: C+0x6c0, default 10 from FUN_0033ff18). Flinch's 5 / none is a GUESS.
+- **Brain 1 states 8 / 9** translated around the attack pick (FUN_0035ff98 stand-in: none).
+- **Found:** the game's flinch sets C+0x564 0x8000 (busy; k_hits12 f870), which the page lacks. G+0x64: 48
+- **Ported (worker 0151):** flinch class 0x1e (vtable 0x5a5c70) enter 0x5988b8 = C+0x564 |= 0x8000|0x4000|0x10000; leave 0x5988f0 clears those and C+0x1c0 bit 0x20 (disassembled from the ELF). Effect on the page: a soldier woken from state 2 by a hit finishes the flinch (row 1, gun bit still clear) before the brain enters state 3. Death frame (k_hits12 f871) shows 0x4000c000: the death motion's enter sets 0x8000|0x4000 again (not read).
+  here vs '< 27' in stagger()'s comment.
+- No mode-1 trace exists (the tracer can't follow actors activated mid-run): the mode-1 timing test checks
+  the decoded waits (0x79 / 0x1f rounded up to the 5-tick brain run), not game frames.

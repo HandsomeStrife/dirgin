@@ -1,5 +1,5 @@
 // Enemy AI for z128's soldiers (e027, e048) and the e030s: wake by trigger volume + event script, and the awake
-// combat AI (brain mode 2, combat layer 2, fire timer, shot, bullet, damage to Vincent), and
+// combat AI (brain modes 1 / 2, combat layer 2, fire timer, shot, bullet, damage to Vincent), and
 // Vincent's bullets hitting them (pellets, spread, part boxes, damage, flinch / death; §13).
 // A direct translation of the game's functions (addresses cited per function); decode notes
 // notes/enemy-research.md §8 / §9, hook patch for play.js / enemies.js notes/enemy-ai-hook.md.
@@ -63,8 +63,11 @@ export const JITTER_ON = GAME.d46b2fc !== 0;   // FUN_00326500 = FUN_002424a0 = 
 const BULLET_R = 5.0;             // GUESS: hit radius around the player's aim point (part test vt+0x17c not decoded; = R_ACTOR)
 // Motion ids -> clip names: the actor's stance rows (C+0x7fc, ai.json stances; stance 0x1f: 0x40 = r_st_a,
 // 0x57 = r_st_f as traced, notes §9.7). MOTION = stance 0x1f's two rows, the fallback for an old ai.json.
-// GUESS for actor state 3 -> 0x40: the state table behind FUN_0055b8c0 vt+0x24 is not decoded.
+// Actor state -> body motion: setActorState / stateMotion (old state's class vt+0x24, ELF vtables; workers 0149 / 0150).
 export const MOTION = { 0x40: 'r_st_a', 0x57: 'r_st_f' };
+// FUN_00310c40 = G+0x64 (game progress; save RAM 48, worker 0149 notes/enemy-ai-hook.md). GUESS: the
+// stagger comment (stagger()) reads it as < 27 in this save; the two reads disagree.
+const G64 = 48;
 const STANCE_1F_FLAGS = 0x872b;   // C+0x808 of stance 0x1f (trace k_enemy_engage8), for an old ai.json
 // The page's save state: FUN_00242c28() = 1 (worker 0125, notes §9.11); event flags = evt_flags XOR
 // evt_key in k_enemy_engage7: only flag 2 = 7 and flag 46 = 1 (notes/enemy-activation.md §1)
@@ -321,7 +324,8 @@ export function createEnemyAI(opts) {
   // FUN_00563fc0: radius / height from the zone header of the record's set (ai.json sizes)
   function sizeOf(rec) {
     const z = data.sizes && rec.zones >= 0 ? data.sizes[rec.zones] : null;
-    return z ? { r: z.r, h: z.h } : { r: R_ACTOR, h: EYE_H };
+    // h0 = +0x170 (standing); h = +0x30, which FUN_00565bd0 switches to +0x174 = 0.6 x h0 when crouched
+    return z ? { r: z.r, h: z.h, h0: z.h } : { r: R_ACTOR, h: EYE_H, h0: EYE_H };
   }
   // the per-type dispatch: does an activation of this record build an AI actor here (AI_TYPES; an old
   // ai.json without stances: e027 only, as before)
@@ -351,7 +355,9 @@ export function createEnemyAI(opts) {
       // body C (+0x300 mover mode and its slide; C+0x1c0 move flags)
       // C+0x664 stance / C+0x808 flags / C+0x7fc rows: FUN_00564228 -> FUN_00340ac0 at activation
       C: { f564: init.f564 ?? 0, speed: 0, s214: 0, aim: null, t2b0: null, motion: null, clip: null,
-           f1c0: C1C0_STAND, mover: 0, slide: null, hold: false, gun: 0, ...stanceOf(rec) },
+           f1c0: C1C0_STAND, mover: 0, slide: null, hold: false, gun: 0, req: 0, loop: true,
+           b591: 10, b6c0: 10, blendLen: 10,         // C+0x591 / C+0x6c0 = 10 (FUN_0033ff18); blendLen: C+0x591 at the last request
+           ...stanceOf(rec) },
       model: rec.model,
       size: sizeOf(rec),                         // actor +0x2c / +0x30 (FUN_00563fc0)
       ai: null,
@@ -367,6 +373,12 @@ export function createEnemyAI(opts) {
     // soldiers; which motion FUN_0055b8e0(a, 2) plays is not decoded)
     a.C.clip = init.clip || clipOf(a, 0) || 'r_gst';
     a.C.t2b0 = a.pos.map((x, i) => f(x + a.face[i]));                           // FUN_0034b4c8: C+0x2b0 = facing + position (no turn)
+    // Activation (no astate given): FUN_00559748 -> FUN_0055b8e0(a, 2, 1, 0) for a plain placement:
+    // state 2 (enter FUN_00537e70: gun bit clear), body motion 3 (state 0's table, FUN_00537aa0).
+    // L: the other branches (+0x28 bit 1 with +0x104 set -> that state; a linked object +0xbc -> its
+    // +0x60 byte; C+0x664 0x2a-0x2b / 0x2d or +0x118 bit 16 -> 3) need bits not exported. Motion
+    // class 3 is not ported (no update). The save's soldiers (play.js AWAKE) pass their traced state.
+    if (init.astate === undefined) setActorState(a, 2, 1);
     objects.set(a.id, a);
     actors.push(a);
     queueInsert(a.ai);
@@ -475,9 +487,8 @@ export function createEnemyAI(opts) {
       if (mode === 8) { mode = 0; warnOnce('enemy_ai: activation mode 8 (FUN_0035f2e0) not translated'); }
       let a = null;
       if (buildsActor(rec)) {
-        // L: FUN_0055b8e0(a, 2, 1, 0) = actor state 2 for a plain placement (+0x28 bits 2 / 5 / 1 and
-        // +0x118 bit 16 clear, C+0x664 <= 0x29; those bits are not exported)
-        a = addActor({ rec: t.rec, mode, astate: 2 });
+        // FUN_0055b8e0(a, 2, 1, 0): actor state 2 for a plain placement (addActor without astate)
+        a = addActor({ rec: t.rec, mode });
       } else {
         // other models: no AI actor (AI_TYPES); marked active only, enemies.js draws them idle
         t.flags28 |= 1;
@@ -595,18 +606,56 @@ export function createEnemyAI(opts) {
   }
 
   // ------------------------------------------------ actor state FUN_0055b8e0 + motion requests
-  function setActorState(a, st) {
+  // FUN_0055b8e0(a, st, act, 0). act = param_3: 1 at activation (the old class is state 0's,
+  // FUN_00537a58(0); the enter runs even in the same state; FUN_005641c0 always restarts the motion).
+  function setActorState(a, st, act = 0) {
     if (st >= 0x100) st = 2;
-    if (a.astate === st) return 0;
+    if (a.astate === st && !act) return 0;
+    // the old state's class vt+0x24(new) gives the body's motion state, applied after the enter
+    // (FUN_005641c0 -> FUN_00341780; none if 0)
+    const mot = stateMotion(act ? 0 : a.astate, st);
     a.astate = st;
-    if (st === 3) request(a, 0x40);              // GUESS: state 3 -> motion 0x40 (r_st_a), see MOTION
     gunOnEnter(a, st);
+    postureOnEnter(a, st);
+    if (mot) motionOfState(a, mot, act);
     if (st === 7) {                              // the death motion (class 0x36); its motion: GUESS deathMotion
-      a.C.motion = { cls: 0x36, t: 0 };
-      a.C.clip = clipOf(a, deathMotion(a.part)) || a.C.clip; a.C.hold = true;
-      events.push(`clip ${a.id} ${a.C.clip}`);
+      setMotion(a, 0x36);
+      // GUESS (flags): the death clip holds its last frame (0x82, notes §10.5: r_stlaf0 held)
+      playClip(a, clipOf(a, deathMotion(a.part)) || a.C.clip, 0x82); a.C.hold = true;
     }
     return 1;
+  }
+  // State class vt+0x24 (vtables of FUN_00537628's classes, read from the ELF: state 0 0x58aec0 /
+  // 1 0x58ae90 -> FUN_00537cc0 / FUN_00537d38 = FUN_00537aa0; 2 0x58ae60 -> FUN_00537d58; 3 0x58ae30
+  // -> FUN_00538120; 5 0x58ad70 -> FUN_005385f8). Standing (C+0x1d8 == 0) rows only, as the page's
+  // soldiers; moving gives 8 / 9 / 0x13 / 0x17 instead (not on the page).
+  //   FUN_00537aa0 (jump table 0x589e70): 2 -> 3, 3 -> 6, 5 -> 0x16
+  //   FUN_00537d58: 3 -> 5, 4 -> 0x14, 5 -> 0x18, 7 -> 0xb, other -> FUN_00537aa0
+  //   FUN_00538120: 2 -> 3, 3 -> 0, 4 -> 0x14, 5 -> 0x18, other -> FUN_00537d58
+  //   FUN_005385f8: 2 -> 0x15, 3 -> 0x19, 4 -> 0x12, 5 -> 0, other -> FUN_00538420 (not read)
+  // T: k_fire_emp15 #66 1 -> 3 = motion 6 (r_st_a looped f785), #67 2 -> 3 = motion 5 (f796).
+  // Death (7): the page plays motion 0x36 (above); 2's 7 -> 0xb is not used (GUESS, notes §10.5).
+  function stateMotion(from, st) {
+    const base = { 2: 3, 3: 6, 5: 0x16 };                                     // FUN_00537aa0
+    const d58 = { 3: 5, 4: 0x14, 5: 0x18 };                                   // FUN_00537d58
+    if (st === 7) return 0;
+    let m;
+    if (from === 0 || from === 1) m = base[st];
+    else if (from === 2) m = d58[st] ?? base[st];
+    else if (from === 3) m = st === 3 ? 0 : ({ 2: 3, 4: 0x14, 5: 0x18 })[st] ?? d58[st] ?? base[st];
+    else if (from === 5) m = ({ 2: 0x15, 3: 0x19, 4: 0x12, 5: 0 })[st];
+    if (m === undefined) {
+      // GUESS: the class's row for this pair is not read (other old states, FUN_00538420, base
+      // jump-table entries other than 2 / 3 / 5): the motion is left as it is
+      warnOnce(`enemy_ai: actor state 0x${from.toString(16)} -> 0x${st.toString(16)} body motion not read; motion kept`);
+      return 0;
+    }
+    return m;
+  }
+  // FUN_005641c0(a, n, act): the same motion as now -> no restart unless act (any class)
+  function motionOfState(a, cls, act) {
+    if (!act && a.C.motion && a.C.motion.cls === cls) return;
+    setMotion(a, cls);
   }
   // C+0x590 bit 24 ('gun out'; read by the flinch's end, class 0x1e FUN_00598950, and FUN_00341b20):
   // FUN_0055b8e0 runs the new state's enter, actor vt+0x2fc FUN_0055bbf8 -> state class vt+0xc (classes
@@ -629,24 +678,89 @@ export function createEnemyAI(opts) {
       default: warnOnce(`enemy_ai: actor state 0x${st.toString(16)} enter's C+0x590 bit 24 write not translated`);
     }
   }
-  function request(a, m) {                       // FUN_00345818 (clip change only; blend flags 0x82 / 0x83 not modelled)
+  // FUN_00345818 / FUN_003456c0: a motion request pushes a new head layer on the motion player
+  // (MP+0x448), the old head becomes the blend-out layer, and the new one blends in over C+0x591 + 1
+  // (T: k_fire_emp15, MP layers of #66 / #67). flags bit 0 = the layer loops (0x83; 0x82 holds n - 1;
+  // FUN_003456c0's -1 = FUN_00344608's default, L: 0x82). The page (enemies.js) plays C.req / C.loop.
+  // The up / down partner rows (m + 1 / m + 2, by the aim pitch C+0x680) are not exported: GUESS, the
+  // middle row only.
+  function request(a, m, flags = 0x82) {
     const name = clipOf(a, m);                   // the stance row C+0x7fc + m x 8
     // an empty row: no clip to play; the body keeps its clip (what FUN_00345818 does with it is not read)
     if (!name) { warnOnce(`enemy_ai: ${a.model} stance 0x${a.C.st664.toString(16)} has no motion 0x${m.toString(16)}; clip kept`); return; }
-    if (a.C.clip !== name) a.C.clip = name;
+    playClip(a, name, flags);
+  }
+  function playClip(a, name, flags) {
+    const C = a.C;
+    // FUN_00344608 (bit 0x400 clear: FUN_003456c0 passes 0): the new layer's blend = C+0x591, 0 with
+    // C+0x564 bit 2 (FUN_00340bb8(C, 0, ..)); bit 0x20000000 -> FUN_00312678 (not translated; never set here)
+    if (C.f564 & 0x20000000) warnOnce('enemy_ai: C+0x564 bit 0x20000000 blend (FUN_00312678) not translated');
+    C.blendLen = C.f564 & 2 ? 0 : C.b591;
+    C.clip = name; C.loop = !!(flags & 1); C.req = (C.req | 0) + 1;
     events.push(`clip ${a.id} ${name}`);
+  }
+  // FUN_00340bb8(C, on, n): on 0 -> C+0x564 |= 2 (the next requests don't blend); on 1 -> clear bit 2
+  // and C+0x591 = n, or for n < 0 C+0x591 = C+0x6c0 (bit 2 set instead when C+0x6c0 is 0)
+  function blendSet(a, on, n) {
+    const C = a.C;
+    if (!on || (n < 0 && !C.b6c0)) { C.f564 |= 2; return; }
+    C.b591 = n < 0 ? C.b6c0 : n & 0xff;
+    C.f564 &= ~2;
+  }
+  // FUN_00565bd0(actor, n) from the enters of state 3 (FUN_005380a0: n 0) and 5 (FUN_00538598: n 1):
+  // actor +0x100 bits 40-41 = n, height +0x30 = +0x170 (n 0) / +0x174 = 0.6 x +0x170 (n 1, FUN_00563fc0).
+  // Not modelled: the body posture C+0x590 (FUN_003419e0) and FUN_0034b978 (speeds; the soldiers stand).
+  function postureOnEnter(a, st) {
+    if (st !== 3 && st !== 5) return;
+    a.stance = st === 5 ? 1 : 0;
+    a.size.h = st === 5 ? f(a.size.h0 * f(0.6)) : a.size.h0;
+  }
+  // FUN_00341780(C, n): the body's motion state. Leave / enter of the crouch transitions 0x18
+  // (FUN_00597888 / FUN_00597828) and 0x19 (FUN_00597a88 / FUN_00597a28) clear / set C+0x564 bit
+  // 0x4000 (a shot meanwhile spawns no bullet, FUN_003605d8). +0x74 = the shot class FUN_00341b78
+  // starts from it: 0x18 / 0x16 -> 0xf (FUN_005977e8 / FUN_00597108), 6 -> 0xe (FUN_00594898), else 0.
+  // Motion 5 (raise the gun, FUN_005945e8: +0x74 0xe) does the same (enter 0x594628 sets, leave
+  // FUN_00594640 clears; T: k_fire_emp15 #67 C+0x564 0x40004000 f796-803).
+  const NEXT74 = { 0x18: 0xf, 0x16: 0xf, 6: 0xe, 5: 0xe };
+  const BIT4000 = cls => cls === 0x18 || cls === 0x19 || cls === 5;
+  // MISSING: FUN_00341780's other effects: C+0x79c &= ~0xc0, C+0x564 bit 0x20 cleared, FUN_00346650(C, 0),
+  // FUN_00345678(C), C+0x5f2 = 0, the old motion's +0x70 carried to the new one's +0 (none read here).
+  // Motion classes not ported (3, 0x15, 0x12, 0x14, 0xb, ...) are kept as a class with no update.
+  // The flinch class 0x1e (vtable 0x5a5c70; not Ghidra functions, disassembled from the ELF): enter
+  // 0x5988b8 sets C+0x564 bits 0x8000 (busy, FUN_0055ab08), 0x4000 (no bullet, FUN_003605d8) and
+  // 0x10000; leave 0x5988f0 clears them and C+0x1c0 bit 0x20 (T: 0x4001c000 while flinching).
+  const FLINCH_BITS = 0x8000 | 0x4000 | 0x10000;
+  function motionLeave(a, old) {                                              // old class vt+0x1c
+    const C = a.C;
+    if (BIT4000(old.cls)) C.f564 &= ~0x4000;
+    if (old.cls === 0x1e) { C.f564 &= ~FLINCH_BITS; C.f1c0 &= ~0x20; }        // 0x5988f0
+  }
+  function setMotion(a, cls) {
+    const C = a.C, old = C.motion;
+    if (old) motionLeave(a, old);
+    C.motion = { cls, phase: 0, timer: 0, done: 0, t: 0, next74: NEXT74[cls] || 0 };
+    if (BIT4000(cls)) C.f564 |= 0x4000;
+    if (cls === 0x1e) C.f564 |= FLINCH_BITS;                                  // 0x5988b8
+  }
+  // The motion ends with no next class (the page's stand-in for FUN_00341b20's next state, see the
+  // flinch in bodyUpdate): the old class's leave still runs, as FUN_00341780 runs it on a change.
+  function endMotion(a) {
+    if (a.C.motion) motionLeave(a, a.C.motion);
+    a.C.motion = null;
   }
 
   // ------------------------------------------------ brain / layers
-  // FUN_0035f268 -> FUN_0035f300(mode): new brain object. Mode 2 = class 0x4a2608 (FUN_00362e58);
+  // FUN_0035f268 -> FUN_0035f300(mode): new brain object. Mode 1 = class 0x4a2588 (FUN_00362868: start
+  // vt+0x14 FUN_003628f8, update vt+0x1c FUN_00362998); mode 2 = class 0x4a2608 (FUN_00362e58);
   // mode 0 / other = class 0x4a2430 (update FUN_003614b0 is empty).
   function setMode(ai, mode) {
     ai.brain = { mode };
-    if (mode !== 0 && mode !== 2) warnOnce(`enemy_ai: brain mode ${mode} not translated (empty update)`);
+    if (mode !== 0 && mode !== 1 && mode !== 2) warnOnce(`enemy_ai: brain mode ${mode} not translated (empty update)`);
     ai.mode = mode;
     ai.flags &= ~0x100;
     if (ai.owner) {
       if (mode === 2) ai.interval = 5;           // start FUN_00362ee8
+      else if (mode === 1) start1(ai);
       else if (mode === 0) { setActionLayer(ai, 0); setCombatLayer(ai, 0); }   // start FUN_00361440
       ai.flags |= 0x100;
     }
@@ -698,6 +812,90 @@ export function createEnemyAI(opts) {
       default: return;
     }
     ai.bstate = 0;
+  }
+
+  // Mode 1 start FUN_003628f8: interval 5, no action layer; unless busy: stop (FUN_0055a828: standing,
+  // nothing to stop), turn mode 6, actor state 5 if crouched (actor +0x100 bits 40-41 == 1) else 3.
+  function start1(ai) {
+    const a = ai.owner;
+    ai.interval = 5;
+    setActionLayer(ai, 0);
+    if (busy(a)) return;
+    a.C.s214 = 6;                                                             // FUN_0034e960(C, 6)
+    setActorState(a, (a.stance & 3) === 1 ? 5 : 3);
+  }
+
+  // Mode 1 brain FUN_00362998: mode 2's shooter (FUN_00362ef8) with a posture change. In state 4, with
+  // stance flag C+0x808 bit 3 (e027 / e048 0x872b), every run once 0x79 ticks have passed since the
+  // last change: one FUN_0040b5c0 draw, < 0.2 -> actor state 5 (crouch) when standing, 3 (stand) when
+  // crouched, combat layer off, state 5; 0x1f ticks later -> 3 (combat layer 2 again). No target -> 6.
+  function brain1(ai) {
+    const a = ai.owner;
+    if (ai.bstate !== 1 && busy(a)) ai.bstate = 1;
+    if (attacking(a)) return;
+    if (!target(ai)) ai.bstate = 6;
+    const crouched = () => (a.stance & 3) === 1;
+    switch (ai.bstate) {
+      case 0:
+        setActorState(a, crouched() ? 5 : 3);
+        // FUN_0055a828: stop (FUN_003533e0); standing, nothing to stop
+        setActionLayer(ai, 0);
+        a.C.s214 = 6;
+        if (!target(ai)) { ai.btime = short(S.now); a.C.s214 = 6; ai.bstate = 2; return; }
+        if (!(a.C.f808 & 1)) { ai.bstate = 8; return; }                       // non-shooter (e030)
+        ai.bstate = 3; return;
+      case 1: if (busy(a)) return; break;
+      case 2: if (bTime(ai) < 0x1f) return; ai.btime = short(S.now); break;
+      case 3:
+        setCombatLayer(ai, 2); ai.bstate = 4; ai.btime = short(S.now);
+      // fall through
+      case 4:
+        if (ai.flags & 0x40) {
+          // FUN_0035fe80 / FUN_0035fec0 (target re-pick -> state 3): AI bit 0x40 is never set on the page
+          warnOnce('enemy_ai: mode 1 state 4 with AI bit 0x40 (FUN_0035fe80) not translated');
+        }
+        if (!(a.C.f808 & 8)) return;
+        if (bTime(ai) < 0x79) return;
+        if (!(rng() < 0.2)) return;                                           // FUN_0040b5c0
+        setActorState(a, crouched() ? 3 : 5);
+        ai.btime = short(S.now);
+        setCombatLayer(ai, 0);
+        ai.bstate = 5;
+        return;
+      case 5: if (bTime(ai) < 0x1f) return; ai.bstate = 3; return;
+      case 6:
+        if (!(ai.flags & 0x40)) setActorState(a, 3);
+        else warnOnce('enemy_ai: brain 1 state 6 with AI bit 0x40 (motions 0xb6 / 2) not translated');
+        a.C.s214 = 6; ai.bstate = 7;
+      // fall through
+      case 7: if (!target(ai)) return; break;
+      case 8: {
+        // no target, or the target dead (FUN_0035edc0 -> FUN_0055a370 -> FUN_00316d08) -> state 0
+        const t = target(ai);
+        if (!t || deadFinal(t)) break;
+        if (G64 < 0x18) return;                                               // FUN_00310c40
+        if (bTime(ai) < 0x3d) return;
+        if (Math.trunc(f(rng() * 11.0)) !== 0) return;                        // FUN_0040b5c0
+        const i = attackPick(a);                                              // FUN_0035ff98
+        if (i < 0) return;
+        // FUN_00353418(C) (stop), FUN_0035f9a0(ai, 0), FUN_0055baa8(a, i, 0): the attack actor state
+        setCombatLayer(ai, 0);
+        warnOnce(`enemy_ai: attack actor state 0x${i.toString(16)} (FUN_0055baa8) not translated`);
+        ai.bstate = 9;
+        return;
+      }
+      case 9:
+        if (!attacking(a)) { ai.s20 = 6; a.C.s214 = 6; ai.bstate = 8; ai.btime = short(S.now); }   // AI +0x20 = 6 (reader not read)
+        return;
+      default: return;
+    }
+    ai.bstate = 0;
+  }
+  // MISSING: FUN_0035ff98, the attack pick (FUN_00347bd8 over the attack table C+0x7e8; decoded in
+  // notes/enemy-ai-hook.md, not ported, nor the attack states 0x80+). Stand-in: no attack (-1).
+  function attackPick(a) {
+    warnOnce(`enemy_ai: attack pick FUN_0035ff98 not translated (${a.model}): no attack`);
+    return -1;
   }
 
   function combat2(ai) {                                                      // FUN_00360e50
@@ -841,8 +1039,8 @@ export function createEnemyAI(opts) {
   function standShot(a, aim) {
     setAim(a, aim);
     const m = a.C.motion;
-    if (!m) a.C.motion = { cls: 0xe, phase: 0, timer: 0, done: 0 };
-    else if (m.next74) a.C.motion = { cls: m.next74, phase: 0, timer: 0, done: 0 };
+    if (!m) setMotion(a, 0xe);
+    else if (m.next74) setMotion(a, m.next74);
   }
 
   // body update: motion state class 0xe, FUN_00596460 (called with the frame step)
@@ -865,25 +1063,72 @@ export function createEnemyAI(opts) {
       if (m.cls === 0x1e) m.timer = f((m.timer ?? 0) + step);
       if ((n != null && n <= m.t) || (m.cls === 0x1e && m.timer > 120.0)) {
         if (m.cls === 0x36) { if (!m.done) { m.done = 1; a.f118 |= 0x100; events.push(`settled ${a.id}`); } }
-        else { a.C.motion = null; request(a, a.C.gun ? 0x40 : 0x01); }
+        else { endMotion(a); request(a, a.C.gun ? 0x40 : 0x01, 0x83); }
       }
       return;
     }
-    if (m.cls === 6) {
-      // GUESS: motion state 6 (what class 0xe returns into) is not decoded: on its first update it
-      // requests r_st_a and stays; its +0x74 = 0xe so the next shot starts class 0xe again.
-      // This request alone puts r_st_a at f788 (two frames after r_st_f, trace k_enemy_engage8).
-      if (!m.started) { m.started = true; request(a, 0x40); }
+    if (m.cls === 6 || m.cls === 0x16) {
+      // Motion state 6 (stand, aim: FUN_00594978) / 0x16 (crouched: FUN_005971d8): standing still on the
+      // ground they request their aim rows (6: 0x40-0x42, 0x16: 0x78-0x7a, flags 0x83) only when the
+      // partner pick C+0x590 bits 25-26 differs from bits 27-28 or FUN_00349db8(C, 3) && (C, 4); moving
+      // -> 9 / 0x17 (not on the page). GUESS: those conditions are not decoded; on its first update the
+      // class requests its row and stays (6: puts r_st_a at f788, two frames after r_st_f, trace
+      // k_enemy_engage8 / k_fire_emp15). Their +0x74 (0xe / 0xf) starts the next shot.
+      // Phase 0: FUN_00340bb8(C, 1, -1) (C+0x591 = C+0x6c0), or 0x10 / 0x14 by C+0x664 when the motion
+      // came from 0x1c (not on the page).
+      if (!m.started) { m.started = true; blendSet(a, 1, -1); request(a, m.cls === 6 ? 0x40 : 0x78, 0x83); }
       return;
     }
-    if (m.cls !== 0xe) return;
+    if (m.cls === 5) {
+      // FUN_005946a0 (raise the gun), phase +4, timer +0xc:
+      // 0: timer 0; with a row 0x41 (up partner): C+0x564 bit 0x20000000 ? motions 0x40-0x42 flags 0x83
+      //    : motion 0x40 flags -1 (no loop: T k_fire_emp15 #67 f796 lflags 6); no row 0x41: row 0x8a ->
+      //    motion 0x8a (-> 1), else motion 0x40 (-1); -> 2.
+      // 2: timer > 8 -> done bit, returns 6 (T: #67 r_st_a looped from f804); moving -> 9 (not here).
+      // 1: timer > 30 or the motion done (FUN_003460d8, GUESS false) -> 6.
+      if (m.phase === 0) {
+        m.timer = 0;
+        if (clipOf(a, 0x41)) {
+          if (a.C.f564 & 0x20000000) request(a, 0x40, 0x83); else request(a, 0x40, 0x82);
+          m.phase = 2;
+        } else if (clipOf(a, 0x8a)) { request(a, 0x8a, 0x82); m.phase = 1; }
+        else { request(a, 0x40, 0x82); m.phase = 2; }
+        m.timer = f(m.timer + step);
+        return;
+      }
+      if (m.phase === 2 ? m.timer > 8.0 : m.timer > 30.0) { m.done |= 1; setMotion(a, 6); return; }
+      m.timer = f(m.timer + step);
+      return;
+    }
+    if (m.cls === 0x18 || m.cls === 0x19) {
+      // FUN_005978e8 (0x18, crouch down) / FUN_00597ae8 (0x19, stand up), phase +4, timer +0xc:
+      // 0: timer 0, blend C+0x591 = 10 (FUN_00340bb8(C, 1, 10)), sound cue 0x42 / 0x43 (FUN_00341330,
+      // not on the page), motion 0x78-0x7a / 0x40-0x42 (flags 0x83) -> 1, then at once:
+      // 1: off the ground: done bit (stays). Else timer > 20, or timer >= 10 and the motion is done
+      // (FUN_003460d8) -> done bit, returns 0x16 / 6; moving (C+0x1d8 > 0) -> 0x17 / 9 (not on the page).
+      // GUESS: FUN_003460d8 is not decoded (notes §9.7); taken as false here, so they end at timer > 20.
+      if (m.phase === 0) {
+        m.timer = 0;
+        blendSet(a, 1, 10);
+        request(a, m.cls === 0x18 ? 0x78 : 0x40, 0x83);
+        m.phase = 1;
+      }
+      if (!(a.C.f1c0 & 0x200)) { m.done |= 1; m.timer = f(m.timer + step); return; }
+      if (m.timer > 20.0) { m.done |= 1; setMotion(a, m.cls === 0x18 ? 0x16 : 6); return; }
+      m.timer = f(m.timer + step);
+      return;
+    }
+    if (m.cls !== 0xe && m.cls !== 0xf) return;
+    // 0xe = standing shot FUN_00596460 (motions 0x57-0x59, returns 6); 0xf = crouched shot FUN_00597c60
+    // (motions 0x7b-0x7d, returns 0x16): the same phases.
+    const crouch = m.cls === 0xf;
     if (m.phase === 2) {
-      // The game: when the motion ends (FUN_003460d8) or timer > 30, request motions 0x40-0x42
-      // (r_st_a), set the done bit, return 6. GUESS: FUN_003460d8 (FUN_005a9860 -> FUN_005aa200)
+      // The game: when the motion ends (FUN_003460d8) or timer > 30, request motions 0x40-0x42 / 0x78-0x7a
+      // (flags 0x83), set the done bit, return 6 / 0x16. GUESS: FUN_003460d8 (FUN_005a9860 -> FUN_005aa200)
       // is not decoded (two attempts) and no clip frame is kept here, so phase 2 ends on its
       // first update without the request (a request here would put r_st_a at f787, one frame early).
       m.done |= 1;
-      a.C.motion = { cls: 6, next74: 0xe };                                   // returns 6 (GUESS: return value = next motion state)
+      setMotion(a, crouch ? 0x16 : 6);                                       // returns 6 / 0x16 (GUESS: return value = next motion state)
       return;
     }
     if (m.phase === 0) {
@@ -893,7 +1138,7 @@ export function createEnemyAI(opts) {
     if (m.phase === 1) {
       // muzzle FUN_00341ec8 (marker 15): GUESS = eye point (no skeleton markers in this module)
       spawnShot(a, a.C.aim, eye(a));                                          // FUN_00341988 -> slot 0x56a11c -> FUN_00569340
-      request(a, 0x57);
+      request(a, crouch ? 0x7b : 0x57, 0x82);
       m.timer = 0;
       m.phase = 2;
     }
@@ -1248,9 +1493,11 @@ export function createEnemyAI(opts) {
     if (Math.trunc(r * 2) === 0 ? el < 12 : el < 6) { a.f144 = S.frame - 6; return 0; }
     const st = (a.stance ?? 0) & 3;
     if (st !== 0) { warnOnce(`enemy_ai: flinch stance ${st} (motion 0x1f / actor state 0x11) not translated`); return 0; }
-    a.C.motion = { cls: 0x1e, t: 0 };
-    a.C.clip = clipOf(a, FLINCH_MOTION) || a.C.clip; a.C.hold = false;
-    events.push(`clip ${a.id} ${a.C.clip}`);
+    setMotion(a, 0x1e);
+    playClip(a, clipOf(a, FLINCH_MOTION) || a.C.clip, 0x82); a.C.hold = false;   // FUN_00598950 phase 0: flags -1
+    // GUESS (blend): FUN_00598950 phase 0 sets the blend to 5 (FUN_00340bb8(C, 1, 5)) or none
+    // (FUN_00340bb8(C, 0, -1)) by motion +0 == +0x70 (not decoded), then restores C+0x6c0 after the
+    // request; the page keeps C+0x591 as it is (10)
     a.f144 = S.frame;
     return 1;
   }
@@ -1298,6 +1545,7 @@ export function createEnemyAI(opts) {
     perception(ai);
     if (ai.brain && !(ai.flags & 0x10)) {                                     // owner vt+0x26c (actor+0x180) assumed set
       if (ai.brain.mode === 2) brain2(ai);                                    // vt+0x1c
+      else if (ai.brain.mode === 1) brain1(ai);
       if (ai.combat) combat2(ai);                                             // action layer (+0xe4): none in mode 2
     }
     ai.last = S.now;
